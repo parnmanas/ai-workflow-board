@@ -242,7 +242,7 @@ test('편집 화면에서 runtime 2개를 선언해 저장하면 target_runtimes
     const hostSelect = () => selects().find((s) => [...s.options].some((o) => o.value === 'host-1'));
     const cliSelect = () => selects().find((s) => [...s.options].some((o) => o.value === 'claude'));
     const dirInput = () => [...container.querySelectorAll('input')].find((i) =>
-      i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+      i.type === 'text' && i.placeholder && i.placeholder.includes('/path/to/repo'));
     for (const dir of ['/wt/a', '/wt/b']) {
       assert.ok(hostSelect(), 'Host 셀렉트가 없다');
       assert.ok(cliSelect(), 'CLI 셀렉트가 없다');

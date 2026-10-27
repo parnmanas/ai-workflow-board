@@ -1,3 +1,4 @@
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import React, { useEffect, useRef, useState } from 'react';
@@ -19,6 +20,7 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
   useLocale();
   const { hasPermission, currentAccountId } = useAuth();
   const hostNames = useHostNames();
+  const { hosts, loading: hostsLoading, error: hostsError } = useRuntimeHosts();
   const [input, setInput] = useState<MailConnectionInput>(row || { name: '', provider: 'smtp_imap', company_id: null, purpose: 'operations', credential_id: '', enabled: true, interval_minutes: 5,
     config: { addresses: [], imap: { host: '', port: 993, tls: 'implicit', username: '', folder: 'INBOX' }, smtp: { host: '', port: 587, tls: 'starttls', username: '' } } });
   const [addresses, setAddresses] = useState(row?.config.addresses.join(', ') || '');
@@ -98,7 +100,7 @@ export function BusinessMailConnectionForm({ row, catalog, companies, onClose, o
           <Textarea label={translate('업무 목적 · 답장 기준')} aria-label={translate('업무 목적 · 답장 기준')} rows={4} maxLength={8000} value={automation.objective} placeholder={translate('예: 제품 사용 문의에 한국어로 간단히 답장. 환불·계약·금액 약속은 사람에게 확인 요청.')} onChange={e => setAutomation({ objective: e.target.value })} />
           <p>{translate('담당 에이전트:')} {isRuntimeSpecComplete(runtimeDraft) ? assigneeDisplayName(runtimeDraft, hostNames) : translate('지정 안 함')}</p>
           <RuntimeSpecEditor key={runtimeAccount} accountId={runtimeAccount} value={runtimeDraft} onChange={setRuntimeDraft}
-            hosts={Object.entries(hostNames).map(([id, name]) => ({ id, name }))} disabled={busy} />
+            hosts={hosts} hostsLoading={hostsLoading} hostsError={hostsError} disabled={busy} />
           <Select label={translate('자동 답장 발신 주소')} value={automation.from || ''} options={[{ value: '', label: translate('연결의 첫 번째 주소') }, ...addresses.split(/[,\n]/).map(a => a.trim()).filter(Boolean).map(a => ({ value: a, label: a }))]} onChange={e => setAutomation({ from: e.target.value || undefined })} />
           <Input label={translate('하루 최대 답장 처리 수')} type="number" min={1} max={100} value={automation.max_replies_per_day} onChange={e => setAutomation({ max_replies_per_day: Number(e.target.value) })} />
           <p className="business-muted">{translate('저장 후 새로 수집하는 메일부터 적용합니다. 과거 메일은 ‘답장 작성 요청’으로 처리할 수 있습니다. 자동 모드에서도 판단이 어려운 답장은 승인 대기로 남깁니다.')}</p>

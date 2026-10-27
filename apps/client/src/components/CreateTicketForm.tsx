@@ -1,3 +1,4 @@
+import { useRuntimeHosts } from '../runtime/useRuntimeHosts';
 import { t as translate, getLocale } from '../i18n/core';
 import { useLocale } from '../i18n/react';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -7,7 +8,7 @@ import type { TicketCreateInput } from '../api';
 import type { Project, RepoBranch, TicketTagCount } from '../types';
 import { Button, Input, Modal, Select } from './common';
 import { TagInput } from './common/TagInput';
-import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type RuntimeSpecDraft } from './runtime/RuntimeSpecEditor';
+import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeSpecDraft } from './runtime/RuntimeSpecEditor';
 import { isRuntimeSpecComplete } from '../runtime/runtimeSpec';
 import { applyProjectFolder, prefillAssigneeForProject } from '../projects/projectFolders';
 import { mergeTagSuggestions } from '../tickets/tagInput';
@@ -81,7 +82,7 @@ export default function CreateTicketForm({
   // The user changed the assignee by hand — a project switch must not
   // overwrite it with the project's default any more.
   const [assigneeTouched, setAssigneeTouched] = useState(false);
-  const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
+  const { hosts, loading: hostsLoading, error: hostError } = useRuntimeHosts(isOpen, accountId);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<{ title?: string; description?: string; assignee?: string }>({});
 
@@ -107,14 +108,6 @@ export default function CreateTicketForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    api.listTemplateHosts()
-      .then((rows) => { if (!cancelled) setHosts((rows || []).map((h) => ({ id: h.id, name: h.name || h.id.slice(0, 8) }))); })
-      .catch(() => { if (!cancelled) setHosts([]); });
-    return () => { cancelled = true; };
-  }, [isOpen]);
 
   // Branches of the selected project (base branch picker).
   useEffect(() => {
@@ -327,7 +320,7 @@ export default function CreateTicketForm({
           )}
           {assigneeOn && (
             <div style={{ marginTop: 10 }}>
-              <RuntimeSpecEditor value={assignee} onChange={handleAssigneeChange} hosts={hosts} accountId={accountId} disabled={submitting} />
+              <RuntimeSpecEditor value={assignee} onChange={handleAssigneeChange} hosts={hosts} hostsLoading={hostsLoading} hostsError={hostError} accountId={accountId} disabled={submitting} />
             </div>
           )}
           {errors.assignee && (

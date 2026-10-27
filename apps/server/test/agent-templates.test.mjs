@@ -137,3 +137,26 @@ test('runtime identity resolves only from an active Host-bound execution credent
     assert.equal(await resolveCallerIdentityRow(db, '11111111-1111-4111-8111-111111111111'), null);
   } finally { await db.destroy(); }
 });
+
+test('the shared execution host catalog preserves current CLI capabilities within account ownership', async () => {
+  const db = await database();
+  try {
+    const hosts = db.getRepository(RuntimeHost);
+    const own = await hosts.save(hosts.create({ name: 'Own', hostname: 'own', account_id: 'account-a' }));
+    const offline = await hosts.save(hosts.create({ name: 'Offline', hostname: 'offline', account_id: 'account-a' }));
+    const other = await hosts.save(hosts.create({ name: 'Other', hostname: 'other', account_id: 'account-b' }));
+    const records = [
+      { agent_id: own.id, mode: 'manager', cli_adapters: ['claude'], last_seen_at: '2026-10-27T00:00:00Z' },
+      { agent_id: 'alias', host_id: own.id, mode: 'manager', cli_adapters: ['codex'], chat_workdir_root: '/chat', last_seen_at: '2026-10-28T00:00:00Z' },
+      { agent_id: other.id, mode: 'manager', cli_adapters: ['other-cli'], last_seen_at: '2026-10-28T00:00:00Z' },
+    ];
+    const controller = new AgentTemplatesController(db.getRepository(AgentTemplate), hosts, { list: () => records });
+    const rows = await controller.listHosts({ accessibleAccountIds: ['account-a'] });
+    assert.deepEqual(rows.map(row => row.id).sort(), [own.id, offline.id].sort());
+    assert.deepEqual(rows.find(row => row.id === own.id).clis, ['codex']);
+    assert.equal(rows.find(row => row.id === own.id).chat_workdir_root, '/chat');
+    assert.equal(rows.find(row => row.id === offline.id).clis, undefined);
+    records[1].cli_adapters = [];
+    assert.deepEqual((await controller.listHosts({ accessibleAccountIds: ['account-a'] })).find(row => row.id === own.id).clis, []);
+  } finally { await db.destroy(); }
+});

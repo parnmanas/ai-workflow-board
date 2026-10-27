@@ -315,8 +315,9 @@ for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, {
 }
 
 
-test('first-time Business agent setup is available in the work dialog on a narrow phone', async ({ page }, testInfo) => {
-  activeLocale = 'ko'; await page.setViewportSize({ width: 320, height: 568 });
+for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, { width: 667, height: 375 }]) {
+test(`first-time Business agent setup uses the shared folder browser at ${size.width}×${size.height}`, async ({ page }, testInfo) => {
+  activeLocale = 'ko'; await page.setViewportSize(size);
   const f = await fixture(page);
   await page.route('**/api/business/companies/company-header', route => route.fulfill({ json: { company, tasks: [], formations: [], connections: [], events: [], campaigns: [] } }));
   await page.route('**/api/agent-templates', route => route.fulfill({ json: [{ id: 'business-template', name: 'Business assistant', host_id: runtime.manager_agent_id, cli: runtime.cli, model: null, effort: null, runtime_config: runtime.runtime_config }] }));
@@ -326,10 +327,25 @@ test('first-time Business agent setup is available in the work dialog on a narro
   const run = dialog.getByRole('button', { name: ui('이 설정으로 실행'), exact: true });
   await expect(run).toBeInViewport(); await expect(run).toBeDisabled();
   await dialog.getByLabel(ui('Agent 템플릿 (선택 사항)'), { exact: true }).selectOption('business-template');
-  await dialog.getByLabel(ui('Working dir (Host 절대 경로)'), { exact: true }).fill('/work/company');
+  const folderRequests = [];
+  await page.route('**/api/agents/host-business/fs/**', route => {
+    folderRequests.push(route.request().url());
+    return route.fulfill({ json: route.request().url().endsWith('/roots')
+      ? { roots: ['/work'], cwd: '/work/company', enabled: true }
+      : { path: '/work/company', entries: [], truncated: false } });
+  });
+  await dialog.getByRole('button', { name: ui('Browse…'), exact: true }).click();
+  const picker = page.getByRole('dialog', { name: ui('Pick working directory on manager host'), exact: true });
+  const pick = picker.getByRole('button', { name: ui('Use this directory'), exact: true });
+  await expect(pick).toBeEnabled(); await expect(pick).toBeInViewport();
+  await pick.click();
+  await expect(picker).toHaveCount(0);
+  await expect(dialog.getByLabel(ui('Working directory (on the Runtime Host)'), { exact: true })).toHaveValue('/work/company');
+  expect(folderRequests.some(url => url.includes('host-business/fs/list'))).toBe(true);
   await expect(run).toBeEnabled(); await expect(run).toBeInViewport();
   await page.screenshot({ path: testInfo.outputPath('business-first-agent-setup.png') });
   await run.click(); await expect(page).toHaveURL(/task=task-header/);
   expect(f.journal.runs).toHaveLength(1);
   expect(f.errors).toEqual([]);
 });
+}

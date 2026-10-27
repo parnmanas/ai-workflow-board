@@ -104,7 +104,7 @@ test('review mode saves the entered runtime and objective with one connection sa
   const template = dialog.querySelector(`[aria-label="${ui("Agent 템플릿 (선택 사항)")}"]`);
   assert.ok(template, 'runtime fields are immediately available in review mode');
   run(() => { template.value = 'mail-template'; template.dispatchEvent(new window.Event('change', { bubbles: true })); }); await flush();
-  const workingDir = dialog.querySelector('input[placeholder="/home/user/work"]'); assert.ok(workingDir);
+  const workingDir = dialog.querySelector('input[placeholder="/path/to/repo"]'); assert.ok(workingDir);
   typeInto(workingDir, '/srv/mail');
   typeInto(dialog.querySelector(`[aria-label="${ui("업무 목적 · 답장 기준")}"]`), '제품 문의에 답장 초안 작성');
   click(button(container, ui("연결 저장"))); await flush(); await flush();

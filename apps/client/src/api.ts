@@ -1423,7 +1423,7 @@ export const api = {
     request<HostModelsView>(`/agent-manager/hosts/${encodeURIComponent(managerAgentId)}/models/refresh`, { method: 'POST' }),
   /** RuntimeSpec live 검증 — RuntimeSpecEditor의 저장 전 체크. 저장하지 않는다. */
   /** `chat_workdir_root` — 연결된 매니저가 알린 채팅 전용 폴더 루트(구버전·꺼진 Host 는 null). */
-  listTemplateHosts: () => request<Array<{ id: string; name: string; chat_workdir_root?: string | null }>>('/agent-templates/hosts'),
+  listTemplateHosts: () => request<Array<{ id: string; name: string; clis?: string[]; chat_workdir_root?: string | null }>>('/agent-templates/hosts'),
   listAgentTemplates: () => request<AgentTemplate[]>('/agent-templates'),
   createAgentTemplate: (value: Omit<AgentTemplate, 'id' | 'created_at' | 'updated_at'>) =>
     request<AgentTemplate>('/agent-templates', { method: 'POST', body: JSON.stringify(value) }),

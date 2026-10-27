@@ -10,15 +10,13 @@ import type {
   OrchestrationSlotRuntime,
   OrchestrationSlotSpecInput,
 } from '../../types';
-import { Select } from '../common';
+import RuntimeConnectionFields from '../runtime/RuntimeConnectionFields';
 import {
   EMPTY_RUNTIME_SELECTION,
   buildRuntimeConfig,
   runtimeSelectionFromAgent,
   type RuntimeSelection,
 } from '../admin/RuntimeConfigFields';
-import { credentialFallbackCopy } from '../../utils/credentialFallback';
-import { cliCredentialPrefix, cliSupportsBackendProfile } from '../../cli/catalog';
 
 /**
  * The editor for one Orchestration team slot: Runtime Host, CLI, model,
@@ -43,6 +41,7 @@ export interface SlotDraft {
   runtime: RuntimeSelection;
   model: string;
   effort: string;
+  extra?: Record<string, unknown>;
   credential_id: string;
   cli_runtime_profile: string;
 }
@@ -66,6 +65,7 @@ export function slotDraftFromRuntime(rt: OrchestrationSlotRuntime | null): SlotD
     runtime: runtimeSelectionFromAgent(rt.cli, (rt.runtime_config as any) ?? null),
     model: rt.model ?? '',
     effort: String((rt.runtime_config as any)?.extra?.effort || ''),
+    extra: structuredClone((rt.runtime_config as any)?.extra ?? {}),
     credential_id: rt.credential_id ?? '',
     cli_runtime_profile: rt.cli_runtime_profile ?? '',
   };
@@ -92,7 +92,7 @@ export function slotDraftToSpec(draft: SlotDraft): OrchestrationSlotSpecInput {
     model: draft.model.trim() || null,
     credential_id: draft.credential_id || null,
     cli_runtime_profile: draft.cli_runtime_profile || null,
-    runtime_config: { ...buildRuntimeConfig(draft.runtime)!, extra: { effort: draft.effort || null } },
+    runtime_config: { ...buildRuntimeConfig(draft.runtime)!, extra: { ...draft.extra, effort: draft.effort || null } },
   };
 }
 
@@ -115,25 +115,16 @@ export default function TeamSlotRuntimeFields({
   const cli = value.runtime.runtime || '';
   const patch = (next: Partial<SlotDraft>) => onChange({ ...value, ...next });
 
-  // Credential providers are prefixed by CLI (`claude_subscription`,
-  // `codex_api_key`, …) — the prefix is a catalog fact, same filter the admin
-  // agent dialog uses. CLIs without a credential concept get an empty list.
-  const credentialPrefix = cliCredentialPrefix(cli);
-  const eligibleCredentials = credentialPrefix
-    ? credentials.filter((c) => c.provider.startsWith(credentialPrefix))
-    : [];
-  const showBackendProfile = cliSupportsBackendProfile(cli) && backendProfiles.length > 0;
-
   return (
     <>
       <RuntimeSelectionFields
         value={{ host_id: value.manager_agent_id, cli, model: value.model || null, effort: value.effort || null,
-          runtime_config: buildRuntimeConfig(value.runtime) || { strategy: 'single', permission_mode: 'approve' } }}
+          runtime_config: { ...(buildRuntimeConfig(value.runtime) || { strategy: 'single', permission_mode: 'approve' }), extra: value.extra } }}
         hosts={hosts.map((h) => ({ id: h.manager_agent_id, name: h.manager_name, clis: h.clis }))}
         disabled={disabled}
         onChange={(next) => {
           patch({ manager_agent_id: next.host_id, runtime: runtimeSelectionFromAgent(next.cli, next.runtime_config as any),
-            model: next.model || '', effort: next.effort || '',
+            model: next.model || '', effort: next.effort || '', extra: next.runtime_config.extra,
             ...(next.host_id !== value.manager_agent_id ? { credential_id: '' } : {}),
             ...(next.cli !== cli ? { credential_id: '', cli_runtime_profile: '' } : {}),
           });
@@ -142,32 +133,11 @@ export default function TeamSlotRuntimeFields({
       <Hint>
         {translate('No folder here — each mission picks its projects, and this member works in a project\'s folder on this host (Projects → host folders).')}</Hint>
 
-      {/* ── Optional auth / backend ─────────────────────────────────────── */}
-      {cli && (
-        <Select
-          label={translate('CLI credential (optional)')}
-          value={value.credential_id}
-          disabled={disabled}
-          options={[
-            { value: '', label: credentialFallbackCopy(cli).optionLabel },
-            ...eligibleCredentials.map((c) => ({ value: c.id, label: `${c.name} (${c.provider})` })),
-          ]}
-          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ credential_id: e.target.value })}
-        />
-      )}
-      {showBackendProfile && (
-        <Select
-          label={translate('Claude backend profile (optional)')}
-          value={value.cli_runtime_profile}
-          disabled={disabled}
-          options={[
-            { value: '', label: translate('Anthropic (default)') },
-            { value: 'none', label: translate('Anthropic (no custom backend)') },
-            ...backendProfiles.map((p) => ({ value: p.id, label: p.name })),
-          ]}
-          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => patch({ cli_runtime_profile: e.target.value })}
-        />
-      )}
+      <RuntimeConnectionFields hostId={value.manager_agent_id} cli={cli}
+        credentials={credentials} backendProfiles={backendProfiles} disabled={disabled}
+        credentialId={value.credential_id} backendId={value.cli_runtime_profile}
+        onCredentialChange={(credential_id) => patch({ credential_id })}
+        onBackendChange={(cli_runtime_profile) => patch({ cli_runtime_profile })} />
     </>
   );
 }

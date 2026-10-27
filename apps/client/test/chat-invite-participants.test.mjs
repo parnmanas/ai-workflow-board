@@ -179,9 +179,11 @@ function mountPicker(props, { hosts } = {}) {
     listTemplateHosts: api.listTemplateHosts,
     validateRuntimeSpec: api.validateRuntimeSpec,
     listAgentTemplates: api.listAgentTemplates,
+    getHostCliSettings: api.getHostCliSettings,
   };
   api.getUsers = async () => USERS;
   api.listAgentTemplates = async () => [];
+  api.getHostCliSettings = async () => ({ supports_credential: true, candidates: [], supports_backend: false, backend_candidates: [] });
   api.getAgents = async () => AGENTS;
   // P4c-4: 에이전트는 runtime 선언으로 들어간다 — Host 카탈로그 스텁.
   api.listTemplateHosts = async () => hosts ?? [{ id: 'host-1', name: 'host-one' }];
@@ -239,7 +241,7 @@ async function declareAgent(container, { dir, label = '' }) {
   await flush();
   const cliSelect = [...editor.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'claude'));
   const inputs = [...editor.querySelectorAll('input')];
-  const dirInput = inputs.find((i) => i.type === 'text' && i.placeholder && (/\/home\/user\/work/.test(i.placeholder) || uiPattern('비워 두면 채팅 전용 폴더').test(i.placeholder)));
+  const dirInput = editor.querySelector('[data-runtime-field="working-directory"] input');
   assert.ok(cliSelect && dirInput, 'runtime 선언 입력(CLI/dir)이 없다');
   await act(async () => {
     setNativeValue(cliSelect, 'claude');

@@ -4,11 +4,11 @@ import React, { useEffect, useId, useState } from 'react';
 import { api } from '../../api';
 import type { AgentTemplate } from '../../types';
 import { hostEffortReport } from '../../cli/hostEfforts';
-import { cliEffortKeys } from '../../cli/catalog';
-import { cliModelChoices, loadHostModels, useHostModels } from '../../cli/hostModels';
-import { Button, Input, Select } from '../common';
-import RuntimeConfigFields, { buildRuntimeConfig, runtimeSelectionFromAgent } from '../admin/RuntimeConfigFields';
-import SessionModelSelect from '../sessions/SessionModelSelect';
+import { cliEffortKeys, cliLabel, useCliCatalog } from '../../cli/catalog';
+import { loadHostModels, useHostModels } from '../../cli/hostModels';
+import { Button, Select } from '../common';
+import RuntimeConfigFields, { buildRuntimeConfig, runtimeSelectionFromAgent, runtimeOptions } from '../admin/RuntimeConfigFields';
+import RuntimeModelSelect from './RuntimeModelSelect';
 
 export interface RuntimeSelectionValue {
   host_id: string;
@@ -42,6 +42,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   modelConfigId?: string;
 }) {
   useLocale();
+  const catalog = useCliCatalog();
   const generatedId = useId();
   const controlId = idPrefix || `runtime-${generatedId}`;
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
@@ -70,7 +71,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   }, [showTemplates]);
   const availableTemplates = templates.filter((t) => {
     const candidate = hosts.find((h) => h.id === t.host_id);
-    return candidate && (!candidate.clis || (!session && !candidate.clis.length) || candidate.clis.includes(t.cli));
+    return candidate && (!candidate.clis || candidate.clis.includes(t.cli));
   });
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -106,27 +107,26 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
         const cli = nextHost?.clis && !nextHost.clis.includes(value.cli) ? nextHost.clis[0] || '' : value.cli;
         onChange({ ...emptyRuntimeSelection(), host_id: e.target.value, cli }, 'host');
       }} />
-      {session ? <Select id={`${controlId}-cli`} label="CLI" value={value.cli} disabled={disabled || !host} options={[
-        { value: '', label: translate('선택…') }, ...(!host && value.cli ? [{ value: value.cli, label: value.cli }] : []), ...(host?.clis || []).map((c) => ({ value: c, label: c })),
-      ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange({ ...value, cli: e.target.value, model: null, effort: null }, 'cli')} /> :
-        <RuntimeConfigFields value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)} disabled={disabled || !value.host_id}
-          availableRuntimeIds={host?.clis?.length ? host.clis : undefined} onChange={(selection) => {
-            const changed = selection.runtime !== value.cli;
-            set({ cli: selection.runtime, runtime_config: buildRuntimeConfig(selection) || { strategy: 'single', permission_mode: 'approve' },
-              ...(changed ? { model: null, effort: null } : {}) });
-          }} />}
+      <Select id={`${controlId}-cli`} label="CLI" aria-label="CLI" value={value.cli} disabled={disabled || !host} options={[
+        { value: '', label: translate('선택…') },
+        ...(host?.clis ?? runtimeOptions(catalog).map((option) => option.value)).map((cli) => ({ value: cli, label: cliLabel(cli) })),
+        ...(value.cli && host?.clis && !host.clis.includes(value.cli)
+          ? [{ value: value.cli, label: translate('{0} (unavailable)', { 0: cliLabel(value.cli) }), disabled: true }] : []),
+      ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange({ ...value, cli: e.target.value,
+        runtime_config: emptyRuntimeSelection().runtime_config, model: null, effort: null }, 'cli')} />
+      {!session && <RuntimeConfigFields showRuntime={false}
+        value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)} disabled={disabled || !value.host_id}
+        onChange={(selection) => {
+          // Keep template-specific extra settings while editing the modeled controls.
+          const { strategy, permission_mode, profile, max_children, max_iterations, ...extra } = value.runtime_config;
+          set({ runtime_config: { ...extra, ...(buildRuntimeConfig(selection) || emptyRuntimeSelection().runtime_config) } });
+        }} />}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <div style={{ flex: 1 }}>
-          {session ? <SessionModelSelect models={hostModels.models} labels={hostModels.labels}
-            label={translate('Model')} data-config-id={modelConfigId} value={value.model} disabled={disabled || !value.cli}
-            style={{ width: '100%', padding: '8px 10px' }}
-            onChange={(model) => set({ model: model || null, effort: null })} /> :
-            hostModels.models.length ? <Select data-config-id={modelConfigId} label={translate('Model')} value={value.model || ''} disabled={disabled || !value.cli} options={[
-            { value: '', label: translate('Default — CLI') }, ...cliModelChoices(hostModels.models, hostModels.labels, value.model),
-            ...(value.model && !hostModels.models.includes(value.model) ? [{ value: value.model, label: translate('{0} (not listed by this host)', { 0: value.model }) }] : []),
-          ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => set({ model: e.target.value || null, effort: null })} /> :
-            <Input label={translate('Model')} value={value.model || ''} disabled={disabled || !value.cli} placeholder={translate('CLI default')}
-              onChange={(e) => set({ model: e.target.value || null, effort: null })} />}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <RuntimeModelSelect models={hostModels.models} labels={hostModels.labels}
+            label={translate('Model')} data-config-id={modelConfigId} value={value.model}
+            disabled={disabled || !value.cli || !value.host_id} style={{ width: '100%' }}
+            onChange={(model) => set({ model: model || null, effort: null })} />
         </div>
         <Button variant="ghost" size="sm" disabled={disabled || !value.cli || !value.host_id || hostModels.refreshing} onClick={() => void hostModels.refresh()}>
           {hostModels.refreshing ? translate('새로고침 중…') : translate('새로고침')}

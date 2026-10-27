@@ -1,3 +1,4 @@
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
@@ -52,8 +53,7 @@ export default function ProjectsPage() {
   const selectedProject = selectedId && selectedId !== NEW ? projects.find((p) => p.id === selectedId) || null : null;
   const detailAccountId = selectedProject?.account_id || accountId;
   const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [hosts, setHosts] = useState<Array<{ id: string; name: string }>>([]);
-  const [hostsLoading, setHostsLoading] = useState(true);
+  const { hosts, loading: hostsLoading } = useRuntimeHosts();
 
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [inUse, setInUse] = useState<{ project: Project; counts: ProjectUsageCount[] } | null>(null);
@@ -81,15 +81,6 @@ export default function ProjectsPage() {
     return () => { cancelled = true; };
   }, [detailAccountId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setHostsLoading(true);
-    api.listTemplateHosts()
-      .then((rows) => { if (!cancelled) setHosts((rows || []).map((h) => ({ id: h.id, name: h.name || h.id.slice(0, 8) }))); })
-      .catch(() => { if (!cancelled) setHosts([]); })
-      .finally(() => { if (!cancelled) setHostsLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
 
   // 좁은 폭 오버레이는 Esc 로 닫는다.
   useEffect(() => {

@@ -1,12 +1,13 @@
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { api } from '../../api';
 import { useToast } from '../../contexts/ToastContext';
 import { tokens } from '../../tokens';
 import type { AgentSessionCliSettings } from '../../types';
 import { Button } from '../common';
+import RuntimeConnectionFields from '../runtime/RuntimeConnectionFields';
+import RuntimeOptionControl from '../runtime/RuntimeOptionControl';
 import { runtimeLabel } from './sessionTranscript.logic';
 import { useHostModels, withHostModelOption } from '../../cli/hostModels';
 
@@ -39,7 +40,6 @@ function defaultsOf(settings: AgentSessionCliSettings | null): Record<string, st
 
 export default function CliSettingsPanel({ accountId, managerId, cli, hostName, onChanged }: CliSettingsPanelProps) {
   useLocale();
-  const navigate = useNavigate();
   const { showToast } = useToast();
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
   const [selected, setSelected] = useState<string>('');
@@ -76,11 +76,10 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
   const defaultOptions = [
     ...(settings?.launch_options ?? []),
     ...withHostModelOption(settings?.known_config_options ?? [], hostModels.models, hostModels.labels)
-      .filter((o) => o.type === 'select' && (o.category === 'model' || (o.category === 'mode'
-        && !settings?.launch_options?.some((launch) => launch.config_id === '__permission_mode'))) && o.options.length > 0),
+      .filter((o) => o.type === 'select' && (o.category === 'model' || (o.category === 'mode' && o.options.length > 0
+        && !settings?.launch_options?.some((launch) => launch.config_id === '__permission_mode')))),
   ];
   const savedDefaults = defaultsOf(settings);
-  const missingCredential = !!settings?.credential_id && !settings.credential;
   const dirty = (settings?.credential_id ?? settings?.credential?.id ?? '') !== selected
     || (settings?.backend?.id || '') !== backend
     || defaultOptions.some((o) => (defaults[o.config_id] || '') !== (savedDefaults[o.config_id] || ''));
@@ -156,61 +155,9 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
         <div style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{error}</div>
       ) : loading || !settings ? (
         <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('Loading…')}</div>
-      ) : !settings.supports_credential ? (
-        <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>
-          {runtimeLabel(cli)} {translate('sessions use the host\'s own login. AWB credentials cannot be applied to this CLI yet.')}</div>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <select
-            aria-label={translate('Session credential')}
-            style={selectStyle}
-            value={selected}
-            disabled={saving}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            <option value="">{translate('Host\'s own login (no AWB credential)')}</option>
-            {missingCredential && (
-              <option value={settings.credential_id!} disabled>{translate('Unavailable credential ·')} {settings.credential_id!.slice(0, 8)}</option>
-            )}
-            {settings.candidates.map((c) => (
-              <option key={c.id} value={c.id}>{c.name} · {c.provider}{c.scope === 'global' ? translate(' · global') : ''}</option>
-            ))}
-          </select>
-          {missingCredential && (
-            <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
-              {translate('The saved credential is unavailable. Select a login and save. For an existing session, use Reconnect using CLI settings in its error message.')}</span>
-          )}
-          {settings.candidates.length === 0 && (
-            <span style={{ fontSize: 11.5, color: tokens.colors.warningLight }}>
-              {translate('No')} {runtimeLabel(cli)} {translate('credential in this account yet. Add one in Settings → Credentials, or log in on the host itself.')}</span>
-          )}
-        </div>
-      )}
-      {settings && !error && !loading && settings.supports_backend && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
-          <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-            {translate('Backend that')} {runtimeLabel(cli)} {translate('talks to on')} {hostName} {translate('— leave it on the CLI default to use Anthropic directly.')}</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <select
-              aria-label={translate('Session backend')}
-              data-session-backend
-              style={selectStyle}
-              value={backend}
-              disabled={saving}
-              onChange={(e) => setBackend(e.target.value)}
-            >
-              <option value="">{runtimeLabel(cli)} {translate('default endpoint')}</option>
-              {settings.backend_candidates.map((b) => (
-                <option key={b.id} value={b.id} title={b.base_url}>{b.name} · {b.model}</option>
-              ))}
-            </select>
-            {settings.backend_candidates.length === 0 && (
-              <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
-                {translate('No Claude backend profile is defined on this instance yet (Admin → Claude backends).')}</span>
-            )}
-          </div>
-        </div>
-      )}
+      ) : <RuntimeConnectionFields hostId={managerId} cli={cli} settings={settings}
+        credentialId={selected} onCredentialChange={setSelected} backendId={backend}
+        onBackendChange={setBackend} allowBackendOptOut={false} disabled={saving} />}
       {settings && !error && !loading && (
         defaultOptions.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${tokens.colors.border}`, paddingTop: 8 }}>
@@ -220,19 +167,12 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
               {defaultOptions.map((option) => (
                 <label key={option.config_id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
                   {option.name}
-                  <select
+                  <RuntimeOptionControl option={option}
                     aria-label={translate('Default {0}', { 0: option.name })}
-                    data-default-config-id={option.config_id}
-                    style={{ ...selectStyle, minWidth: 180 }}
-                    value={defaults[option.config_id] || ''}
-                    disabled={saving}
-                    onChange={(e) => setDefaults((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
-                  >
-                    <option value="">{option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}</option>
-                    {option.options.map((choice) => (
-                      <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
-                    ))}
-                  </select>
+                    data-default-config-id={option.config_id} style={{ ...selectStyle, minWidth: 0 }}
+                    value={defaults[option.config_id] || ''} disabled={saving}
+                    defaultLabel={option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}
+                    onChange={(value) => setDefaults((prev) => ({ ...prev, [option.config_id]: String(value) }))} />
                   <span style={{ fontSize: 11, maxWidth: 340 }}>
                     {option.options.find((choice) => choice.value === (defaults[option.config_id] || option.current_value))?.description || option.description}
                   </span>
@@ -265,9 +205,6 @@ export default function CliSettingsPanel({ accountId, managerId, cli, hostName, 
       {settings && !error && !loading && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <Button variant="primary" size="sm" onClick={() => void save()} disabled={!dirty || saving} loading={saving}>{translate('Save')}</Button>
-          {settings.supports_credential && (
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/settings/credentials`)}>{translate('Manage credentials')}</Button>
-          )}
         </div>
       )}
     </section>

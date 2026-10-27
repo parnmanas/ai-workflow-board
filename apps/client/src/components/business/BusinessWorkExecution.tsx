@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
+import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
 import type { BusinessCompany, BusinessRunInput, BusinessTaskRun } from '../../business.types';
@@ -7,7 +8,7 @@ import { useLocale } from '../../i18n/react';
 import { assigneeDisplayName } from '../../tickets/assignee';
 import { useHostNames } from '../../runtime/useHostNames';
 import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
-import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
+import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
 import { Button, Modal, Textarea } from '../common';
 import Markdown from '../common/Markdown';
 import { dateTime } from './business.logic';
@@ -41,19 +42,13 @@ export function BusinessWorkStartForm({ company, taskId, initialContent, onClose
   useLocale();
   const [runtime, setRuntime] = useState<RuntimeSpecDraft>(() => ({ ...emptyRuntimeSpec(), ...company.agent_runtime }));
   const [content, setContent] = useState(initialContent ?? (taskId ? t('이 업무의 기존 결과와 요청을 확인하고 이어서 진행해 주세요.') : t(FORMATION_GOAL)));
-  const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
-  const [hostError, setHostError] = useState('');
+  const { hosts, loading: hostsLoading, error: hostError } = useRuntimeHosts(true, company.account_id);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const loading = hostsLoading;
   const pending = useRef<BusinessRunInput | null>(null);
   const names = useHostNames();
-  useEffect(() => {
-    let active = true;
-    api.listTemplateHosts().then(rows => { if (active) { setHosts(rows); setHostError(''); } })
-      .catch(e => { if (active) setHostError(e.message); }).finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [company.account_id]);
+
   const start = async () => {
     setBusy(true); setError('');
     try {

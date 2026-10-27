@@ -9,6 +9,7 @@ import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '../src/api.ts';
 import { ToastProvider } from '../src/contexts/ToastContext.tsx';
+import { resetHostModelsStore } from '../src/cli/hostModels.ts';
 import CliSettingsPanel from '../src/components/sessions/CliSettingsPanel.tsx';
 
 const h = React.createElement;
@@ -53,6 +54,15 @@ function stubApi(t, initial) {
   const calls = [];
   const original = { get: api.getHostCliSettings, put: api.setHostCliSettings };
   let current = initial;
+  resetHostModelsStore();
+  const modelView = async () => {
+    const model = current.known_config_options.find(option => option.category === 'model');
+    return { manager_agent_id: 'm-rolf', is_online: true, refreshed_at: new Date().toISOString(),
+      models: { [current.cli]: (model?.options || []).map(option => option.value) },
+      labels: { [current.cli]: Object.fromEntries((model?.options || []).map(option => [option.value, option.name])) } };
+  };
+  t.mock.method(api, 'getHostModels', modelView);
+  t.mock.method(api, 'refreshHostModels', modelView);
   api.getHostCliSettings = async () => current;
   api.setHostCliSettings = async (managerId, cli, credentialId, defaultConfig, backendProfileId) => {
     calls.push({ credentialId, defaultConfig, backendProfileId });

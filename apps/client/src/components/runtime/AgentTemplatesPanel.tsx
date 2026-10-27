@@ -4,13 +4,14 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import type { AgentTemplate } from '../../types';
 import { Button, Input, Modal } from '../common';
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { tokens } from '../../tokens';
-import RuntimeSelectionFields, { applyAgentTemplate, emptyRuntimeSelection, type RuntimeSelectionHost, type RuntimeSelectionValue } from './RuntimeSelectionFields';
+import RuntimeSelectionFields, { applyAgentTemplate, emptyRuntimeSelection, type RuntimeSelectionValue } from './RuntimeSelectionFields';
 
 export default function AgentTemplatesPanel() {
   useLocale();
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
-  const [hosts, setHosts] = useState<RuntimeSelectionHost[]>([]);
+  const { hosts, error: hostsError } = useRuntimeHosts();
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [draft, setDraft] = useState<RuntimeSelectionValue>(emptyRuntimeSelection());
@@ -20,11 +21,10 @@ export default function AgentTemplatesPanel() {
   const reload = () => api.listAgentTemplates().then(setTemplates);
   useEffect(() => {
     let disposed = false;
-    Promise.all([api.listAgentTemplates(), api.listTemplateHosts()])
-      .then(([rows, hostRows]) => {
+    api.listAgentTemplates()
+      .then((rows) => {
         if (disposed) return;
         setTemplates(rows);
-        setHosts(hostRows);
       }).catch((e) => { if (!disposed) setError(e.message); })
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
@@ -70,6 +70,7 @@ export default function AgentTemplatesPanel() {
         <Button onClick={() => void save()} disabled={busy || !name.trim() || !draft.host_id || !draft.cli}>{busy ? translate('저장 중…') : editing ? translate('변경사항 저장') : translate('등록')}</Button></>}>
       <Input label={translate('템플릿 이름')} aria-label={translate('템플릿 이름')} placeholder={translate('예: 코드 리뷰')} value={name} disabled={busy} onChange={(e) => setName(e.target.value)} />
       {!hosts.length && <p>{translate('템플릿을 등록하려면 먼저 Runtime Host를 연결하세요.')}</p>}
+      {hostsError && <div role="alert">{hostsError}</div>}
       <RuntimeSelectionFields value={draft} onChange={setDraft} hosts={hosts} disabled={busy} showTemplates={false} />
       {error && <div role="alert">{error}</div>}
     </Modal>

@@ -12,9 +12,9 @@
 //   ② 호스트가 열거한 **순서**를 지킨다(알파벳 재정렬 없음).
 //   ③ 저장된 모델이 목록에 없으면 "(not listed by this host)" 로 덧붙여 남긴다 —
 //      목록을 한 곳으로 좁힌 대가로 저장값이 사라지면 안 된다.
-//   ④ 스토어가 비어 있으면 Default 하나만 두고 자유 입력으로 떨어진다.
+//   ④ 스토어가 비어 있으면 공유 Model 자유 입력으로 떨어진다.
 //   ⑤ 선택지 이름은 세션 화면과 같다(스토어의 labels — ACP 어댑터 이름). ACP 의 `default` 는
-//      빈 "Default —" 선택지와 같은 뜻이라 빼되, 저장값이면 남긴다.
+//      세션과 동일하게 표시하고, 별도의 빈 기본값을 중복해서 만들지 않는다.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -71,10 +71,8 @@ async function settle(times = 6) {
   }
 }
 
-/** 모델 dropdown(있으면). 'Default —' 항목을 가진 select 가 그것이다. */
 function modelSelect(view) {
-  return [...view.container.querySelectorAll('select')].find((s) =>
-    [...s.options].some((o) => /^Default —/.test(o.textContent || ''))) ?? null;
+  return view.container.querySelector('select[data-config-category="model"]');
 }
 
 function modelOptions(view) {
@@ -152,7 +150,7 @@ test('③ 스토어가 비면 dropdown 을 만들지 않고 자유 입력으로 
   );
 });
 
-test('⑤ 선택지 이름은 세션과 같다 — 어댑터 이름을 그리고, ACP 의 default 는 빈 Default 와 겹쳐 뺀다', async (t) => {
+test('⑤ 선택지 이름은 세션과 같다 — 어댑터 이름을 그리고, ACP 의 default 도 세션과 동일하게 남긴다', async (t) => {
   const models = ['default', 'opencode/big-pickle', 'opencode-go/glm-5.3'];
   const view = await withSlot(t, {
     storeModels: models,
@@ -160,7 +158,7 @@ test('⑤ 선택지 이름은 세션과 같다 — 어댑터 이름을 그리고
     managerId: nextManager(),
   });
   const select = modelSelect(view);
-  assert.deepEqual([...select.options].map((o) => o.value), ['', 'opencode/big-pickle', 'opencode-go/glm-5.3']);
+  assert.deepEqual([...select.options].map((o) => o.value), ['default', 'opencode/big-pickle', 'opencode-go/glm-5.3']);
   const glm = [...select.options].find((o) => o.value === 'opencode-go/glm-5.3');
   assert.equal(glm.textContent, 'GLM 5.3', '세션 화면과 같은 이름 — 값(id)은 그대로');
   const pickle = [...select.options].find((o) => o.value === 'opencode/big-pickle');

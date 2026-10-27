@@ -8,7 +8,7 @@ import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { validateAgentRuntimeConfig } from '../../common/runtime-config';
-import { InstanceRegistryService } from './instance-registry.service';
+import { InstanceRegistryService, type InstanceRecord } from './instance-registry.service';
 
 @Controller('api/agent-templates')
 @UseGuards(AuthGuard)
@@ -23,11 +23,19 @@ export class AgentTemplatesController {
   @Get('hosts')
   async listHosts(@Req() req: any) {
     const rows = await this.hosts.find({ where: { account_id: In(req.accessibleAccountIds || []), is_active: 1 }, select: { id: true, name: true }, order: { name: 'ASC' } });
-    const roots = new Map<string, string>();
+    const live = new Map<string, InstanceRecord>();
     for (const rec of this.registry.list()) {
-      if (rec.mode === 'manager' && rec.chat_workdir_root) roots.set(rec.agent_id, rec.chat_workdir_root);
+      if (rec.mode !== 'manager') continue;
+      for (const id of [rec.agent_id, rec.host_id].filter(Boolean) as string[]) {
+        const previous = live.get(id);
+        if (!previous || rec.last_seen_at > previous.last_seen_at) live.set(id, rec);
+      }
     }
-    return rows.map((h) => ({ ...h, chat_workdir_root: roots.get(h.id) ?? null }));
+    return rows.map((h) => {
+      const rec = live.get(h.id);
+      return { ...h, chat_workdir_root: rec?.chat_workdir_root ?? null,
+        ...(Array.isArray(rec?.cli_adapters) ? { clis: rec.cli_adapters } : {}) };
+    });
   }
 
   @Get()

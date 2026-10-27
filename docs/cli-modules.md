@@ -89,13 +89,33 @@ credential 폼, 로그인 화면, effort 편집기가 그 CLI 를 그린다.
 서버는 `HostModelsService`(`modules/agent-manager/host-models.service.ts`) 하나로 읽기·갱신을
 제공한다 — `GET /api/agent-manager/hosts/:managerAgentId/models`, `POST …/models/refresh`(서버가
 커맨드 ack 를 기다린 뒤 새 목록을 돌려준다). 오케스트레이션 로스터의 refresh 도 이 서비스를
-거치고, 세션 CLI 설정은 ACP 가 보고한 목록에 호스트가 그 뒤 알게 된 모델을 덧붙인다.
+거친다. ACP 보고가 있으면 그 목록을 우선하며 하트비트 목록과 합치지 않는다.
 
 클라이언트는 `src/cli/hostModels.ts` 의 `useHostModels(managerAgentId, cli)` 하나를 쓴다 —
 Agent 템플릿/RuntimeSpec 선택기, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
 훅은 열릴 때 목록이 비었거나(host×cli 당 한 번) 재열거 시각이 10분보다 오래됐으면 조용히
 갱신하고, 각 화면의 "Refresh" 버튼은 같은 `refresh()` 를 부른다. 모델을 보여주는 새 화면을
 만들 때 `available_models` 를 직접 읽거나 `refresh_available_models` 를 직접 보내지 말 것.
+
+### 실행 설정 UI 공통 모듈
+
+Business 업무·메일 자동화, 티켓, 채팅, Action/QA/예약, 팀 슬롯, Agent 템플릿, 세션은
+`components/runtime/`의 필드를 조합한다. 페이지마다 Host·CLI·모델·인증·작업 폴더 선택기를 다시 만들지 않는다.
+
+- `RuntimeSelectionFields`: 템플릿 불러오기와 직접 편집, Host·CLI·모델·Effort·실행 권한/전략.
+- `RuntimeModelSelect` + `hostModels.modelChoices`: 모든 화면에서 같은 모델 ID·이름·순서와 ACP `default`를 표시한다.
+  저장된 값이 보고 목록에 없으면 표시를 달아 보존한다. 목록을 모르면 생성/편집은 직접 입력하고,
+  실행 중인 ACP 세션은 보고된 선택지만 전송한다. 세션 헤더·새 세션·CLI 기본 설정은 `RuntimeOptionControl`로 추가 옵션도 렌더한다.
+- `WorkingDirectoryField`: 동일한 절대경로 입력·검사·`DirectoryPicker` 탐색. 호스트가 바뀌면 열린 탐색기를 닫는다.
+  Business도 이 필드를 사용한다. 팀/템플릿은 폴더를 저장하지 않고 실행 시 프로젝트/업무에서 정한다.
+- `RuntimeConnectionFields`: CLI별 인증 정보와 backend 선택, 사용할 수 없는 저장값과 로딩 오류 표시.
+  이미 조회한 목록이 없으면 같은 Host CLI settings API로 읽는다. 인증 secret은 폼으로 가져오지 않는다.
+- `RuntimeSpecEditor`: 위 필드와 업무의 작업 폴더·표시명·역할을 묶는 실행 선언 폼.
+  Host 후보는 `useRuntimeHosts`에서 받으며, 서버가 보고한 CLI 목록과 채팅 폴더 메타데이터를 보존한다.
+
+회귀: `runtime-fields.test.mjs`는 Business·팀·템플릿·직접 설정·새 세션·CLI 기본값·라이브 선택지의
+모델 목록을 실렌더로 비교하고, 추가 옵션 보존·호스트 전환·폴더 탐색·인증 필터를 확인한다.
+`business-header.e2e.mjs`는 모바일·태블릿·가로 화면에서 업무 실행 폼의 폴더 탐색과 실행을 검증한다.
 
 ### 목록은 어디서 합쳐지는가 (2026-09-27)
 

@@ -1,6 +1,7 @@
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import RuntimeSpecEditor, { type RuntimeHostChoice } from '../runtime/RuntimeSpecEditor';
@@ -43,24 +44,14 @@ export default function AssigneeSection({
   assignee, unsaved, project, accountId, disabled, onChange, runNote, labelStyle,
 }: AssigneeSectionProps) {
   useLocale();
-  const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
-  const [hostsLoaded, setHostsLoaded] = useState(false);
+  const { hosts, loading: hostsLoading, error: hostError } = useRuntimeHosts(true, accountId);
+  const hostsLoaded = !hostsLoading;
   const [editing, setEditing] = useState(false);
   const [editorDraft, setEditorDraft] = useState<RuntimeSpecDraft>(() => toEditableSpec(null));
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    api.listTemplateHosts()
-      .then(rows => {
-        if (cancelled) return;
-        setHosts((rows || []).map(h => ({ id: h.id, name: h.name || translate('(이름 없는 호스트)') })));
-      })
-      .catch(() => { if (!cancelled) setHosts([]); })
-      .finally(() => { if (!cancelled) setHostsLoaded(true); });
-    return () => { cancelled = true; };
-  }, []);
+
 
   // Never show a raw host uuid as a name (agent-display-name runbook): an
   // unknown host renders the bare spec label / a placeholder, not its id.
@@ -152,7 +143,7 @@ export default function AssigneeSection({
             <RuntimeSpecEditor
               value={editorDraft}
               onChange={handleEditorChange}
-              hosts={hosts}
+              hosts={hosts} hostsLoading={hostsLoading} hostsError={hostError}
               accountId={accountId}
               disabled={validating || disabled}
             />

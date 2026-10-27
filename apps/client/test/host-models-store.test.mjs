@@ -61,6 +61,9 @@ test('withHostModelOption: model 옵션이 없으면 합성하고, 호스트 목
   assert.equal(synthesized[1].category, 'model');
   assert.deepEqual(synthesized[1].options.map((o) => o.value), ['opus', 'sonnet']);
   assert.deepEqual(withHostModelOption([modeOption], []), [modeOption]);
+  const cached = { config_id: 'model', category: 'model', type: 'select', current_value: 'retired', options: [{ value: 'retired', name: 'Retired' }] };
+  assert.deepEqual(withHostModelOption([cached], [])[0].options, [], 'an empty host catalog cannot resurrect retired cached choices');
+  assert.equal(withHostModelOption([cached], [])[0].current_value, 'retired', 'saved values remain visible in the shared control');
 });
 
 test('isHostModelsStale: 시각이 없거나 오래됐으면 stale', () => {

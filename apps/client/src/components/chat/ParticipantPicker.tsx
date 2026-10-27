@@ -1,3 +1,4 @@
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -9,7 +10,7 @@ import { formatAgentDisplayName } from '../../utils/agentName';
 import { assigneeDisplayName } from '../../tickets/assignee';
 import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
 import { Button, Input, Modal } from '../common';
-import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
+import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeSpecDraft } from '../runtime/RuntimeSpecEditor';
 import { loadAddPeopleCandidates } from './utils/participantFlow';
 import { cliLabel } from '../../cli/catalog';
 import { defaultChatWorkdir, findSameRuntimeAgent, isChatWorkdir, newChatShape } from './utils/chatAgents';
@@ -77,7 +78,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPeople, setSelectedPeople] = useState<PickerParticipant[]>([]);
   const [agents, setAgents] = useState<ChatAgentEntry[]>([]);
-  const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
+  const { hosts, loading: hostsLoading, error: hostError } = useRuntimeHosts(open);
   // null = Agent 편집기 닫힘, '' = 새 Agent, 그 외 = 편집 중인 Agent 의 key.
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<RuntimeSpecDraft>(emptyRuntimeSpec());
@@ -111,13 +112,6 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
       formatAgentName: formatAgentDisplayName,
       setParticipants: setPeople,
     });
-    let cancelled = false;
-    api.listTemplateHosts()
-      .then((rows) => {
-        if (!cancelled) setHosts((rows || []).map((h) => ({ id: h.id, name: h.name || h.id.slice(0, 8), chat_workdir_root: h.chat_workdir_root ?? null })));
-      })
-      .catch(() => { if (!cancelled) setHosts([]); });
-    return () => { cancelled = true; };
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hostNames = useMemo(() => Object.fromEntries(hosts.map((h) => [h.id, h.name])), [hosts, getLocale()]);
@@ -408,7 +402,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
               <RuntimeSpecEditor
                 value={draft}
                 onChange={(next) => { setDraft(next); setDraftError(null); }}
-                hosts={hosts}
+                hosts={hosts} hostsLoading={hostsLoading} hostsError={hostError}
                 accountId={accountId}
                 folderOptionalHint={chatFolderHint}
                 disabled={resolving}

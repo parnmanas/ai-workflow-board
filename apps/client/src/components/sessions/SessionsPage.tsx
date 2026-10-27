@@ -23,7 +23,7 @@ import { ActivityPill, Button, EmptyState, ErrorState } from '../common';
 import PageHeader from '../PageHeader';
 import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
-import SessionModelSelect from './SessionModelSelect';
+import RuntimeOptionControl from '../runtime/RuntimeOptionControl';
 import SessionHeaderMenu, { SessionMenuItem, SessionMenuSection } from './SessionHeaderMenu';
 import SessionProposalCards from './SessionProposalCards';
 import { proposalsForSession, useSessionProposals } from './sessionProposals';
@@ -921,51 +921,16 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     if (option.type === 'boolean') {
       return (
         <label title={option.description} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: tokens.colors.textSecondary, cursor: controlsDisabled ? 'not-allowed' : 'pointer' }}>
-          <input
-            type="checkbox"
-            aria-label={option.name}
-            data-config-id={option.config_id}
-            checked={option.current_value === true}
-            disabled={controlsDisabled}
-            onChange={(e) => void setConfigOption(option.config_id, e.target.checked)}
-          />
+          <RuntimeOptionControl option={option} value={option.current_value} disabled={controlsDisabled}
+            onChange={(value) => void setConfigOption(option.config_id, value)} />
           {option.name}
         </label>
       );
     }
     if (option.type !== 'select') return null;
-    if (option.category === 'model') {
-      return <SessionModelSelect data-config-id={option.config_id}
-        title={option.description || option.name} models={option.options.map((choice) => choice.value)}
-        labels={Object.fromEntries(option.options.map((choice) => [choice.value, choice.name]))}
-        value={typeof option.current_value === 'string' ? option.current_value : null}
-        disabled={controlsDisabled} defaultDisabled
-        onChange={(model) => void setConfigOption(option.config_id, model)} />;
-    }
-    const groups = new Map<string, typeof option.options>();
-    for (const o of option.options) {
-      const g = o.group || '';
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g)!.push(o);
-    }
-    const renderOptions = (list: typeof option.options) => list.map((o) => <option key={o.value} value={o.value} title={o.description}>{o.name}</option>);
-    return (
-      <select
-        aria-label={option.name}
-        title={option.description || option.name}
-        data-config-id={option.config_id}
-        data-config-category={option.category}
-        value={typeof option.current_value === 'string' ? option.current_value : ''}
-        disabled={controlsDisabled}
-        onChange={(e) => void setConfigOption(option.config_id, e.target.value)}
-        style={selectStyle}
-      >
-        {typeof option.current_value !== 'string' && <option value="">{option.name}…</option>}
-        {Array.from(groups.entries()).map(([group, list]) => (group
-          ? <optgroup key={group} label={group}>{renderOptions(list)}</optgroup>
-          : renderOptions(list)))}
-      </select>
-    );
+    return <RuntimeOptionControl option={option} value={option.current_value}
+      disabled={controlsDisabled} style={selectStyle}
+      onChange={(value) => void setConfigOption(option.config_id, value)} />;
   };
 
   return (

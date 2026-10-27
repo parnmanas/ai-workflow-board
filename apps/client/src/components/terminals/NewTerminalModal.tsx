@@ -5,7 +5,7 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { TerminalHost, TerminalSummary } from '../../types';
 import { Button, Input, Modal } from '../common';
-import DirectoryPicker from '../admin/DirectoryPicker';
+import WorkingDirectoryField from '../runtime/WorkingDirectoryField';
 
 /**
  * 새 Terminal — Runtime Host 와 셸을 고른다. 셸 목록은 그 장비가 하트비트로 보고한
@@ -48,7 +48,6 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
 
   const host = useMemo(() => hosts.find((h) => h.manager_id === managerId) ?? null, [hosts, managerId, getLocale()]);
 
@@ -59,7 +58,6 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
     setCwd('');
     setTitle('');
     setError(null);
-    setPickerOpen(false);
   }, [open]);
 
   // 기본값은 **열릴 때만** 채운다 — `hosts` 는 하트비트마다 새 배열로 내려오므로 그것을
@@ -146,35 +144,8 @@ export default function NewTerminalModal({ open, onClose, hosts, initialManagerI
           </select>
         </div>
 
-        <div>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
-            <div style={{ flex: 1 }}>
-              <Input
-                label={translate('Working directory (optional)')}
-                value={cwd}
-                placeholder={translate('Defaults to the host user\'s home')}
-                onChange={(e) => setCwd(e.target.value)}
-              />
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!managerId}
-              onClick={() => setPickerOpen(true)}
-              style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
-            >
-              {translate('Browse…')}</Button>
-          </div>
-        </div>
-        {managerId && (
-          <DirectoryPicker
-            isOpen={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            managerAgentId={managerId}
-            initialPath={cwd.trim() || undefined}
-            onPick={(picked) => setCwd(picked)}
-          />
-        )}
+        <WorkingDirectoryField hostId={managerId} value={cwd} onChange={setCwd} disabled={creating}
+          optionalHint={translate('Defaults to the host user\'s home')} />
 
         <Input
           label={translate('Title (optional)')}

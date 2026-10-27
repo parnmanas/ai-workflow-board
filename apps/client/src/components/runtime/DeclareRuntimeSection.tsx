@@ -1,11 +1,12 @@
+import { useRuntimeHosts } from '../../runtime/useRuntimeHosts';
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { api } from '../../api';
 import { Button } from '../common';
 import { tokens } from '../../tokens';
 import { useToast } from '../../contexts/ToastContext';
-import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeHostChoice, type RuntimeSpecDraft } from './RuntimeSpecEditor';
+import RuntimeSpecEditor, { emptyRuntimeSpec, type RuntimeSpecDraft } from './RuntimeSpecEditor';
 
 import { isRuntimeSpecComplete } from '../../runtime/runtimeSpec';
 
@@ -27,22 +28,8 @@ export default function DeclareRuntimeSection({ accountId, onResolved, initialVa
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<RuntimeSpecDraft>(() => ({ ...emptyRuntimeSpec(), ...initialValue }));
   const [resolving, setResolving] = useState(false);
-  const [hosts, setHosts] = useState<RuntimeHostChoice[]>([]);
+  const { hosts, loading: hostsLoading, error: hostError } = useRuntimeHosts(open && !!accountId, accountId);
 
-  useEffect(() => {
-    if (!open || !accountId) return;
-    let cancelled = false;
-    api.listTemplateHosts()
-      .then((rows) => {
-        if (cancelled) return;
-        setHosts((rows || []).map((h: any) => ({
-          id: h.id,
-          name: h.name || h.id.slice(0, 8),
-        })));
-      })
-      .catch(() => { if (!cancelled) setHosts([]); });
-    return () => { cancelled = true; };
-  }, [open, accountId]);
 
   const handleResolve = async () => {
     if (!isRuntimeSpecComplete(draft)) {
@@ -71,7 +58,7 @@ export default function DeclareRuntimeSection({ accountId, onResolved, initialVa
           <RuntimeSpecEditor
             value={draft}
             onChange={setDraft}
-            hosts={hosts}
+            hosts={hosts} hostsLoading={hostsLoading} hostsError={hostError}
             accountId={accountId}
             disabled={resolving}
           />

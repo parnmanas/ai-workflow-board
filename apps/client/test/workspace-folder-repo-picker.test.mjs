@@ -103,7 +103,7 @@ async function declareRuntime(container) {
   const hostSelect = selects.find((s) => [...s.options].some((o) => o.value === 'host-1'));
   const cliSelect = selects.find((s) => [...s.options].some((o) => o.value === 'claude'));
   const dirInput = [...container.querySelectorAll('input')].find((i) =>
-    i.type === 'text' && i.placeholder && i.placeholder.includes('/home/user/work'));
+    i.type === 'text' && i.placeholder && i.placeholder.includes('/path/to/repo'));
   assert.ok(hostSelect && cliSelect && dirInput, 'runtime 선언 입력(Host/CLI/dir)이 없다');
   change(hostSelect, 'host-1');
   change(cliSelect, 'claude');

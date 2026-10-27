@@ -6,7 +6,9 @@ import { api } from '../../api';
 import { tokens } from '../../tokens';
 import type { AgentSessionCliSettings, AgentSessionConfigOption, AgentSessionHost, AgentSessionLiveSnapshot } from '../../types';
 import { Button, Input, Modal } from '../common';
-import DirectoryPicker from '../admin/DirectoryPicker';
+import RuntimeConnectionFields from '../runtime/RuntimeConnectionFields';
+import RuntimeOptionControl from '../runtime/RuntimeOptionControl';
+import WorkingDirectoryField from '../runtime/WorkingDirectoryField';
 import { lastCwdStorageKey } from './sessionList.logic';
 import { runtimeLabel } from './sessionTranscript.logic';
 import { hostEffortReport } from '../../cli/hostEfforts';
@@ -27,16 +29,6 @@ export interface NewSessionModalProps {
   initialCwd?: string;
   onCreated: (live: AgentSessionLiveSnapshot) => void;
 }
-
-const selectStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '8px 10px',
-  borderRadius: tokens.radii.md,
-  border: `1px solid ${tokens.colors.border}`,
-  background: tokens.colors.surface,
-  color: tokens.colors.textPrimary,
-  fontSize: 13,
-};
 
 const labelStyle: React.CSSProperties = {
   display: 'block',
@@ -71,7 +63,6 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
   // Launch options come from the host CLI modules; model/config options come from ACP.
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settings, setSettings] = useState<AgentSessionCliSettings | null>(null);
@@ -95,7 +86,6 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
     setTitle('');
     setSaveDefaults(false);
     setError(null);
-    setPickerOpen(false);
   }, [open]);
 
   // 기본 호스트/CLI/cwd 는 **아직 아무것도 고르지 않았을 때만** 채운다. `hosts` 는 매니저
@@ -272,98 +262,26 @@ export default function NewSessionModal({ open, onClose, hosts, initialManagerId
         {managerId && cli && (
           <div>
             {settingsLoading && <div role="status" style={labelStyle}>{translate('Loading CLI settings…')}</div>}
-            {settings?.supports_credential && (
-              <>
-                <label htmlFor="new-session-credential" style={labelStyle}>{translate('Credential')}</label>
-                <select id="new-session-credential" aria-label={translate('Session credential')} style={selectStyle}
-                  value={credentialId} disabled={creating || settingsLoading}
-                  onChange={(e) => setCredentialId(e.target.value)}>
-                  <option value="">{translate('Host\'s own login (no AWB credential)')}</option>
-                  {credentialUnavailable && <option value={credentialId} disabled>{translate('Unavailable credential ·')} {credentialId.slice(0, 8)}</option>}
-                  {settings.candidates.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.name} · {candidate.provider}{candidate.scope === 'global' ? translate(' · global') : ''}
-                    </option>
-                  ))}
-                </select>
-                <p style={{ ...labelStyle, marginTop: 6, lineHeight: 1.5 }}>
-                  {credentialUnavailable
-                    ? translate('The saved credential is unavailable. Choose another credential or the host’s own login.')
-                    : credentialId
-                    ? translate('Remembered for new sessions on this host and CLI. Existing sessions keep their saved login.')
-                    : translate('The host must already be signed in. On a new host, select an AWB credential or add one below.')}
-                </p>
-                <a href="/settings/credentials" target="_blank" rel="noopener noreferrer"
-                  style={{ fontSize: 12, color: tokens.colors.accent }}>{translate('Add / manage credentials ↗')}</a>
-              </>
-            )}
-            {settings && !settings.supports_credential && (
-              <p style={labelStyle}>{runtimeLabel(cli)} {translate('uses the host\'s own login. Sign in on the host before starting.')}</p>
-            )}
+            {settings && <RuntimeConnectionFields idPrefix="new-session" hostId={managerId} cli={cli} settings={settings}
+              credentialId={credentialId} onCredentialChange={setCredentialId} disabled={creating || settingsLoading} />}
             {settingsError && <div role="alert" style={{ fontSize: 12, color: tokens.colors.dangerLight }}>{settingsError}</div>}
             <Button variant="ghost" size="sm" disabled={creating || settingsLoading}
               onClick={() => setSettingsRefresh((value) => value + 1)}>{translate('Refresh credentials')}</Button>
           </div>
         )}
 
-        <div>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
-            <div style={{ flex: 1 }}>
-              <Input
-                label={translate('Working directory (on the Runtime Host)')}
-                value={cwd}
-                placeholder={"/path/to/repo"}
-                onChange={(e) => setCwd(e.target.value)}
-              />
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!managerId}
-              onClick={() => setPickerOpen(true)}
-              style={{ marginBottom: 1, whiteSpace: 'nowrap' }}
-            >
-              {translate('Browse…')}</Button>
-          </div>
-        </div>
-        {managerId && (
-          <DirectoryPicker
-            isOpen={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            managerAgentId={managerId}
-            initialPath={cwd.trim() || undefined}
-            onPick={(picked) => setCwd(picked)}
-          />
-        )}
+        <WorkingDirectoryField hostId={managerId} value={cwd} onChange={setCwd} disabled={creating} />
 
         {modalOptions.map((option) => (
           <div key={option.config_id}>
             <label htmlFor={`new-session-config-${option.config_id}`} style={labelStyle}>
               {option.name}
-              {option.category === 'model' && (
-                <button
-                  type="button"
-                  disabled={hostModels.refreshing}
-                  onClick={() => void hostModels.refresh()}
-                  style={{ marginLeft: 8, fontSize: 11, background: 'none', border: 'none', color: tokens.colors.textSecondary, cursor: hostModels.refreshing ? 'wait' : 'pointer', textDecoration: 'underline' }}
-                >
-                  {hostModels.refreshing ? translate('refreshing…') : translate('refresh')}
-                </button>
-              )}
             </label>
-            <select
-              id={`new-session-config-${option.config_id}`}
-              data-config-id={option.config_id}
-              style={selectStyle}
-              disabled={creating || settingsLoading}
-              value={typeof chosenConfig[option.config_id] === 'string' ? String(chosenConfig[option.config_id]) : ''}
-              onChange={(e) => setChosenConfig((prev) => ({ ...prev, [option.config_id]: e.target.value }))}
-            >
-              <option value="">{option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}</option>
-              {option.options.map((choice) => (
-                <option key={choice.value} value={choice.value} title={choice.description}>{choice.name}</option>
-              ))}
-            </select>
+            <RuntimeOptionControl option={option} id={`new-session-config-${option.config_id}`}
+              style={{ width: '100%' }} disabled={creating || settingsLoading}
+              value={chosenConfig[option.config_id] ?? ''}
+              defaultLabel={option.config_id === '__git_workflow' ? translate('Main / master (default)') : translate('{0} default', { 0: runtimeLabel(cli) })}
+              onChange={(value) => setChosenConfig((prev) => ({ ...prev, [option.config_id]: value }))} />
             <p style={{ ...labelStyle, marginTop: 6, lineHeight: 1.5 }}>
               {option.options.find((choice) => choice.value === (chosenConfig[option.config_id] || option.current_value))?.description || option.description}
             </p>
