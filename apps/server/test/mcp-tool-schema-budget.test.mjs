@@ -128,7 +128,12 @@ describe('MCP tool schema wire-size budget (ticket faa32380)', () => {
     // careless blow-up. If organic tool additions genuinely need more,
     // raise CURRENT_BASELINE_BYTES in the SAME PR as the addition (a
     // conscious, reviewed decision), not silently.
-    const CURRENT_BASELINE_BYTES = 252_256; // 205 tools, 2026-08-22 실측 (update_board 압축 후, 티켓 f61d67ba)
+    // 2026-10-27 audit at a61c70f3: 264 unique tools, 316,173 bytes.
+    // Since the 205-tool / 252,256-byte August baseline, business workflows
+    // added 63 tools (81,147 bytes excluding array separators). No duplicate
+    // names; largest tool is create_qa_scenario (8,926 bytes), below the
+    // unchanged per-tool ceiling. Compact-profile limits remain unchanged.
+    const CURRENT_BASELINE_BYTES = 316_173;
     const TOTAL_BYTES_CEILING = Math.ceil(CURRENT_BASELINE_BYTES * 1.25);
     assert.ok(
       totalBytes <= TOTAL_BYTES_CEILING,
