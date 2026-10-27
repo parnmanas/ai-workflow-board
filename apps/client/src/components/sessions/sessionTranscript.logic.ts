@@ -5,8 +5,8 @@ import { t as translate } from '../../i18n/core';
  * (chat/utils/composerSend.ts 선례).
  *
  * 접기 규칙:
- *   - 같은 turn 의 연속된 `text` 행은 하나의 assistant 블록(스트리밍 청크 병합)
- *   - 연속된 `reasoning` 행도 하나의 블록
+ *   - 같은 turn·응답 구간의 `text` 행은 입력·메타데이터가 끼어도 하나의 assistant 블록
+ *   - `reasoning` 청크도 같은 규칙으로 병합(본문과 사고 스트림은 독립적)
  *   - `tool_update` 는 같은 tool_call_id 의 tool 블록에 status/output 으로 흡수
  *   - `permission_decision` 은 같은 request_id 의 permission 블록에 decision 으로 흡수
  *   - `elicitation_decision` 은 같은 elicitation_id 의 elicitation(질문/폼) 블록에 흡수
@@ -389,6 +389,14 @@ export function tagImageSenders(blocks: TranscriptBlock[], explicitKeys?: Set<st
 
 export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
+  // A prompt sent while an answer streams has its own turn id. Its local echo
+  // must not split the running answer (including a half-written table/code block).
+  const assistantByTurn = new Map<string, Extract<TranscriptBlock, { kind: 'assistant' }>>();
+  const reasoningByTurn = new Map<string, Extract<TranscriptBlock, { kind: 'reasoning' }>>();
+  const endTextSegment = (turnId: string) => {
+    assistantByTurn.delete(turnId);
+    reasoningByTurn.delete(turnId);
+  };
   const toolIndex = new Map<string, number>();
   const permissionIndex = new Map<string, number>();
   const elicitationIndex = new Map<string, number>();
@@ -401,6 +409,11 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     const p = ev.payload || {};
     const turnId = ev.turn_id || '';
     const last = blocks[blocks.length - 1];
+    // Preserve actual response boundaries, even when 'end_turn' has no visible
+    // block. Events belonging to another turn cannot end this turn's segment.
+    if (['user_prompt', 'tool_call', 'permission_request', 'elicitation_request', 'image', 'error', 'turn'].includes(ev.type)) {
+      endTextSegment(turnId);
+    }
     switch (ev.type) {
       case 'user_prompt': {
         // Old native histories can contain the manager's policy as a user record.
@@ -431,20 +444,33 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
         });
         break;
       }
-      case 'text':
-        if (last && last.kind === 'assistant' && last.turnId === turnId) {
-          last.text += str(p.text);
+      case 'text': {
+        const current = assistantByTurn.get(turnId);
+        // Without a turn id we cannot correlate non-adjacent chunks safely.
+        if (current && (turnId || current === last)) {
+          current.text += str(p.text);
         } else {
-          blocks.push({ kind: 'assistant', key: ev.id, seq: ev.seq, turnId, text: str(p.text), createdAt: ev.created_at });
+          const block: Extract<TranscriptBlock, { kind: 'assistant' }> = {
+            kind: 'assistant', key: ev.id, seq: ev.seq, turnId, text: str(p.text), createdAt: ev.created_at,
+          };
+          blocks.push(block);
+          assistantByTurn.set(turnId, block);
         }
         break;
-      case 'reasoning':
-        if (last && last.kind === 'reasoning' && last.turnId === turnId) {
-          last.text += str(p.text);
+      }
+      case 'reasoning': {
+        const current = reasoningByTurn.get(turnId);
+        if (current && (turnId || current === last)) {
+          current.text += str(p.text);
         } else {
-          blocks.push({ kind: 'reasoning', key: ev.id, seq: ev.seq, turnId, text: str(p.text) });
+          const block: Extract<TranscriptBlock, { kind: 'reasoning' }> = {
+            kind: 'reasoning', key: ev.id, seq: ev.seq, turnId, text: str(p.text),
+          };
+          blocks.push(block);
+          reasoningByTurn.set(turnId, block);
         }
         break;
+      }
       case 'tool_call': {
         const toolCallId = str(p.tool_call_id);
         blocks.push({
@@ -472,6 +498,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           block.status = str(p.status) || block.status;
           if (p.output !== undefined) block.output = p.output;
         } else {
+          endTextSegment(turnId);
           blocks.push({
             kind: 'tool',
             key: ev.id,

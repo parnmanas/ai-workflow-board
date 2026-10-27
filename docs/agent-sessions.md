@@ -571,6 +571,15 @@ html/md 보고서(`[결과](./report.html)`, `![결과](./notes.md)` — `!` 유
    받아 `Markdown`으로 카드에 그린다. 서버는 `text/html`
    응답에 `Content-Security-Policy: sandbox` 를 덧붙여 URL 직접 열기까지 막는다.
 
+### 스트리밍 응답 조각의 병합
+
+`sessionTranscript.logic.ts`는 턴별로 진행 중인 본문·사고 블록을 추적한다. 답변 도중 추가 입력의
+로컬 에코나 계획·사용량·상태 안내가 끼어도, 같은 턴의 뒷부분은 원래 응답에 공백·줄바꿈을
+추가하지 않고 이어 붙인 뒤 Markdown을 다시 그린다. 표·코드·수식에도 같은 규칙을 적용한다.
+도구 호출·이미지·승인/질문 요청·오류·턴 시작/종료·같은 턴의 새 프롬프트는 응답 구간을 나눈다.
+다른 턴의 이벤트는 진행 중인 응답을 끊지 않는다. 턴 ID가 없는 기록은 인접 청크만 병합한다.
+회귀: `agent-session-transcript.test.mjs`, `markdown-rendering.e2e.mjs`의 추가 입력 중 스트리밍 검사.
+
 ### 세션 답의 Markdown과 수식
 
 `components/common/Markdown.tsx`가 세션 답·로컬 Markdown 미리보기·채팅·티켓 설명/댓글·미션 대화·메모리 미리보기를 함께 그린다.
@@ -843,6 +852,7 @@ A requested history query that times out, cannot launch OpenCode, or returns inv
 기록을 다시 열 때는 최근 snapshot을 복원하며, 대화가 길어 생략돼도 한도는 남긴다.
 화면은 보고 시각으로 최신 값을 고르고 합산하지 않는다. 초기화 시각이 지난 값은
 0%로 추정하지 않고 **갱신 대기**로 표시한다. 마지막 보고 시각도 햄버거 메뉴에서 확인한다.
+
 
 세션 진입·브라우저 창 포커스 복귀·탭이 다시 보일 때에는 한도만 다시 읽는다.
 `GET /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/usage-limits` →

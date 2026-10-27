@@ -6,6 +6,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import SessionTranscript from '../../src/components/sessions/SessionTranscript.tsx';
+import { buildTranscript } from '../../src/components/sessions/sessionTranscript.logic.ts';
 import MessageList from '../../src/components/chat/MessageList.tsx';
 import { DescriptionField } from '../../src/components/ticketPanel/TextFields.tsx';
 import { TicketArtifactView } from '../../src/components/TicketArtifact.tsx';
@@ -26,4 +27,8 @@ window.renderTranscript = text => {
 });
   root.render(element);
 };
+window.renderSessionEvents = events => root.render(React.createElement(SessionTranscript, {
+  blocks: buildTranscript(events), decidingRequestId: null,
+  permissionsEnabled: true, onDecidePermission() {},
+}));
 </script></body></html>

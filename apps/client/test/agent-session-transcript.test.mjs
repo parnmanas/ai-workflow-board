@@ -769,3 +769,74 @@ test('payload 에 명시된 이미지 출처는 추정을 덮어쓰지 않는다
   ]);
   assert.equal(blocks.find((b) => b.kind === 'image').from, 'agent');
 });
+
+test('a prompt sent during streaming does not split the running answer or its Markdown', () => {
+  for (const [head, tail] of [
+    ['단순 전달이면 부담이 ', '작을 수 있습니다.'],
+    ['| 방식 | 영향 |\n| --- | --- |\n| Workers | 부담이 ', '작을 수 있습니다. |\n\n뒤 문장.'],
+    ['```js\nconst value = ', '42;\n```'],
+    ['\\[\\frac{1}{', '2}\\]'],
+  ]) {
+    seq = 0;
+    let events = [];
+    const first = ev('text', { text: head }, 'running');
+    const prompt = { ...ev('user_prompt', { text: '도메인 처리만 workers 로 만들 수도 있어?' }, 'steering'), id: 'local:steering' };
+    for (const event of [first, prompt, ev('text', { text: tail }, 'running')]) events = appendLiveEvent(events, event);
+    const blocks = buildTranscript(events);
+    assert.deepEqual(blocks.map(b => b.kind), ['assistant', 'prompt']);
+    assert.equal(blocks[0].text, head + tail);
+    assert.equal(blocks[0].key, first.id, 'the original answer keeps its DOM identity');
+    assert.equal(blocks[0].createdAt, first.created_at);
+    assert.equal(blocks[1].text, prompt.payload.text);
+  }
+});
+
+test('interleaved turns and thought/metadata updates append to their own active text segments', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('text', { text: '첫 ' }, 't1'),
+    ev('user_prompt', { text: '추가 입력' }, 't2'),
+    ev('reasoning', { text: '생각 ' }, 't1'),
+    ev('text', { text: '둘째 ' }, 't2'),
+    ev('plan', { entries: [{ content: '계획', status: 'in_progress' }] }, 't1'),
+    ev('system', { text: '안내' }, 't2'),
+    ev('usage', { total_tokens: 10 }, 't1'),
+    ev('text', { text: '문장' }, 't1'),
+    ev('reasoning', { text: '계속' }, 't1'),
+    ev('text', { text: '답변' }, 't2'),
+  ]);
+  assert.deepEqual(blocks.filter(b => b.kind === 'assistant').map(b => [b.turnId, b.text]), [['t1', '첫 문장'], ['t2', '둘째 답변']]);
+  assert.deepEqual(blocks.filter(b => b.kind === 'reasoning').map(b => b.text), ['생각 계속']);
+  assert.equal(blocks.filter(b => b.kind === 'usage').length, 1);
+});
+
+test('actual response boundaries keep separate answers even if a turn id is reused', () => {
+  for (const [type, payload] of [
+    ['turn', { phase: 'finished', stop_reason: 'end_turn' }],
+    ['turn', { phase: 'started' }],
+    ['user_prompt', { text: '새 질문' }],
+    ['tool_call', { tool_call_id: 'c1' }],
+    ['tool_update', { tool_call_id: 'trimmed-call', status: 'completed' }],
+    ['image', { image_ref: 'image1' }],
+    ['permission_request', { request_id: 'p1' }],
+    ['elicitation_request', { elicitation_id: 'q1' }],
+    ['error', { message: 'interrupted' }],
+  ]) {
+    for (const turnId of ['t1', '']) {
+      seq = 0;
+      const blocks = buildTranscript([ev('text', { text: 'before' }, turnId), ev(type, payload, turnId), ev('text', { text: 'after' }, turnId)]);
+      assert.deepEqual(blocks.filter(b => b.kind === 'assistant').map(b => b.text), ['before', 'after'], `${type}, turn=${turnId}`);
+    }
+  }
+});
+
+test('unidentified turns are only merged when adjacent, never across another prompt', () => {
+  seq = 0;
+  const blocks = buildTranscript([
+    ev('text', { text: 'old' }, ''),
+    ev('user_prompt', { text: 'new question' }, 't2'),
+    ev('text', { text: 'new' }, ''),
+    ev('text', { text: ' answer' }, ''),
+  ]);
+  assert.deepEqual(blocks.filter(b => b.kind === 'assistant').map(b => b.text), ['old', 'new answer']);
+});
