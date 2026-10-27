@@ -36,3 +36,15 @@ export function sessionLimitWindows(events: AgentSessionEventRecord[]): SessionL
   }
   return [...latest.values()].slice(-8).flatMap((value) => value.windows);
 }
+
+/** Focus reads are bounded metadata snapshots and can arrive behind a newer read or SSE. */
+export function mergeSessionLimitEvents(current: AgentSessionEventRecord[], incoming: AgentSessionEventRecord[]): AgentSessionEventRecord[] {
+  const latest = new Map<string, AgentSessionEventRecord>();
+  for (const event of [...current, ...incoming]) {
+    if (sessionLimitWindows([event]).length === 0) continue;
+    const id = event.payload.limit_id;
+    const previous = latest.get(id);
+    if (!previous || Date.parse(event.payload.observed_at) >= Date.parse(previous.payload.observed_at)) latest.set(id, event);
+  }
+  return [...latest.values()].sort((a, b) => Date.parse(a.payload.observed_at) - Date.parse(b.payload.observed_at)).slice(-8);
+}

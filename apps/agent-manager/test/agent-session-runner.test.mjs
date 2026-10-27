@@ -1563,3 +1563,23 @@ test('native quota reaches the session stream when a turn finishes', async (t) =
   await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'quota turn finished');
   assert.equal(server.events(sid).find((e) => e.type === 'usage_limits').payload.windows[0].used_percent, 42);
 });
+
+test('usage limit RPC reads native quota without loading history or starting a CLI', async (t) => {
+  const { root, server, runner, store } = await harness(t, { commandResolver: async () => { throw new Error('must not start a CLI'); } });
+  const sid = 'quota-focus-session';
+  const dir = join(root, 'codex', 'sessions', '2026', '10', '27');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `rollout-test-${sid}.jsonl`), JSON.stringify({
+    type: 'event_msg', timestamp: '2026-10-27T10:00:00Z', payload: { type: 'token_count', info: null, rate_limits: {
+      primary: { used_percent: 68, window_minutes: 300, resets_at: 1793124000 },
+    } },
+  }) + '\n');
+  store.readHistory = async () => { throw new Error('must not load history'); };
+  await runner.handle(request('usage_limits', { cli: 'codex', request_id: 'focus-limits', session_id: sid }));
+  const response = server.rpc('focus-limits');
+  assert.equal(response.ok, true);
+  assert.equal(response.result.events[0].payload.windows[0].used_percent, 68);
+  assert.deepEqual(runner.liveStates(), []);
+  await runner.handle(request('usage_limits', { cli: 'claude', request_id: 'focus-unsupported', session_id: sid }));
+  assert.deepEqual(server.rpc('focus-unsupported').result.events, []);
+});

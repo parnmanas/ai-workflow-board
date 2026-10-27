@@ -2,6 +2,10 @@ import { test, expect } from '@playwright/test';
 import { cliCatalog } from '../src/cli/catalog.ts';
 
 async function fixture(page, { missing = false, expired = false } = {}) {
+  const quotaReads = [];
+  const historyReads = [];
+  let quotaResponse;
+  let failQuota = false;
   const account = { id: 'quota-account', name: 'Personal', owner_user_id: 'quota-user' };
   const host = { manager_id: 'quota-host', instance_id: 'instance', hostname: 'host', name: 'Host', clis: ['codex'], plugin_version: '1.0.0', last_seen_at: new Date().toISOString() };
   const live = { manager_id: host.manager_id, manager_name: 'Host', cli: 'codex', session_id: 'quota-session', title: 'Usage limit gauge with a long session title that must not push controls off screen', cwd: '/repo', status: 'ready', available_modes: [], current_mode: null, config_options: ['mode', 'model', 'thought_level'].map((category) => ({ config_id: category, category, name: category === 'thought_level' ? 'Effort' : category === 'model' ? 'Model' : 'Mode', type: 'select', current_value: 'default', options: [{ value: 'default', name: 'Default' }] })), available_commands: [], updated_at: new Date().toISOString() };
@@ -12,6 +16,7 @@ async function fixture(page, { missing = false, expired = false } = {}) {
       { id: 'secondary', used_percent: 91, window_minutes: 10080, resets_at: new Date(Date.now() + 86400000).toISOString() },
     ],
   } }];
+  quotaResponse = { events };
   await page.addInitScript((accountId) => {
     localStorage.setItem('locale', 'en');
     localStorage.setItem('auth_token', 'quota-test');
@@ -30,7 +35,19 @@ async function fixture(page, { missing = false, expired = false } = {}) {
     else if (path === '/cli-catalog') body = { clis: cliCatalog() };
     else if (path === '/accounts') body = [account];
     else if (path === '/agent-sessions/hosts') body = [host];
-    else if (path.endsWith('/quota-session')) body = { session: live, live, events };
+    else if (path.endsWith('/quota-session/usage-limits')) {
+      quotaReads.push(path);
+      if (failQuota) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'offline' }) });
+      body = quotaResponse;
+    }
+    else if (path.endsWith('/quota-session')) {
+      historyReads.push(path);
+      body = { session: live, live, events: [
+        { id: 'original-prompt', seq: 1, turn_id: 'original', type: 'user_prompt', payload: { text: 'Original request' }, created_at: live.updated_at },
+        { id: 'original-answer', seq: 2, turn_id: 'original', type: 'text', payload: { text: 'Existing answer' }, created_at: live.updated_at },
+        ...events,
+      ] };
+    }
     else if (path.endsWith('/sessions')) body = [live];
     else if (path === '/voice/config') body = { stt: { ready: false }, tts: { ready: false }, wake: { ready: false } };
     else if (path === '/voice/operators') body = { operators: [] };
@@ -39,6 +56,11 @@ async function fixture(page, { missing = false, expired = false } = {}) {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
   await page.goto(`/sessions/${host.manager_id}/codex/${live.session_id}`);
+  return {
+    quotaReads, historyReads,
+    setQuota: (value) => { quotaResponse = value; },
+    failQuota: (value) => { failQuota = value; },
+  };
 }
 
 for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }, { width: 667, height: 375 }]) {
@@ -119,4 +141,84 @@ test('new quota reports update the gauge without rendering a chat message', asyn
   await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await expect(page.getByText('87% used', { exact: true })).toBeVisible();
   await expect(page.locator('.awb-session-transcript')).not.toContainText('87');
+});
+
+
+const refreshedQuota = (used, session = 'quota-session', at = Date.now() + 1000) => ({ events: [{
+  id: `${session}:quota:${at}`, seq: 1, turn_id: '', type: 'usage_limits', created_at: new Date(at).toISOString(),
+  payload: { limit_id: 'codex', observed_at: new Date(at).toISOString(), windows: [{ id: 'primary', used_percent: used, window_minutes: 300, resets_at: new Date(Date.now() + 3600000).toISOString() }] },
+}] });
+
+async function foreground(page, visible = true) {
+  await page.evaluate((visible) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: visible ? 'visible' : 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+  }, visible);
+}
+
+test('foreground refreshes quota once without reloading conversation or losing the draft', async ({ page }) => {
+  const f = await fixture(page);
+  await expect.poll(() => f.quotaReads.length).toBe(1);
+  const initialHistoryReads = f.historyReads.length;
+  const draft = page.getByRole('textbox', { name: 'Prompt', exact: true });
+  await draft.fill('Keep my draft');
+  f.setQuota(refreshedQuota(68));
+  await foreground(page, false);
+  await page.waitForTimeout(200);
+  expect(f.quotaReads.length).toBe(1);
+  await foreground(page);
+  await expect.poll(() => f.quotaReads.length).toBe(2);
+  await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '68');
+  await expect(draft).toHaveValue('Keep my draft');
+  await expect(page.locator('.awb-session-transcript')).toContainText('Existing answer');
+  expect(f.historyReads.length).toBe(initialHistoryReads);
+  await page.waitForTimeout(200);
+  expect(f.quotaReads.length).toBe(2);
+});
+
+test('failed focus refresh retains the last quota and retries on the next focus', async ({ page }) => {
+  const f = await fixture(page);
+  await expect.poll(() => f.quotaReads.length).toBe(1);
+  const initialHistoryReads = f.historyReads.length;
+  f.failQuota(true);
+  await foreground(page);
+  await expect.poll(() => f.quotaReads.length).toBe(2);
+  await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '42');
+  f.failQuota(false);
+  f.setQuota(refreshedQuota(70));
+  await foreground(page);
+  await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '70');
+  expect(f.historyReads.length).toBe(initialHistoryReads);
+});
+
+test('a quota response arriving after switching sessions cannot change the new session', async ({ page }) => {
+  const f = await fixture(page);
+  await expect.poll(() => f.quotaReads.length).toBe(1);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let held = 0;
+  await page.route('**/quota-session/usage-limits', async route => {
+    held += 1;
+    await gate;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(refreshedQuota(99)) });
+  });
+  await page.route('**/other-session**', async route => {
+    const body = route.request().url().endsWith('/usage-limits') ? refreshedQuota(10, 'other-session')
+      : { session: { session_id: 'other-session', title: 'Other session', cli: 'codex' }, events: refreshedQuota(10, 'other-session').events, live: null };
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  await foreground(page);
+  await expect.poll(() => held).toBe(1);
+  await foreground(page);
+  await page.waitForTimeout(200);
+  expect(held).toBe(1);
+  await page.evaluate(() => {
+    history.pushState({}, '', '/sessions/quota-host/codex/other-session');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '10');
+  release();
+  await page.waitForTimeout(200);
+  await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '10');
 });

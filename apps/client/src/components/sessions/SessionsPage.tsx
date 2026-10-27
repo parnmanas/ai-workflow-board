@@ -32,6 +32,7 @@ import SessionComposer from './SessionComposer';
 import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import SessionUsageLimits from './SessionUsageLimits';
+import { useSessionUsageRefresh } from './useSessionUsageRefresh';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
@@ -425,6 +426,8 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     setLiveRaw((prev) => mergeLiveSnapshot(prev, next));
   }, []);
   const [events, setEvents] = useState<AgentSessionEventRecord[]>([]);
+  const refreshedUsage = useSessionUsageRefresh(accountId, managerId, cli, sessionId);
+  const usageEvents = useMemo(() => [...events, ...refreshedUsage], [events, refreshedUsage]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
@@ -1036,7 +1039,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
               {(closeMenu) => (
                 <>
                   <SessionMenuSection title={translate('Usage limits')}>
-                    <SessionUsageLimits events={events} variant="details" />
+                    <SessionUsageLimits events={usageEvents} variant="details" />
                   </SessionMenuSection>
                   <SessionMenuSection title={translate('Session')}>
                     <dl className="awb-session-menu-facts">
@@ -1120,7 +1123,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             </SessionHeaderMenu>
           </div>
         </div>
-        <SessionUsageLimits events={events} />
+        <SessionUsageLimits events={usageEvents} />
       </header>
 
       {/* 오류 배너 — 서버가 상태에 적어 둔 사유(last_error)와, 그게 도착하기 전의

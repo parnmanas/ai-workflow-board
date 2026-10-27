@@ -17,3 +17,24 @@ test('quota events reach the session driver without changing status or becoming 
   assert.equal(received[0].driver_user_id, 'owner');
   assert.equal(service.liveSnapshot('host', 'codex', 'session-quota').status, 'ready');
 });
+
+test('focus quota read is scoped to the host account and leaves conversation/runtime state alone', async () => {
+  const service = Object.create(AgentSessionsService.prototype);
+  Object.assign(service, { live: new Map(), liveRevision: 0, awaiting: new Map() });
+  const state = service.createState('host', 'Host', 'codex', 'session-quota', { cwd: '/repo', title: 'Task', status: 'busy', driver_user_id: 'owner' });
+  const before = service.snapshot(state);
+  service.requireHost = (account, host, cli) => {
+    assert.equal(account, 'account'); assert.equal(host, 'host'); assert.equal(cli, 'codex');
+  };
+  const payload = { limit_id: 'codex', observed_at: '2026-10-27T10:00:00Z', windows: [{ id: 'primary', used_percent: 68, window_minutes: 300, resets_at: null }] };
+  service.rpc = async (...args) => {
+    assert.deepEqual(args, ['host', 'codex', 'usage_limits', { account_id: 'account', session_id: 'session-quota' }, 'reader']);
+    return { events: [{ type: 'usage_limits', payload }, { type: 'text', payload: { text: 'must not reach quota refresh' } }] };
+  };
+  const result = await service.getUsageLimits('account', 'reader', 'host', 'codex', 'session-quota');
+  assert.equal(result.events.length, 1);
+  assert.deepEqual(result.events[0].payload, payload);
+  assert.deepEqual(service.snapshot(state), before);
+  service.requireHost = () => { throw new Error('account_access_denied'); };
+  await assert.rejects(service.getUsageLimits('other-account', 'reader', 'host', 'codex', 'session-quota'), /account_access_denied/);
+});

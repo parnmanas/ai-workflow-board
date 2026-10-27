@@ -75,7 +75,7 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
+  op: 'list' | 'history' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -726,6 +726,16 @@ export class AgentSessionRunner {
           const sessions = await this.#store.listSessions(cli);
           const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
           await this.#reply(requestId, op, { ok: true, result: { sessions: withLive } });
+          return;
+        }
+        case 'usage_limits': {
+          if (!sessionId) throw Object.assign(new Error('session_id is required'), { code: 'not_found' });
+          const limits = await this.#store.readLatestUsageLimits(cli, sessionId);
+          const events = limits.map((limit, i) => ({
+            id: `${sessionId}:limits:${limit.limit_id}:${limit.observed_at}`, seq: i + 1, turn_id: '',
+            type: 'usage_limits', payload: { ...limit }, created_at: limit.observed_at,
+          }));
+          await this.#reply(requestId, op, { ok: true, result: { events } });
           return;
         }
         case 'image': {

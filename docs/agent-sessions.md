@@ -843,3 +843,12 @@ A requested history query that times out, cannot launch OpenCode, or returns inv
 기록을 다시 열 때는 최근 snapshot을 복원하며, 대화가 길어 생략돼도 한도는 남긴다.
 화면은 보고 시각으로 최신 값을 고르고 합산하지 않는다. 초기화 시각이 지난 값은
 0%로 추정하지 않고 **갱신 대기**로 표시한다. 마지막 보고 시각도 햄버거 메뉴에서 확인한다.
+
+세션 진입·브라우저 창 포커스 복귀·탭이 다시 보일 때에는 한도만 다시 읽는다.
+`GET /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/usage-limits` →
+`agent_session_request.op = usage_limits` RPC는 네이티브 기록 꼬리의 quota만 읽으며,
+CLI 프로세스를 열거나 대화 기록·driver·실행 상태를 바꾸지 않는다.
+포커스·visibility 이벤트는 100ms로 묶고, 이미 조회 중이면 중복 요청하지 않는다.
+화면을 떠난 뒤 온 응답은 무시하고, 실패하면 마지막 보고 값을 유지해 다음 포커스에서 재시도한다.
+대화·작성 중 입력·스크롤은 그대로 유지한다. 이 갱신 역시 공급자 API 호출 없이
+CLI가 마지막으로 기록한 값을 다시 읽는 것이므로, 기록이 갱신되지 않았으면 보고 시각도 그대로다.

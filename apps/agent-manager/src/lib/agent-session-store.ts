@@ -341,6 +341,14 @@ export class AgentSessionStore {
     return bound?.driver.watchAsyncQuestions?.(bound.ctx, sessionId, receive) ?? null;
   }
 
+  /** Latest native quota only, without loading the transcript or starting a process. */
+  async readLatestUsageLimits(cli: string, sessionId: string): Promise<SessionUsageLimits[]> {
+    if (!SESSION_ID_RE.test(sessionId)) return [];
+    const bound = this.#driverFor(cli);
+    if (!bound?.driver.readLatestUsageLimits) return [];
+    return bound.driver.readLatestUsageLimits(bound.ctx, sessionId);
+  }
+
   /** Quota collection never starts a CLI or makes a provider request. */
   async watchUsageLimits(cli: string, sessionId: string, receive: (limits: SessionUsageLimits) => void): Promise<CliSessionWatcher | null> {
     if (!SESSION_ID_RE.test(sessionId)) return null;

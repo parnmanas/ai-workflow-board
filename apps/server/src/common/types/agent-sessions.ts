@@ -69,6 +69,7 @@ export type AgentSessionEventType = (typeof AGENT_SESSION_EVENT_TYPES)[number];
 /** 서버 → 매니저 요청. `request_id` 가 있으면 매니저가 `POST /api/agent/sessions/rpc/:id` 로 응답하는 RPC 다. */
 export const AGENT_SESSION_REQUEST_OPS = [
   'list',        // RPC: 이 CLI 의 장비 내 세션 목록
+  'usage_limits', // RPC: latest native quota only; no transcript or CLI process changes
   'history',     // RPC: 세션 기록(CLI 홈의 파일을 트랜스크립트 이벤트로 변환)
   'open',        // RPC: 세션을 연다(session_id 없으면 session/new, 있으면 session/load)
   'prompt',      // { turn_id, text } — 살아 있지 않으면 매니저가 먼저 연다

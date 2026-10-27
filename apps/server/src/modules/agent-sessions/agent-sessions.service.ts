@@ -231,12 +231,12 @@ const RPC_ERROR_STATUS: Record<string, number> = {
   not_image: 415,
   too_large: 413,
 };
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
 /**
  * 매니저 스트림이 없는 동안 보낸 요청 중 **다시 보내도 안전한 것**(읽기 전용). `open` 은 빠진다 —
  * 첫 요청이 실제로는 닿았을 수 있어 두 번 열면 세션 프로세스가 둘이 된다.
  */
-const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'image', 'local_image']);
+const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'usage_limits', 'image', 'local_image']);
 /** 스트림이 붙은 뒤 재전송까지 — SSE 핸들러가 Observable 을 돌려주고 구독되기를 기다린다. */
 const REDELIVER_DELAY_MS = 1_000;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
@@ -1082,6 +1082,18 @@ export class AgentSessionsService implements OnModuleDestroy {
       out.push({ ...s, live_status: status });
     }
     return out;
+  }
+
+  /** Focus refresh is a read; it must not claim the driver or reconcile runtime state. */
+  async getUsageLimits(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<{ events: AgentSessionEventRecord[] }> {
+    this.requireHost(accountId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const result = await this.rpc<{ events?: unknown }>(managerId, cli, 'usage_limits', { account_id: accountId, session_id: sessionId }, userId);
+    const events = Array.isArray(result?.events)
+      ? result.events.slice(0, 8).filter((event: any) => event?.type === 'usage_limits')
+        .map((event: any, i: number) => this.normalizeEvent(event, i)).filter((event): event is AgentSessionEventRecord => !!event)
+      : [];
+    return { events };
   }
 
   async getSession(

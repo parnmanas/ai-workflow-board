@@ -110,7 +110,7 @@ import type {
   OrchestrationConfirmDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
-  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SkillAssignment, SkillAssignmentTarget, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
+  OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionEventRecord, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SkillAssignment, SkillAssignmentTarget, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
 import type {
   MarketingCampaign,
   MarketingCampaignInput,
@@ -1810,6 +1810,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     }),
+  getHostSessionUsageLimits: (managerId: string, cli: string, sessionId: string) =>
+    request<{ events: AgentSessionEventRecord[] }>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/usage-limits`),
   getHostSession: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}`),
   /**

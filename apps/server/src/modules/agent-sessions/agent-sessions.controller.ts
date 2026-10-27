@@ -162,6 +162,19 @@ export class AgentSessionsController {
     }));
   }
 
+  @Get('hosts/:managerId/:cli/sessions/:sessionId/usage-limits')
+  async usageLimits(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const account = this.accountId(req, res);
+    if (!account) return;
+    return this.run(res, 200, () => this.sessions.getUsageLimits(account, this.userId(req), managerId, cli, sessionId));
+  }
+
   @Get('hosts/:managerId/:cli/sessions/:sessionId')
   async get(
     @Param('managerId') managerId: string,
