@@ -20,6 +20,22 @@ const configOptions = [
   { id: 'fast_mode', name: 'Fast mode', category: 'model_config', type: 'boolean', currentValue: false },
   { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'read-only', name: 'Ask for approval' }, { value: 'agent', name: 'Approve for me' }] },
 ];
+// Codex chooses its initial model during thread/start or thread/resume, before
+// later ACP config changes. Keep that initial choice visible to the regression.
+let loadedModel = null;
+if (process.env.FAKE_ACP_CODEX_CONFIG === '1') {
+  const config = JSON.parse(process.env.CODEX_CONFIG || '{}');
+  configOptions[0].options.push(
+    { value: 'gpt-6-astra', name: '6 Astra' },
+    { value: 'gpt-6.1-sol', name: '6.1 Sol' },
+  );
+  configOptions[0].currentValue = config.model || 'gpt-6.1-sol';
+  configOptions.push({
+    id: 'reasoning_effort', name: 'Reasoning effort', category: 'thought_level', type: 'select',
+    currentValue: config.model_reasoning_effort || 'medium',
+    options: [{ value: 'medium', name: 'Medium' }, { value: 'xhigh', name: 'Xhigh' }],
+  });
+}
 let pendingElicitPrompt = null;
 /** `HOLD_TURN_TEST` 프롬프트 — steering 이나 cancel 이 올 때까지 열어 두는 턴. */
 let heldPrompt = null;
@@ -84,6 +100,7 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
+    CODEX_CONFIG: process.env.CODEX_CONFIG ?? null,
     DISABLE_MCP_CONFIG_FILTERING: process.env.DISABLE_MCP_CONFIG_FILTERING ?? null,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
     // opencode credential 적용 검증용 — 키는 env 로 주입되고 설정 홈은 XDG 로 고정된다.
@@ -221,6 +238,7 @@ rl.on('line', (line) => {
       break;
     }
     case 'session/new': {
+      loadedModel = configOptions[0].currentValue;
       const invalid = validateMcpServers(message.params?.mcpServers);
       if (invalid) {
         invalidParams(message.id, invalid);
@@ -270,6 +288,7 @@ rl.on('line', (line) => {
       break;
     }
     case 'session/load': {
+      loadedModel = configOptions[0].currentValue;
       const invalid = validateMcpServers(message.params?.mcpServers);
       if (invalid) {
         invalidParams(message.id, invalid);
@@ -321,6 +340,17 @@ rl.on('line', (line) => {
       result(message.id, lastPromptParams);
       break;
     case 'session/prompt':
+      if (JSON.stringify(message.params.prompt).includes('RESUME_MODEL_TEST')) {
+        const model = configOptions[0].currentValue;
+        const recorded = process.env.FAKE_ACP_RECORDED_MODEL;
+        const warning = recorded && recorded !== loadedModel
+          ? `Warning: recorded with model ${recorded} but resuming with ${loadedModel}. ` : '';
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: message.params.sessionId, update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `${warning}Initial model: ${loadedModel}; turn model: ${model}.` },
+        } } });
+        result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
       // 업스트림 오류를 조용히 재시도하는 CLI 흉내 — 응답도 알림도 stderr 도 없다
       // (실측: opencode 1.18.32 의 무료 모델 429). 러너의 침묵 감시가 이 상황을 본다.
       if (process.env.FAKE_ACP_SILENT_PROMPT === '1') break;

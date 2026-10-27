@@ -910,7 +910,7 @@ export class AgentSessionRunner {
     // initialize's response and auth push can share a stdout chunk: notifications
     // run before the awaiting continuation creates live. Keep the latest identity.
     let pendingAuthStatus: AcpAuthStatus | null = null;
-    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth, agentEnv);
+    const env = this.#buildEnv(cli, requestedSessionId || 'new', auth, agentEnv, request.config_defaults);
     const client = await AcpClient.spawn({
       command,
       args,
@@ -1123,7 +1123,7 @@ export class AgentSessionRunner {
     }
   }
 
-  #buildEnv(cli: string, sessionId: string, auth: SessionAuth, agentEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
+  #buildEnv(cli: string, sessionId: string, auth: SessionAuth, agentEnv: Record<string, string> = {}, configDefaults?: Record<string, string | boolean>): NodeJS.ProcessEnv {
     // 기본은 운영자의 CLI 홈 그대로 — 장비에 이미 있는 세션을 그 CLI 로 이어 쓰는 것이
     // 목적이다. CLI 설정에 credential 이 묶여 있으면 세션 전용 cli-home(기록 디렉터리만
     // 운영자 홈으로 링크)과 credential env 로 바꿔 끼운다.
@@ -1144,7 +1144,7 @@ export class AgentSessionRunner {
     env.AWB_SESSION_CLI = cli;
     env.AWB_SESSION_ID = sessionId;
     // CLI 별 env 보정(codex-acp 의 NO_BROWSER 등)은 모듈이 선언한다.
-    cliSessions(cli)?.adjustEnv?.(env as Record<string, string>);
+    cliSessions(cli)?.adjustEnv?.(env as Record<string, string>, configDefaults);
     return env;
   }
 

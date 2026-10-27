@@ -567,7 +567,7 @@ test('command resolution: env override, npx fallback, unknown cli; detectAcpSess
 // 운영자 홈으로 링크해 기존 세션이 그대로 보이고 이어진다. 운영자 홈 파일은 불변.
 import { lstat, readFile, stat as statFile } from 'node:fs/promises';
 
-async function credentialHarness(t, provider, fields, cli = 'claude') {
+async function credentialHarness(t, provider, fields, cli = 'claude', adapterEnv = {}) {
   const base = await harness(t);
   const captureFile = join(base.root, 'capture.json');
   const sessionCaptureFile = join(base.root, 'session-capture.json');
@@ -588,7 +588,7 @@ async function credentialHarness(t, provider, fields, cli = 'claude') {
       // 흘러들어오면 "credential 없는 operator-login" 케이스가 오염된다 — 명시적으로 덮는다.
       // 러너 셸의 ANTHROPIC_BASE_URL/ANTHROPIC_MODEL(예: Claude Code 세션 안에서 테스트를 돌릴 때)이
       // 픽스처로 새면 "프로파일 없음 → 기본 엔드포인트" 단언이 환경에 따라 흔들린다 — 걷어낸다.
-      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, FAKE_ACP_SESSION_CAPTURE_FILE: sessionCaptureFile, DISABLE_MCP_CONFIG_FILTERING: 'false', ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined, CLAUDE_CODE_MAX_CONTEXT_TOKENS: undefined },
+      baseEnv: { ...process.env, FAKE_ACP_CAPTURE_FILE: captureFile, FAKE_ACP_SESSION_CAPTURE_FILE: sessionCaptureFile, DISABLE_MCP_CONFIG_FILTERING: 'false', ANTHROPIC_API_KEY: 'operator-shell-key', OPENAI_API_KEY: 'operator-openai-key', CLAUDE_CONFIG_DIR: join(base.root, 'claude'), CODEX_HOME: codexHome, CLAUDE_CODE_OAUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined, CLAUDE_CODE_MAX_CONTEXT_TOKENS: undefined, ...adapterEnv },
       credentialFetcher: async (id, ws) => {
         fetches.push({ id, ws });
         return provider ? { credential_id: id, provider, fields } : null;
@@ -681,6 +681,63 @@ test('Codex native MCP attribution overrides shared config for new and resumed s
   await h.runner.handle(request('close', { cli: 'codex', session_id: first.id }));
   const resumed = await open('rpc-native-resume', first.id);
   assert.equal(resumed.ref, first.id, 'resume uses the native ID, not the old pending alias');
+});
+
+for (const resumed of [false, true]) {
+  test(`Codex ${resumed ? 'resume' : 'new'} uses the saved model and effort from the first ready state`, async (t) => {
+    const inherited = { model: 'gpt-6.1-sol', model_reasoning_effort: 'medium', features: { multi_agent: true } };
+    const h = await credentialHarness(t, 'codex_api_key', { api_key: 'test-key' }, 'codex', {
+      FAKE_ACP_CODEX_CONFIG: '1', FAKE_ACP_RECORDED_MODEL: 'gpt-6-astra', CODEX_CONFIG: JSON.stringify(inherited),
+    });
+    await h.runner.handle(request('open', {
+      cli: 'codex', request_id: 'rpc-model-startup', session_id: resumed ? 'recorded-codex-session' : null,
+      cwd: h.cwd, account_id: 'ws-1', credential_id: 'shared-credential',
+      config_defaults: { model: 'gpt-6-astra', reasoning_effort: 'xhigh' },
+    }));
+    const opened = h.server.rpc('rpc-model-startup');
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const sid = opened.result.session_id;
+    const ready = h.server.states(sid).find((s) => s.status === 'ready');
+    assert.equal(ready.config_options.find((o) => o.config_id === 'model').current_value, 'gpt-6-astra');
+    assert.equal(ready.config_options.find((o) => o.config_id === 'reasoning_effort').current_value, 'xhigh');
+    assert.deepEqual(JSON.parse((await h.capture()).CODEX_CONFIG), {
+      ...inherited, model: 'gpt-6-astra', model_reasoning_effort: 'xhigh',
+    }, 'keep unrelated adapter settings while applying per-session choices');
+    assert.equal(h.server.events(sid).some((e) => /Model set to|Reasoning effort set to/.test(e.payload?.text)), false,
+      'no temporary default model or corrective change after opening');
+    await h.runner.handle(request('prompt', {
+      cli: 'codex', session_id: sid, turn_id: 'model-turn', text: 'RESUME_MODEL_TEST',
+      cwd: h.cwd, account_id: 'ws-1', credential_id: 'shared-credential',
+      config_defaults: { model: 'gpt-6-astra', reasoning_effort: 'xhigh' },
+    }));
+    const answer = h.server.events(sid).filter((e) => e.type === 'text').map((e) => e.payload.text).join('');
+    assert.match(answer, /Initial model: gpt-6-astra; turn model: gpt-6-astra/);
+    assert.doesNotMatch(answer, /Warning:/, 'resume must not queue a model-switch warning for a model we already selected');
+  });
+}
+
+test('Codex session model overrides stay out of the shared credential home and other sessions', async (t) => {
+  const h = await credentialHarness(t, 'codex_api_key', { api_key: 'test-key' }, 'codex', {
+    FAKE_ACP_CODEX_CONFIG: '1', CODEX_CONFIG: JSON.stringify({ features: { multi_agent: true } }),
+  });
+  const open = async (sid, defaults) => {
+    await h.runner.handle(request('open', {
+      cli: 'codex', request_id: sid, session_id: sid, cwd: h.cwd, account_id: 'ws-1',
+      credential_id: 'shared-credential', config_defaults: defaults,
+    }));
+    assert.equal(h.server.rpc(sid).ok, true, JSON.stringify(h.server.rpc(sid)));
+    return h.capture();
+  };
+  const first = await open('codex-astra', { model: 'gpt-6-astra', reasoning_effort: 'xhigh' });
+  const configPath = join(first.CODEX_HOME, 'config.toml');
+  const sharedConfig = await readFile(configPath, 'utf8');
+  const second = await open('codex-sol', { model: 'gpt-6.1-sol', reasoning_effort: 'medium' });
+  assert.equal(first.CODEX_HOME, second.CODEX_HOME);
+  assert.equal(JSON.parse(first.CODEX_CONFIG).model, 'gpt-6-astra');
+  assert.equal(JSON.parse(second.CODEX_CONFIG).model, 'gpt-6.1-sol');
+  assert.equal(await readFile(configPath, 'utf8'), sharedConfig, 'session choices must never rewrite the shared config');
+  const defaultSession = await open('codex-default', undefined);
+  assert.deepEqual(JSON.parse(defaultSession.CODEX_CONFIG), { features: { multi_agent: true } }, 'no prior session choice leaks');
 });
 
 test('credential errors: provider mismatch, unsupported cli, and missing material fail the open RPC without spawning', async (t) => {

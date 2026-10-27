@@ -49,6 +49,14 @@ manifest(`RuntimePluginManifest` — id/transport/capabilities/어댑터 팩토�
 - 기본값이 필요하면 `constants.ts` 의 `DEFAULT_CLI_ID` 를 쓴다. "이 빌드가 아는 CLI 목록"은 `KNOWN_CLI_IDS`(레지스트리) 하나다.
 - `transport: 'acp'` 런타임(hermes)은 CLI 어댑터 spawn 경로 대신 `RuntimeSupervisor` 가 맡는다 — 소비자는 `isAcpRuntime(cli)` 로 판정한다.
 
+`sessions.adjustEnv(env, configDefaults)`는 세션 프로세스를 띄우기 전에 저장된 설정을 받는다.
+Codex는 `model`과 `reasoning_effort`를 프로세스 전용 `CODEX_CONFIG`의 `model`과
+`model_reasoning_effort`에 넣어 `thread/start`·`thread/resume`부터 적용한다. 재개 뒤에만
+`set_config_option`으로 복원하면 기본 모델로 재개했다는 경고와 모델 전환 지시가 이미 생긴다.
+기존 `CODEX_CONFIG`의 다른 항목은 보존하며, 여러 세션이 공유하는 credential 홈의
+`config.toml`은 모델 복원을 위해 수정하지 않는다. 헤더는 계속 ACP가 보고한 설정을 표시한다.
+회귀: `apps/agent-manager/test/agent-session-runner.test.mjs`의 Codex 시작·재개·공유 홈 격리 검사.
+
 ## server: `CliDescriptor`
 
 `cli-catalog.ts` 의 한 항목이 CLI 하나다. 여기서 파생되는 것:

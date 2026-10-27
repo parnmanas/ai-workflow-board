@@ -233,8 +233,8 @@ export interface CliSessionSpec {
   /** 세션 전용 cli-home 안에서 운영자 홈으로 링크할 기록 하위 디렉터리. 없으면
    *  기록을 공유하지 않는다. */
   readonly storeSubdir?: string;
-  /** spawn env 보정(codex `NO_BROWSER=1`). 있는 값은 덮지 않는다. */
-  adjustEnv?(env: Record<string, string>): void;
+  /** Process-local adapter env. Saved session settings can override CLI defaults before new/load. */
+  adjustEnv?(env: Record<string, string>, configDefaults?: Readonly<Record<string, string | boolean>>): void;
   /** Claude backend profile 을 세션에 적용할 수 있는가. */
   readonly supportsBackendProfile?: boolean;
   /** 기록 스캐너. 없으면 목록/기록은 AWB 인덱스만으로 답한다(hermes). */

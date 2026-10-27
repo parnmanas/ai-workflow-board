@@ -97,7 +97,7 @@ export const codexModule = defineCliModule({
     },
     operatorHome: resolveCodexHome,
     storeSubdir: 'sessions',
-    adjustEnv(env) {
+    adjustEnv(env, configDefaults) {
       // codex-acp: 매니저 프로세스에는 브라우저가 없다 — ChatGPT 브라우저 로그인 auth
       // method 를 숨겨 어댑터가 장비의 codex 로그인(auth.json)이나 API 키만 쓰게 한다.
       if (env.NO_BROWSER === undefined) env.NO_BROWSER = '1';
@@ -106,6 +106,25 @@ export const codexModule = defineCliModule({
       // each native session must override it with its own X-AWB-Session-Id headers.
       // Keep attribution in the process/session config, never in the shared home.
       env.DISABLE_MCP_CONFIG_FILTERING = 'true';
+      // thread/resume chooses a model before ACP set_config_option can run.
+      // Starting with the CLI default queues a misleading model-switch warning
+      // (and switch instructions) even if we restore the saved model immediately.
+      // CODEX_CONFIG is merged into both thread/start and thread/resume by the
+      // adapter. Keep this per process: credential homes can serve many sessions.
+      const overrides: Record<string, string> = {};
+      const model = configDefaults?.model;
+      const effort = configDefaults?.reasoning_effort;
+      if (typeof model === 'string' && model.trim()) overrides.model = model;
+      if (typeof effort === 'string' && effort.trim()) overrides.model_reasoning_effort = effort;
+      if (Object.keys(overrides).length) {
+        let config: unknown;
+        try { config = env.CODEX_CONFIG ? JSON.parse(env.CODEX_CONFIG) : {}; }
+        catch { throw new Error('CODEX_CONFIG must be a JSON object to apply saved Codex session settings.'); }
+        if (!config || typeof config !== 'object' || Array.isArray(config)) {
+          throw new Error('CODEX_CONFIG must be a JSON object to apply saved Codex session settings.');
+        }
+        env.CODEX_CONFIG = JSON.stringify({ ...config, ...overrides });
+      }
     },
     store: codexSessionStore,
     // codex 는 스레드마다 writer 잠금을 건다. 파일은 0바이트라 안에 주인 정보가 없고,
