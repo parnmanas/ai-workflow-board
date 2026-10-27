@@ -86,6 +86,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.addInitScript(({ authToken, accountId }) => {
+    localStorage.setItem('awb.locale', 'en');
     localStorage.setItem('auth_token', authToken);
     localStorage.setItem('currentAccountId', accountId);
   }, { authToken: token, accountId: account.id });
@@ -114,7 +115,7 @@ test('실제 SQL.js 빌드부터 Sigma 상호작용과 새로고침까지 동작
 
   await graph.focus();
   await page.keyboard.press('Enter');
-  await expect(graph.locator('xpath=..').locator('aside')).toContainText(/연결 \d+개/);
+  await expect(graph.locator('xpath=..').locator('aside')).toContainText(/Connect \d+items/);
   await expect.poll(() => graph.locator('canvas').count()).toBeGreaterThan(0);
   expect(consoleErrors).toEqual([]);
   expect(pageErrors).toEqual([]);

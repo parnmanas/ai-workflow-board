@@ -69,7 +69,7 @@ test('client exposes direct management routes with Global + accessible-Account c
   assert.match(app, /path="settings\/credentials" element={<AccountManagementPage kind="credentials"/);
   assert.match(app, /path="settings\/claude-profiles" element={<AccountManagementPage kind="claude-backend-profiles"/);
   for (const label of ['Functions', 'Credentials', 'Resources', 'Actions', 'QA', 'Security', 'Schedules', 'Claude Profiles']) {
-    assert.match(sidebar, new RegExp(`label: '${label}'`));
+    assert.match(sidebar, new RegExp(`label: translate\\('${label}'\\)`));
   }
   assert.doesNotMatch(sidebar, /label: 'Automation Catalog'/);
   assert.doesNotMatch(sidebar, /label: 'Global Functions'/);
