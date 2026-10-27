@@ -7,6 +7,8 @@ import { BusinessFormation } from '../../entities/BusinessFormation';
 import { BusinessCompany } from '../../entities/BusinessCompany';
 import { BusinessTask } from '../../entities/BusinessTask';
 import { BusinessTaskEntry } from '../../entities/BusinessTaskEntry';
+import { BusinessTaskRun } from '../../entities/BusinessTaskRun';
+import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
 import { User } from '../../entities/User';
 import { BusinessConnection } from '../../entities/BusinessConnection';
 import { BusinessEvent } from '../../entities/BusinessEvent';
@@ -87,7 +89,7 @@ export class BusinessService {
 
   async detail(id: string, accountId: string, canViewMarketing = false) {
     const company = await this.company(id, accountId);
-    const [formations, tasks, connections, events, campaigns] = await Promise.all([
+    const [formations, tasks, connections, events, campaigns, formationWork] = await Promise.all([
       this.ds.getRepository(BusinessFormation).find({ where: { company_id: id, account_id: accountId }, order: { created_at: 'DESC' } }),
       this.ds.getRepository(BusinessTask).find({ where: { company_id: id, account_id: accountId }, order: { position: 'ASC', created_at: 'ASC' } }),
       this.ds.getRepository(BusinessConnection).find({ where: { company_id: id, account_id: accountId }, order: { created_at: 'ASC' } }),
@@ -95,10 +97,11 @@ export class BusinessService {
       canViewMarketing && company.campaign_ids.length ? this.ds.getRepository(MarketingCampaign).find({
         where: { id: In(company.campaign_ids), account_id: accountId }, select: ['id', 'name', 'status', 'goal', 'cycle_count', 'next_cycle_at'],
       }) : [],
+      company.formation_task_id ? this.ds.getRepository(BusinessTaskRun).findOne({ where: { task_id: company.formation_task_id, company_id: id, account_id: accountId }, order: { sequence: 'DESC' } }) : null,
     ]);
     const ids = tasks.map(t => t.ticket_id).filter((v): v is string => !!v);
     const tickets = ids.length ? await this.ds.getRepository(Ticket).find({ where: { id: In(ids), account_id: accountId }, select: ['id', 'title', 'status'] }) : [];
-    return { company, formations: formations.map(({ customer_id, encrypted_request, credential_digest, ...safe }) => safe), tasks: tasks.map(task => ({ ...task,
+    return { company, formation_work: formationWork, formations: formations.map(({ customer_id, encrypted_request, credential_digest, ...safe }) => safe), tasks: tasks.map(task => ({ ...task,
       blocked_by: task.depends_on.filter(id => tasks.find(t => t.id === id)?.status !== 'done'),
       ticket: tickets.find(t => t.id === task.ticket_id) || null,
     })), connections, events, campaigns };
@@ -242,7 +245,7 @@ export class BusinessService {
     const repo = this.ds.getRepository(BusinessTaskEntry);
     const page = repo.createQueryBuilder('entry').where(where).orderBy('entry.revision', 'DESC').addOrderBy('entry.id', 'DESC').take(51);
     if (before !== undefined) page.andWhere('entry.revision < :before', { before });
-    const [entries, result, decision, requests, ticket] = await Promise.all([
+    const [entries, result, decision, requests, ticket, runs] = await Promise.all([
       page.getMany(),
       repo.findOne({ where: { ...where, kind: 'result' }, order: { revision: 'DESC' } }),
       repo.findOne({ where: { ...where, kind: 'decision' }, order: { revision: 'DESC' } }),
@@ -251,17 +254,20 @@ export class BusinessService {
         .leftJoin(BusinessTaskEntry, 'resolution', 'resolution.resolves_entry_id = CAST(entry.id AS varchar) AND resolution.task_id = entry.task_id AND resolution.account_id = entry.account_id')
         .andWhere('resolution.id IS NULL').orderBy('entry.revision', 'ASC').getMany(),
       task.ticket_id ? this.ds.getRepository(Ticket).findOne({ where: { id: task.ticket_id, account_id: accountId }, select: ['id', 'title', 'status'] }) : null,
+      this.ds.getRepository(BusinessTaskRun).find({ where, order: { sequence: 'DESC' }, take: 30 }),
     ]);
+    const rooms = [...new Set(runs.map(run => run.room_id).filter(Boolean))];
+    const executionMessages = rooms.length ? await this.ds.getRepository(ChatRoomMessage).find({ where: { account_id: accountId, room_id: In(rooms), sender_type: 'agent' }, order: { created_at: 'DESC' }, take: 30, select: ['id', 'content', 'type', 'created_at'] }) : [];
     const requestIds = entries.slice(0, 50).map(entry => entry.resolves_entry_id).filter((value): value is string => !!value);
     const referencedRequests = requestIds.length ? await repo.find({ where: { ...where, id: In(requestIds), kind: 'request' }, select: ['id', 'content', 'author', 'created_at'] }) : [];
     return { task: { ...task, blocked_by: task.depends_on.filter(dep => tasks.find(t => t.id === dep)?.status !== 'done'), ticket },
       company_revision: company.revision, entries: entries.slice(0, 50).map(entry => ({ ...entry, request: referencedRequests.find(request => request.id === entry.resolves_entry_id) || null })), next_before: entries.length > 50 ? entries[49].revision : null,
-      result, decision, open_requests: requests };
+      result, decision, open_requests: requests, runs, execution_messages: executionMessages };
   }
 
-  async addTaskEntry(id: string, accountId: string, taskId: string, body: unknown, actor: TicketActor) {
+  async addTaskEntry(id: string, accountId: string, taskId: string, body: unknown, actor: TicketActor, transaction?: EntityManager) {
     const input = parse(taskEntrySchema, body);
-    return this.ds.transaction(async manager => {
+    const write = async (manager: EntityManager) => {
       const company = await this.company(id, accountId, manager);
       const task = await manager.getRepository(BusinessTask).findOneBy({ id: taskId, company_id: id, account_id: accountId });
       if (!task) throw new NotFoundException('업무를 찾을 수 없습니다.');
@@ -286,7 +292,8 @@ export class BusinessService {
         actor_id: actor.id, author: actor.name, author_type: actor.type, revision: claimed.revision });
       await this.event(manager, claimed, actor.id, 'task_entry', `${task.title} · ${input.kind === 'request' ? '추가·수정 요청' : '진행 기록 추가'}`);
       return entry;
-    });
+    };
+    return transaction ? write(transaction) : this.ds.transaction(write);
   }
 
   async createTaskTicket(id: string, accountId: string, taskId: string, revision: unknown, actor: TicketActor) {

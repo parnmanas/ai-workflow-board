@@ -1,3 +1,4 @@
+import { BusinessWorkflowService } from './business-workflow.service';
 import { BusinessMailService } from './business-mail.service';
 import { BusinessMailController } from './business-mail.controller';
 import { BusinessMailWorkflowService } from './business-mail-workflow.service';
@@ -18,5 +19,5 @@ import { BusinessTrademarkService } from './business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from './business-trademark-integrations.service';
 import { BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController } from './business-trademark-integrations.controller';
 
-@Module({ imports: [SharedServicesModule, AgentsModule, ChatRoomsModule], controllers: [BusinessMailController, BusinessController, BusinessCashbookController, BusinessTrademarkController, BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController], providers: [BusinessMailWatchService, BusinessMailWorkflowService, BusinessMailService, AuthGuard, PermissionGuard, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService], exports: [BusinessMailWorkflowService, BusinessMailService, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService] })
+@Module({ imports: [SharedServicesModule, AgentsModule, ChatRoomsModule], controllers: [BusinessMailController, BusinessController, BusinessCashbookController, BusinessTrademarkController, BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController], providers: [BusinessWorkflowService, BusinessMailWatchService, BusinessMailWorkflowService, BusinessMailService, AuthGuard, PermissionGuard, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService], exports: [BusinessWorkflowService, BusinessMailWorkflowService, BusinessMailService, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService] })
 export class BusinessModule {}

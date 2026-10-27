@@ -58,6 +58,7 @@ export function BusinessFormationForm({ company, connector, formations, onClose,
     const result = await api.submitBusinessFormation(company.id, review.formation);
     setReview(result.status === 'submitted' ? { formation: result, request: null } : await api.reviewBusinessFormation(company.id, result.id));
     setConsent(false); await onChanged();
+    if (result.continuation_error) throw new Error(translate(result.continuation_error));
   });
   const discard = () => perform(async () => {
     if (!review) return;

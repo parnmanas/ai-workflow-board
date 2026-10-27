@@ -5,7 +5,7 @@ import type { AgentTemplate } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
 import type { TrademarkIntegrationsView, TrademarkIntegrationInput, TrademarkIntegration, TrademarkIntegrationAction } from './business.types';
-import type { BusinessFormation, FormationApplication, FormationReferences, FormationReview, BusinessStage, BusinessCompany, BusinessCompanyInput, BusinessConnection, BusinessConnector, BusinessDetail, BusinessTask, BusinessTaskInput, BusinessTaskJournal, BusinessTaskEntry, BusinessTaskEntryInput } from './business.types';
+import type { BusinessFormation, FormationApplication, FormationReferences, FormationReview, BusinessStage, BusinessCompany, BusinessCompanyInput, BusinessConnection, BusinessConnector, BusinessDetail, BusinessTask, BusinessTaskInput, BusinessTaskJournal, BusinessTaskEntry, BusinessTaskEntryInput, BusinessRunInput, BusinessTaskRun } from './business.types';
 import type { CliDescriptor } from './cli/catalog';
 import type { HostModelsView } from './cli/hostModels';
 import type {
@@ -2640,6 +2640,7 @@ export const api = {
   listBusinessConnectors: () => request<BusinessConnector[]>('/business/connectors').then(rows => rows.map(localizeBusinessConnector)),
   listBusinessCredentials: (accountId: string) => request<Array<{ id: string; name: string; provider: string }>>(`/business/credentials?account_id=${encodeURIComponent(accountId)}`),
   saveBusinessTask: (companyId: string, taskId: string | null, input: BusinessTaskInput & { revision: number }) => request<BusinessTask>(`/business/companies/${encodeURIComponent(companyId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ''}`, { method: taskId ? 'PATCH' : 'POST', body: JSON.stringify(input) }),
+  startBusinessWork: (companyId: string, taskId: string | null, input: BusinessRunInput) => request<BusinessTaskRun>(`/business/companies/${encodeURIComponent(companyId)}/${taskId ? `tasks/${encodeURIComponent(taskId)}/run` : 'formation-work'}`, { method: 'POST', body: JSON.stringify(input) }),
   getBusinessTask: (companyId: string, taskId: string, before?: number) => request<BusinessTaskJournal>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}${before === undefined ? '' : `?before=${before}`}`),
   addBusinessTaskEntry: (companyId: string, taskId: string, input: BusinessTaskEntryInput) => request<BusinessTaskEntry>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}/entries`, { method: 'POST', body: JSON.stringify(input) }),
   createBusinessTaskTicket: (companyId: string, taskId: string, revision: number) => request<{ ticket: NonNullable<BusinessTask['ticket']> }>(`/business/companies/${encodeURIComponent(companyId)}/tasks/${encodeURIComponent(taskId)}/ticket`, { method: 'POST', body: JSON.stringify({ revision }) }),

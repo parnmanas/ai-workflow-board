@@ -542,3 +542,17 @@
   .business-work-entry-meta time { margin-left: 0; }
   .business-task-workspace .business-heading-actions > button { font-size: 12px; padding-inline: 10px; }
 }
+
+/* Execution stays inside the Business work item, including narrow sidebars. */
+.business-execution { border-left: 3px solid var(--business-accent, #397bce); }
+.business-execution.needs_input { border-left-color: #c48a2c; }
+.business-execution-question { padding: 12px; border-radius: 8px; background: var(--business-surface, rgba(128,128,128,.08)); overflow-wrap: anywhere; }
+.business-execution-footer { width: 100%; min-width: 0; }
+.business-execution-footer .business-card-actions { justify-content: flex-end; flex-wrap: wrap; }
+.business-execution details, .business-execution p { overflow-wrap: anywhere; }
+.business-execution-settings { border: 1px solid #47556980; border-radius: 8px; padding: 12px; }
+.business-execution-settings > summary { cursor: pointer; overflow-wrap: anywhere; }
+.business-execution-settings > p { margin: 12px 0; }
+.business-execution-dialog { display: flex; flex-direction: column; overflow: hidden !important; }
+.business-execution-dialog > h2, .business-execution-dialog > div:last-child { flex-shrink: 0; }
+.business-execution-dialog > div:first-of-type { min-height: 0; overflow-y: auto; }

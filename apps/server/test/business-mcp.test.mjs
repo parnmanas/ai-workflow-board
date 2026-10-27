@@ -7,6 +7,8 @@ import { createAccount, createAgent, createApiKey, createUser } from './helpers/
 import { McpClient } from './helpers/mcp-client.mjs';
 import { encrypt, decryptStrict } from '../dist/services/encryption.service.js';
 import { LogService } from '../dist/services/log.service.js';
+import { BusinessWorkflowService } from '../dist/modules/business/business-workflow.service.js';
+import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
 import { BusinessFormationService } from '../dist/modules/business/business-formation.service.js';
 import { TOOL_AUTHZ_TABLE } from '../dist/modules/mcp/shared/tool-authz-gate.js';
 import { mcpRequestPreview } from '../dist/modules/mcp/shared/request-preview.js';
@@ -26,7 +28,7 @@ const REST_TO_MCP = {
     catalog: 'list_business_connectors', credentials: 'list_business_credentials', list: 'list_business_companies',
     create: 'create_business_company', detail: 'get_business_company', update: 'update_business_company',
     chooseService: 'choose_business_service', addTask: 'save_business_task', task: 'save_business_task',
-    taskDetail: 'get_business_task', addTaskEntry: 'add_business_task_entry',
+    taskDetail: 'get_business_task', addTaskEntry: 'add_business_task_entry', startTask: 'start_business_work', startFormationWork: 'start_business_work',
     assessSelfService: 'assess_business_self_service',
     removeTask: 'delete_business_task', initializeTrademark: 'initialize_business_trademark_tasks', createTaskTicket: 'create_business_task_ticket',
     formationReferences: 'get_business_formation_references', prepareFormation: 'prepare_business_formation',
@@ -99,7 +101,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 63);
+    assert.equal(tools.length, 65);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
     assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
@@ -368,6 +370,29 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
       assert.equal(reply.status, 'review'); assert.equal(sends, 1, 'the assigned MCP agent cannot approve a review draft');
 
     } finally { connector.sync = originalSync; connector.send = originalSend; }
+  });
+
+  await t.test('a user-authorized Business request dispatches without a ticket and its runtime submits the result over MCP', async () => {
+    const workflow = app.get(BusinessWorkflowService); workflow.onModuleDestroy();
+    const runtime = await createAgent(app, token, mine.id, { name: 'Business execution', runtime: true });
+    const worker = await clientFor('full', mine, runtime);
+    const own = await call('create_business_company', { name: 'Execution company' });
+    const args = { company_id: own.id, request_id: randomUUID(), content: 'Research formation and prepare the next decision.', agent_runtime: runtime.runtime_spec };
+    await denied('start_business_work', args, read);
+    await denied('start_business_work', args, foreign);
+    const row = await call('start_business_work', args);
+    const online = t.mock.method(app.get(InstanceRegistryService), 'listForAccount', id => id === mine.id ? [{ mode: 'manager', host_id: runtime.manager_agent_id, cli_adapters: [runtime.runtime_spec.cli] }] : []);
+    try { await workflow.tick(); } finally { online.mock.restore(); }
+    assert.equal((await ds.getRepository('BusinessTaskRun').findOneByOrFail({ id: row.id })).status, 'running');
+    await denied('start_business_work', { ...args, request_id: randomUUID() }, worker, /새 실행/);
+    const submission = { run_id: row.id, result: { status: 'needs_input', summary: 'Prepared a formation plan and cost comparison.', question: 'Please confirm the business purpose.' } };
+    await denied('complete_business_task_run', submission, full);
+    const finished = await call('complete_business_task_run', submission, worker);
+    assert.equal(finished.status, 'needs_input');
+    const journal = await call('get_business_task', { company_id: own.id, task_id: row.task_id });
+    assert.equal(journal.result.content, submission.result.summary);
+    assert.equal(journal.runs[0].question, submission.result.question);
+    assert.equal(await ds.getRepository('Ticket').countBy({ account_id: mine.id, title: '[Execution company] 회사 설립' }), 0);
   });
 
   await t.test('standalone context wires all services and rechecks session/account ownership', async () => {

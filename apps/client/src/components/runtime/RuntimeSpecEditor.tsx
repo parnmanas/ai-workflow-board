@@ -100,6 +100,7 @@ export default function RuntimeSpecEditor({
       <div style={{ marginTop: 12 }}>
         <Input
           label={folderOptionalHint ? translate('Working dir (선택 · Host 절대 경로)') : translate('Working dir (Host 절대 경로)')}
+          aria-label={folderOptionalHint ? translate('Working dir (선택 · Host 절대 경로)') : translate('Working dir (Host 절대 경로)')}
           value={value.working_dir}
           disabled={disabled}
           placeholder={folderOptionalHint ? translate('비워 두면 채팅 전용 폴더') : "/home/user/work"}

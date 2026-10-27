@@ -55,6 +55,7 @@ import type { SecurityRunService } from '../../security/security-run.service';
 import type { SecurityScheduleService } from '../../security/security-schedule.service';
 import type { AutomationScheduleService } from '../../automation-schedule/automation-schedule.service';
 import { BusinessMailService } from '../../business/business-mail.service';
+import { BusinessWorkflowService } from '../../business/business-workflow.service';
 import { BusinessMailWorkflowService } from '../../business/business-mail-workflow.service';
 import { BusinessService } from '../../business/business.service';
 import { BusinessCashbookService } from '../../business/business-cashbook.service';
@@ -246,6 +247,7 @@ export interface ToolContext {
   // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
   // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
   businessMailService?: BusinessMailService;
+  businessWorkflowService?: BusinessWorkflowService;
   businessMailWorkflowService?: BusinessMailWorkflowService;
   businessService?: BusinessService;
   businessCashbookService?: BusinessCashbookService;
@@ -357,13 +359,14 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   const businessMailService = new BusinessMailService(dataSource);
   const businessMailWorkflowService = new BusinessMailWorkflowService(dataSource, businessMailService, roomMessagingService);
   const businessService = new BusinessService(dataSource, ticketService);
+  const businessWorkflowService = new BusinessWorkflowService(dataSource, businessService, roomMessagingService);
   const businessCashbookService = new BusinessCashbookService(dataSource, businessService);
   const businessFormationService = new BusinessFormationService(dataSource, businessService);
   const businessTrademarkService = new BusinessTrademarkService(dataSource, businessService);
   const businessTrademarkIntegrationsService = new BusinessTrademarkIntegrationsService(dataSource, businessService);
 
   return {
-    businessMailWorkflowService, businessMailService, businessService, businessCashbookService, businessFormationService, businessTrademarkService, businessTrademarkIntegrationsService,
+    businessWorkflowService, businessMailWorkflowService, businessMailService, businessService, businessCashbookService, businessFormationService, businessTrademarkService, businessTrademarkIntegrationsService,
     dataSource,
     activityService,
     apiKeyService,

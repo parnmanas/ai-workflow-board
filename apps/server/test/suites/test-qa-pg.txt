@@ -11,6 +11,7 @@ test/agent-session-media-ownership.test.mjs
 test/business-http.test.mjs
 test/business-mail-workflow.test.mjs
 test/business-mail.test.mjs
+test/business-workflow.test.mjs
 test/drop-agent-host-backfill.test.mjs
 test/marketing-analytics.test.mjs
 test/marketing-approval-notify.test.mjs

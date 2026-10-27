@@ -124,6 +124,8 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   get_business_company: 'caller',
   get_business_task: 'caller',
   add_business_task_entry: 'full',
+  start_business_work: 'full',
+  complete_business_task_run: 'full',
   create_business_company: 'full',
   update_business_company: 'full',
   choose_business_service: 'full',

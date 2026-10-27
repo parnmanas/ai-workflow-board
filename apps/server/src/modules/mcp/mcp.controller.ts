@@ -36,6 +36,7 @@ import { SecurityScheduleService } from '../security/security-schedule.service';
 import { AutomationScheduleService } from '../automation-schedule/automation-schedule.service';
 import { mcpRequestPreview } from './shared/request-preview';
 import { BusinessMailService } from '../business/business-mail.service';
+import { BusinessWorkflowService } from '../business/business-workflow.service';
 import { BusinessMailWorkflowService } from '../business/business-mail-workflow.service';
 import { BusinessService } from '../business/business.service';
 import { BusinessCashbookService } from '../business/business-cashbook.service';
@@ -190,6 +191,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly sessionMessagesService: SessionMessagesService,
     // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
     private readonly businessMailService: BusinessMailService,
+    private readonly businessWorkflowService: BusinessWorkflowService,
     private readonly businessMailWorkflowService: BusinessMailWorkflowService,
     private readonly businessService: BusinessService,
     private readonly businessCashbookService: BusinessCashbookService,
@@ -305,6 +307,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       sessionMessagesService: this.sessionMessagesService,
       interruptedSessionsService: this.interruptedSessionsService,
       businessMailService: this.businessMailService,
+      businessWorkflowService: this.businessWorkflowService,
       businessMailWorkflowService: this.businessMailWorkflowService,
       businessService: this.businessService,
       businessCashbookService: this.businessCashbookService,

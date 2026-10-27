@@ -5,6 +5,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import { BusinessFormationService } from './business-formation.service';
 import { BusinessService } from './business.service';
+import { BusinessWorkflowService } from './business-workflow.service';
 import { BUSINESS_CONNECTORS } from './connectors/registry';
 
 @ApiBearerAuth('user-session')
@@ -13,7 +14,7 @@ import { BUSINESS_CONNECTORS } from './connectors/registry';
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_BUSINESS)
 export class BusinessController {
-  constructor(private readonly business: BusinessService, private readonly formation: BusinessFormationService) {}
+  constructor(private readonly business: BusinessService, private readonly formation: BusinessFormationService, private readonly workflow: BusinessWorkflowService) {}
   private marketing(req: any) {
     return [PERMISSIONS.MANAGE_MARKETING, PERMISSIONS.APPROVE_MARKETING_SPEND].some(p => hasPermission(req.currentUser.role, req.currentUser.permissions, p));
   }
@@ -38,6 +39,12 @@ export class BusinessController {
   }
   @Post('companies/:id/tasks') addTask(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.saveTask(id, req.currentAccountId, null, body, req.currentUser.id);
+  }
+  @Post('companies/:id/formation-work') startFormationWork(@Param('id') id: string, @Req() req: any, @Body() body: any) {
+    return this.workflow.start(id, req.currentAccountId, null, body, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' });
+  }
+  @Post('companies/:id/tasks/:taskId/run') startTask(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
+    return this.workflow.start(id, req.currentAccountId, taskId, body, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' });
   }
   @Post('companies/:id/stages/trademark') initializeTrademark(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.initializeTrademark(id, req.currentAccountId, body?.revision, req.currentUser.id);
@@ -70,8 +77,13 @@ export class BusinessController {
   @Get('companies/:id/formations/:actionId/review') reviewFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any) {
     return this.formation.review(id, req.currentAccountId, actionId);
   }
-  @Post('companies/:id/formations/:actionId/submit') submitFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
-    return this.formation.submit(id, req.currentAccountId, actionId, body, req.currentUser.id);
+  @Post('companies/:id/formations/:actionId/submit') async submitFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
+    const result = await this.formation.submit(id, req.currentAccountId, actionId, body, req.currentUser.id);
+    if (result.status === 'submitted') {
+      try { await this.workflow.formationSubmitted(id, req.currentAccountId, actionId, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' }); }
+      catch { return { ...result, continuation_error: '설립 신청은 제출되었습니다. 후속 에이전트 실행을 시작하지 못했으니 회사 설립 업무에서 이어서 요청하세요.' }; }
+    }
+    return result;
   }
   @Delete('companies/:id/formations/:actionId') discardFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
     return this.formation.discard(id, req.currentAccountId, actionId, body, req.currentUser.id);

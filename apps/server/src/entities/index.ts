@@ -166,6 +166,7 @@ export { BusinessCashEntry } from './BusinessCashEntry';
 export { BusinessCashMonth } from './BusinessCashMonth';
 export { BusinessTask } from './BusinessTask';
 export { BusinessTaskEntry } from './BusinessTaskEntry';
+export { BusinessTaskRun } from './BusinessTaskRun';
 export { BusinessConnection } from './BusinessConnection';
 export { BusinessEvent } from './BusinessEvent';
 

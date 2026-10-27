@@ -15,13 +15,15 @@ test.beforeEach(() => { activeLocale = 'en'; });
 const account = { id: 'business-header-account', name: 'Personal' };
 const longName = '해외에서 운영하는 아주 긴 이름의 비즈니스 International Product and Customer Operations LLC';
 const company = { id: 'company-header', name: longName, account_id: account.id, entity_type: 'LLC', country: 'US', jurisdiction: 'WY', description: '', campaign_ids: [], service_choices: {}, revision: 0 };
+const runtime = { manager_agent_id: 'host-business', cli: 'codex', model: null, working_dir: '/work/company', folder_scope: 'shared', credential_id: null, cli_runtime_profile: null, runtime_config: { strategy: 'single', permission_mode: 'approve' }, label: 'Formation assistant', role_prompt: '' };
 const campaign = { id: 'campaign-header', account_id: account.id, name: longName, status: 'active', capabilities: ['email'], currency: 'USD', cycle_interval_ms: 86400000, cycle_count: 12, limits: {}, payees: [], allowed_domains: [], agent_runtime: null, created_at: '2026-10-25T00:00:00Z', updated_at: '2026-10-25T00:00:00Z' };
 
 async function fixture(page, permissions = ['business.manage', 'marketing.manage']) {
   const errors = []; const requests = [];
+  const currentCompany = { ...company, agent_runtime: runtime };
   const task = { id: 'task-header', title: longName, company_id: company.id, account_id: account.id, stage: 'formation', status: 'in_progress', description: '설립 방향을 비교하고 근거와 결과를 기록합니다.', notes: '', owner: 'Owner', due_on: null, depends_on: [], blocked_by: [], ticket_id: 'ticket-header', ticket: { id: 'ticket-header', title: 'Formation research', status: 'in_progress' } };
   const result = { id: 'result-first', kind: 'result', content: 'Initial formation plan with [supporting document](https://example.test/plan)', author: 'Owner', author_type: 'user', revision: 1, created_at: '2026-10-25T01:00:00Z', changes: null, resolves_entry_id: null };
-  const journal = { task, company_revision: 1, entries: [result], result, decision: null, open_requests: [], next_before: null };
+  const journal = { task, company_revision: 1, entries: [result], result, decision: null, open_requests: [], next_before: null, runs: [] };
   page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(({ accountId, locale }) => {
     localStorage.setItem('awb.locale', locale);
@@ -38,7 +40,10 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
     else if (path === '/voice/operators') body = { operators: [] };
     else if (path === '/accounts') body = [account];
     else if (path === `/accounts/${account.id}`) body = account;
-    else if (path === '/business/companies') body = [company, { ...company, id: 'company-other', name: 'Second LLC' }];
+    else if (path === '/agent-templates/hosts') body = [{ id: runtime.manager_agent_id, name: 'Business Host' }];
+    else if (path.startsWith('/agent-manager/hosts/')) body = { manager_agent_id: runtime.manager_agent_id, manager_name: 'Business Host', is_online: true, instance_id: 'instance-business', refreshed_at: new Date().toISOString(), models: { codex: ['gpt-5'] } };
+    else if (path === '/runtime-specs/validate') body = { ok: true, spec: runtime };
+    else if (path === '/business/companies') body = [currentCompany, { ...company, id: 'company-other', name: 'Second LLC' }];
     else if (path === `/business/companies/${company.id}/tasks/task-header/entries`) {
       const input = route.request().postDataJSON();
       const row = { ...input, id: input.request_id, task_id: task.id, revision: ++journal.company_revision, author: 'Owner', author_type: 'user', created_at: new Date().toISOString(), changes: null };
@@ -48,9 +53,16 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
       if (row.kind === 'resolution') journal.open_requests = journal.open_requests.filter(request => request.id !== row.resolves_entry_id);
       body = row;
     }
+    else if (path === `/business/companies/${company.id}/formation-work` || path === `/business/companies/${company.id}/tasks/task-header/run`) {
+      const input = route.request().postDataJSON();
+      const run = { id: input.request_id, task_id: task.id, status: 'queued', agent_runtime: runtime, room_id: 'business-room', question: '', summary: '', last_error: '', created_at: new Date().toISOString() };
+      journal.runs.unshift(run); currentCompany.formation_task_id = task.id;
+      const entry = { id: input.request_id, task_id: task.id, kind: 'request', content: input.content, revision: ++journal.company_revision, author: 'Owner', author_type: 'user', created_at: new Date().toISOString(), changes: null, resolves_entry_id: null };
+      journal.entries.unshift(entry); journal.open_requests.push(entry); body = run;
+    }
     else if (path === `/business/companies/${company.id}/tasks/task-header`) body = journal;
     else if (path === '/tickets/ticket-header/comments') body = [{ id: 'comment-header', content: 'Agent research and supporting evidence', author: 'Agent', author_type: 'agent', created_at: '2026-10-25T01:30:00Z', attachments: [] }];
-    else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company, tasks: [], connections: [], campaigns: [], events: [], formations: [] };
+    else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company: currentCompany, tasks: [task], formation_work: journal.runs[0] || null, connections: [], campaigns: [], events: [], formations: [] };
     else if (path.includes('/cashbook/')) body = { month: '2026-10', currency: 'USD', company_revision: 0, entries: [], period: null, summary: { inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0, active_count: 0, unreconciled_count: 0 } };
     else if (path === '/business/mail/connections') body = { connections: [{ id: 'mail-header', name: longName, config: { addresses: ['ops@example.test'] }, enabled: true, purpose: 'operations' }], connectors: [], credentials: [] };
     else if (path === '/business/mail/messages') body = { messages: [], total: 0, offset: 0, limit: 50 };
@@ -139,9 +151,12 @@ for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (loca
         await expect(page.locator('.business-operations-heading')).toBeInViewport();
       }
       if (path.includes('&task=')) {
-        await page.getByRole('button', { name: ui('추가·수정 요청'), exact: true }).click();
-        await expect(page.getByLabel(ui('업무 기록 내용'))).toBeFocused();
-        await expect(page.getByLabel(ui('업무 기록 내용'))).toBeInViewport();
+        await page.getByRole('button', { name: ui('에이전트에게 맡기기'), exact: true }).click();
+        const dialog = page.getByRole('dialog', { name: ui('에이전트에게 업무 맡기기') });
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole('button', { name: ui('이 설정으로 실행'), exact: true })).toBeInViewport();
+        await expect(dialog.getByRole('button', { name: ui('이 설정으로 실행'), exact: true })).toBeEnabled();
+        await dialog.getByRole('button', { name: ui('취소'), exact: true }).click();
       }
       if (path === '/business/mail') {
         await expect(page.getByRole('region', { name: ui("통합 메일 목록") })).toBeInViewport();
@@ -217,17 +232,21 @@ test('one business work item keeps original outcomes, revision requests and reso
   await page.goto(url);
   await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('Initial formation plan');
   await expect(page.getByRole('region', { name: ui('진행 과정과 변경 내역'), exact: true })).toContainText('Agent research and supporting evidence');
-  const record = page.getByRole('region', { name: ui('업무에 이어서 기록'), exact: true });
+  const record = page.getByRole('region', { name: ui('에이전트에게 요청'), exact: true });
+  await record.locator('summary').click();
+  await record.getByLabel(ui('실행 없이 기록만 남기기'), { exact: true }).check();
   await record.getByLabel(ui('업무 기록 내용')).fill('기존 설립 계획에서 비용 비교와 다음 단계를 보완해 주세요.');
   await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
   const requests = page.getByRole('region', { name: ui('남은 추가·수정 요청'), exact: true });
   await expect(requests).toContainText('비용 비교와 다음 단계');
   await page.reload();
   await expect(requests).toContainText('비용 비교와 다음 단계');
+  await page.getByRole('region', { name: ui('최신 결과'), exact: true }).locator('summary').last().click();
   await page.getByRole('button', { name: ui('수정 결과 남기기'), exact: true }).click();
   await record.getByLabel(ui('업무 기록 내용')).fill('수정 결과: 두 옵션의 비용을 비교했습니다. 다음 단계는 서류 검토입니다.');
   await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
   await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('수정 결과: 두 옵션');
+  await requests.getByText(ui('직접 처리한 경우'), { exact: true }).click();
   await requests.getByRole('button', { name: ui('처리 결과 남기기'), exact: true }).click();
   await record.getByLabel(ui('업무 기록 내용')).fill('수정 결과에 비용 비교와 다음 단계를 반영했습니다.');
   await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
@@ -257,5 +276,60 @@ test('left Business menu exposes Mail and opens the same inbox as the top naviga
   await expect(page).toHaveURL(/\/business\/mail$/);
   await expect(page.getByRole('region', { name: ui('통합 메일 목록') })).toBeVisible();
   await expect(page.locator('.business-nav a[href="/business/mail"]')).toHaveClass(/active/);
+  expect(f.errors).toEqual([]);
+});
+
+
+for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, { width: 667, height: 375 }]) {
+  test(`company formation starts from overview and continues in one work item at ${size.width}x${size.height}`, async ({ page }) => {
+    activeLocale = 'ko'; await page.setViewportSize(size);
+    const f = await fixture(page);
+    await page.goto('/business?company=company-header');
+    await page.getByRole('button', { name: ui('회사 설립 맡기기'), exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: ui('에이전트에게 업무 맡기기') });
+    await expect(dialog.getByLabel(ui('맡길 목표 · 요청'))).toHaveValue(/회사 설립/);
+    await dialog.getByRole('button', { name: ui('이 설정으로 실행'), exact: true }).click();
+    await expect(page).toHaveURL(/task=task-header/);
+    await expect(page.getByRole('region', { name: ui('에이전트 실행'), exact: true })).toContainText(ui('실행 대기'));
+    expect(f.requests.some(path => path.endsWith('/formation-work'))).toBe(true);
+    const run = f.journal.runs[0];
+    run.status = 'needs_input'; run.question = '사업 목적을 확인해 주세요. 신청 초안은 준비했습니다.';
+    const result = { id: 'agent-result', kind: 'result', content: '설립 방식과 비용 비교, 신청 초안을 준비했습니다.', author: 'Business Host/Formation assistant', author_type: 'agent', revision: ++f.journal.company_revision, created_at: new Date().toISOString(), changes: null, resolves_entry_id: null };
+    f.journal.entries.unshift(result); f.journal.result = result;
+    await page.reload();
+    await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText(result.content);
+    await page.getByRole('button', { name: ui('답변하고 이어서 진행'), exact: true }).click();
+    const content = page.getByLabel(ui('업무 기록 내용'));
+    await expect(content).toBeFocused(); await expect(content).toBeInViewport();
+    await content.fill('사업 목적은 소프트웨어 개발입니다. 이 내용으로 신청 초안을 수정해 주세요.');
+    await page.getByRole('button', { name: ui('에이전트에게 보내기'), exact: true }).click();
+    await expect(page.getByRole('region', { name: ui('에이전트 실행'), exact: true })).toContainText(ui('실행 대기'));
+    await expect(content).toHaveValue('');
+    expect(f.journal.runs).toHaveLength(2);
+    await page.reload();
+    await expect(page.getByRole('region', { name: ui('진행 과정과 변경 내역'), exact: true })).toContainText('소프트웨어 개발');
+    await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText(result.content);
+    expect(f.requests.some(path => path.endsWith('/ticket'))).toBe(false);
+    expect(f.errors).toEqual([]);
+  });
+}
+
+
+test('first-time Business agent setup is available in the work dialog on a narrow phone', async ({ page }, testInfo) => {
+  activeLocale = 'ko'; await page.setViewportSize({ width: 320, height: 568 });
+  const f = await fixture(page);
+  await page.route('**/api/business/companies/company-header', route => route.fulfill({ json: { company, tasks: [], formations: [], connections: [], events: [], campaigns: [] } }));
+  await page.route('**/api/agent-templates', route => route.fulfill({ json: [{ id: 'business-template', name: 'Business assistant', host_id: runtime.manager_agent_id, cli: runtime.cli, model: null, effort: null, runtime_config: runtime.runtime_config }] }));
+  await page.goto('/business?company=company-header');
+  await page.getByRole('button', { name: ui('회사 설립 맡기기'), exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: ui('에이전트에게 업무 맡기기') });
+  const run = dialog.getByRole('button', { name: ui('이 설정으로 실행'), exact: true });
+  await expect(run).toBeInViewport(); await expect(run).toBeDisabled();
+  await dialog.getByLabel(ui('Agent 템플릿 (선택 사항)'), { exact: true }).selectOption('business-template');
+  await dialog.getByLabel(ui('Working dir (Host 절대 경로)'), { exact: true }).fill('/work/company');
+  await expect(run).toBeEnabled(); await expect(run).toBeInViewport();
+  await page.screenshot({ path: testInfo.outputPath('business-first-agent-setup.png') });
+  await run.click(); await expect(page).toHaveURL(/task=task-header/);
+  expect(f.journal.runs).toHaveLength(1);
   expect(f.errors).toEqual([]);
 });

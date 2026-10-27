@@ -10,11 +10,12 @@ interface ModalProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   maxWidth?: number;
+  className?: string;
 }
 
 let _modalIdCounter = 0;
 
-export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: ModalProps) {
+export function Modal({ isOpen, onClose, title, children, footer, maxWidth, className }: ModalProps) {
   // Generate a stable id per instance for aria-labelledby
   const [titleId] = React.useState(() => `modal-title-${++_modalIdCounter}`);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -58,7 +59,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth }: Mo
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
-        className="awb-dialog"
+        className={['awb-dialog', className].filter(Boolean).join(' ')}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{

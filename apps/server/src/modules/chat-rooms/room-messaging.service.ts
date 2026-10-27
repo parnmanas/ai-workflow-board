@@ -812,7 +812,7 @@ export class RoomMessagingService {
       // to DO the work rather than to file a ticket. Keeping it on the existing
       // flag (instead of a new payload field) means the agent-manager needs no
       // change and the SSE contract is untouched.
-      is_action_room: !!roomForName?.action_id || !!roomForName?.orchestration_mission_id || roomForName?.run_kind === 'mail',
+      is_action_room: !!roomForName?.action_id || !!roomForName?.orchestration_mission_id || ['mail', 'business'].includes(roomForName?.run_kind || ''),
       // F-1 (ticket 24694916): forward the parsed refs on the wire (object, not the
       // stringified column) so the event-registry map() + client get the shape
       // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
@@ -946,7 +946,7 @@ export class RoomMessagingService {
       // ticket e6d32e9d: keep the Action-room signal consistent across both
       // chat_room_message emits. A system alert posted into an Action room
       // still carries the action_id so any responder gets the right prompt.
-      is_action_room: !!room.action_id || !!room.orchestration_mission_id || room.run_kind === 'mail',
+      is_action_room: !!room.action_id || !!room.orchestration_mission_id || ['mail', 'business'].includes(room.run_kind || ''),
     });
 
     this.logService.info('ChatRooms', `system message posted to room ${roomId}`, {

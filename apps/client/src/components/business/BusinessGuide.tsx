@@ -10,13 +10,13 @@ import { BUSINESS_GUIDES } from './business.guides';
 export function BusinessHowItWorks({ onStart }: { onStart(): void }) {
   useLocale();
   return <section className="business-how" aria-label={translate('Business 이용 순서')}>
-    <div className="business-section-heading"><h2><BusinessIcon name="workflow" size={19} />{translate('실제 진행은 이렇게 이어집니다')}</h2><Button variant="ghost" onClick={onStart}>{translate('단계별 진행 방법')} <BusinessIcon name="arrow" size={14} /></Button></div>
+    <div className="business-section-heading"><h2><BusinessIcon name="workflow" size={19} />{translate('실제 진행은 이렇게 이어집니다')}</h2><Button variant="ghost" onClick={onStart}>{translate('업무 맡기기')} <BusinessIcon name="arrow" size={14} /></Button></div>
     <ol className="business-how-steps">
-      <li><span>1</span><div><strong>{translate('AWB에서 준비')}</strong><p>{translate('회사와 업무를 등록하고 담당자·기한을 정합니다.')}</p></div></li>
-      <li><span>2</span><div><strong>{translate('방식을 선택해 진행')}</strong><p>{translate('지원되는 신청은 AWB에서, 서명·심사·송금·신고는 공급자에서 진행합니다.')}</p></div></li>
-      <li><span>3</span><div><strong>{translate('AWB에서 확인')}</strong><p>{translate('결과를 조회하거나 기록하고 다음 업무로 이어갑니다.')}</p></div></li>
+      <li><span>1</span><div><strong>{translate('목표를 맡기세요')}</strong><p>{translate('회사 설립 목표와 담당 에이전트를 선택합니다.')}</p></div></li>
+      <li><span>2</span><div><strong>{translate('에이전트가 진행합니다')}</strong><p>{translate('조사·비교·신청 준비와 결과 정리를 같은 업무에서 이어갑니다.')}</p></div></li>
+      <li><span>3</span><div><strong>{translate('필요한 결정에 답하세요')}</strong><p>{translate('선택·비용 승인·본인 서명이 필요할 때만 확인하고, 수정은 이어서 요청합니다.')}</p></div></li>
     </ol>
-    <p className="business-guide-note">{translate('회사 등록은 AWB의 관리용 워크플로를 만듭니다. 서비스를 비교한 뒤 직접 처리·doola 내부 신청·공급자 외부 신청 중 방식을 고르세요. 마케팅은 AWB의 캠페인·승인·실행 기능을 사용합니다.')}</p>
+    <p className="business-guide-note">{translate('진행 과정, 준비한 문서, 결정과 수정 요청은 하나의 업무에 남습니다. 실제 설립 신청은 준비된 내용을 검토하고 승인한 뒤 제출합니다.')}</p>
   </section>;
 }
 

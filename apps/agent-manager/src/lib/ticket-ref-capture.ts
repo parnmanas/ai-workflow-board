@@ -358,6 +358,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   get_business_company: 'read',
   get_business_task: 'read',
   add_business_task_entry: 'non-ticket',
+  start_business_work: 'non-ticket',
+  complete_business_task_run: 'non-ticket',
   create_business_company: 'non-ticket',
   update_business_company: 'non-ticket',
   choose_business_service: 'non-ticket',

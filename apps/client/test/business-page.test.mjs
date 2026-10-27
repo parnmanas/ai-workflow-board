@@ -32,6 +32,7 @@ async function render(t, { entry = '/business', permissions = ['business.manage'
   const calls = [];
   const original = {};
   for (const [key, fn] of Object.entries({
+    listTemplateHosts: async () => [], listAgentTemplates: async () => [], listCredentials: async () => [],
     getMe: async () => ({ id: 'u1', name: 'Owner', status: 'active', resolved_permissions: permissions, accounts: [{ id: 'account-1', name: 'Personal' }] }),
     listBusinessCompanies: async () => [{ ...company }], listBusinessConnectors: async () => [connector], getBusinessCompany: async () => detail(),
     getBusinessCashbook: async (_id, month) => ({ month, company_revision: 0, currency: 'USD', entries: [], period: null, summary: { active_count: 0, unreconciled_count: 0, inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0 } }),
@@ -416,6 +417,7 @@ test('a failed work journal save preserves the draft and reuses the same request
       return record;
     },
   } });
+  click(container.querySelector('.business-task-compose input[type=checkbox]'));
   typeInto(field(container, '업무 기록 내용'), 'Revise the costs in the formation plan');
   click(button(container, '기록 남기기')); await flush(); await flush();
   assert.equal(field(container, '업무 기록 내용').value, 'Revise the costs in the formation plan');
@@ -441,7 +443,36 @@ test('a task server failure explains the failed read and retry recovers without 
   failed = false;
   click(container.querySelector('[role="alert"] button')); await flush(); await flush();
   assert.equal(container.querySelector('[role="alert"]'), null);
-  assert.equal(button(container, '기록 남기기').disabled, true, 'the recovered composer waits for content');
+  assert.equal(button(container, '에이전트에게 보내기').disabled, true, 'the recovered composer waits for content');
   typeInto(field(container, '업무 기록 내용'), 'Continue the formation work');
-  assert.equal(button(container, '기록 남기기').disabled, false);
+  assert.equal(button(container, '에이전트에게 보내기').disabled, false);
+});
+
+
+test('the default composer dispatches revisions with the company runtime and preserves a retry ID', async t => {
+  const runtime = { manager_agent_id: 'host-1', cli: 'codex', working_dir: '/work/company', label: 'Formation assistant', model: null, runtime_config: { strategy: 'single' } };
+  const row = { id: 'run-1', task_id: 'task-1', status: 'needs_input', agent_runtime: runtime, question: 'Confirm the business purpose.', summary: 'Prepared the draft.', created_at: '2026-10-27T00:00:00Z' };
+  const state = { task: task(), runs: [row], company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] };
+  let attempts = 0;
+  const sent = [];
+  const { container, calls } = await render(t, { entry: '/business/operations?task=task-1', stubs: {
+    getBusinessCompany: async () => detail({ company: { ...company, agent_runtime: runtime } }),
+    getBusinessTask: async () => structuredClone(state),
+    startBusinessWork: async (_company, _task, input) => {
+      sent.push(input);
+      if (++attempts === 1) throw new Error('Connection interrupted');
+      state.runs = [{ ...row, id: input.request_id, status: 'queued', question: '' }];
+      return state.runs[0];
+    },
+  } });
+  assert.match(container.textContent, /Confirm the business purpose/);
+  click(button(container, '답변하고 이어서 진행'));
+  typeInto(field(container, '업무 기록 내용'), 'The purpose is software development. Please update the draft.');
+  click(button(container, '에이전트에게 보내기')); await flush(); await flush();
+  assert.equal(field(container, '업무 기록 내용').value, sent[0].content);
+  click(button(container, '에이전트에게 보내기')); await flush(); await flush();
+  assert.equal(sent.length, 2); assert.equal(sent[0].request_id, sent[1].request_id);
+  assert.equal(field(container, '업무 기록 내용').value, '');
+  assert.match(container.textContent, uiPattern('실행 대기'));
+  assert.equal(calls.some(([name]) => ['addBusinessTaskEntry', 'createBusinessTaskTicket', 'addComment'].includes(name)), false);
 });

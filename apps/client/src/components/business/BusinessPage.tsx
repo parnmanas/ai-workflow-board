@@ -17,6 +17,7 @@ import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
 import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
 import { BusinessTrademarks } from './BusinessTrademarks';
 import { BusinessPageHeader } from './BusinessPageHeader';
+import { BusinessExecutionStatus, BusinessWorkStartForm } from './BusinessWorkExecution';
 import { BusinessTaskWorkspace } from './BusinessTaskWorkspace';
 
 type View = 'overview' | 'operations' | 'connectors';
@@ -82,6 +83,7 @@ export default function BusinessPage({ view }: { view: View }) {
   const [companyModal, setCompanyModal] = useState<'new' | 'edit' | null>(null);
   const [taskModal, setTaskModal] = useState<BusinessTask | 'new' | null>(null);
   const [connectorModal, setConnectorModal] = useState<BusinessConnector | null>(null);
+  const [startWork, setStartWork] = useState(false);
   const [busy, setBusy] = useState('');
   const [filter, setFilter] = useState('all');
   const [formationModal, setFormationModal] = useState<BusinessConnector | null>(null);
@@ -132,10 +134,15 @@ export default function BusinessPage({ view }: { view: View }) {
     finally { if (request === generation.current) setLoading(false); }
   }, [selectedId, canUse]);
   useEffect(() => {
-    setDetail(null); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setFormationModal(null); setSelfModal(null);
+    setDetail(null); setStartWork(false); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setFormationModal(null); setSelfModal(null);
     void loadDetail();
     return () => { generation.current++; };
   }, [loadDetail]);
+  useEffect(() => {
+    if (view !== 'overview' || !detail?.formation_work || startWork || companyModal) return;
+    const timer = window.setInterval(() => { if (!document.hidden) void loadDetail(); }, 10000);
+    return () => window.clearInterval(timer);
+  }, [view, !!detail?.formation_work, startWork, companyModal, loadDetail]);
   const reload = async () => {
     await loadDetail();
     setCompanies(await api.listBusinessCompanies());
@@ -192,11 +199,12 @@ export default function BusinessPage({ view }: { view: View }) {
       moreActions={selectedId ? close => <Button variant="ghost" disabled={loading || !!busy} onClick={() => { close(); void reload().catch(e => showToast(e.message, 'error')); }}><BusinessIcon name="refresh" size={16} />{translate('워크플로 새로고침')}</Button> : undefined}
     />
     {view === 'connectors' && <section className="business-panel business-mail-catalog"><div><h2>{translate('메일 자동화 커넥터')}</h2><p className="business-muted">{translate('SMTP · IMAP · JMAP 연결을 등록하고 여러 업무 주소의 수신·발신 결과를 함께 확인합니다.')}</p></div><Link to="/business/mail?connections=1">{translate('메일 연결 관리 →')}</Link></section>}
+    {startWork && company && <BusinessWorkStartForm company={company} onClose={() => setStartWork(false)} onStarted={async run => { await reload(); setStartWork(false); openTask(run.task_id); }} />}
     {error && <ErrorState message={error} onRetry={() => void (companies === null ? bootstrap() : loadDetail())} />}
     {companies === null && !error && <div className="business-loading" role="status">{translate('비즈니스를 불러오는 중…')}</div>}
     {companies?.length === 0 && !error && <section className="business-welcome">
       <div className="business-welcome-art" aria-hidden="true"><div className="business-welcome-center"><BusinessIcon name="formation" size={44} /></div>{STAGES.slice(1).map((s, i) => <span key={s.id} className={`business-orbit orbit-${i}`} style={{ color: s.color }}><BusinessIcon name={s.id} size={25} /></span>)}</div>
-      <span className="business-eyebrow">{translate('BUILD → RUN → GROW')}</span><h2>{translate('회사를 만들고,')}<br />{translate('하나의 흐름으로 운영하세요.')}</h2><p>{translate('설립, 금융, 회계, 고객지원, 마케팅.')}<br />{translate('흩어진 업무와 서비스를 한곳에서 연결합니다.')}</p><p className="business-guide-note">{translate('먼저 AWB에 관리할 회사를 등록하세요.')}<br />{translate('커넥터에서 서비스를 비교하고 내부 신청 또는 외부 신청을 시작하세요.')}</p>
+      <span className="business-eyebrow">{translate('BUILD → RUN → GROW')}</span><h2>{translate('회사를 만들고,')}<br />{translate('하나의 흐름으로 운영하세요.')}</h2><p>{translate('설립, 금융, 회계, 고객지원, 마케팅.')}<br />{translate('흩어진 업무와 서비스를 한곳에서 연결합니다.')}</p><p className="business-guide-note">{translate('먼저 AWB에 관리할 회사를 등록하세요.')}<br />{translate('등록한 회사에서 목표와 담당 에이전트를 선택하면 조사와 신청 준비를 시작합니다.')}</p>
       <Button size="lg" onClick={() => setCompanyModal('new')}><BusinessIcon name="plus" size={18} />{translate('첫 회사 등록하기')}</Button>
       <div className="business-welcome-stages">{STAGES.map(s => <span key={s.id}><BusinessIcon name={s.id} size={18} />{s.label}</span>)}</div>
     </section>}
@@ -205,10 +213,11 @@ export default function BusinessPage({ view }: { view: View }) {
       {view === 'overview' && <>
         <section className="business-hero">
           <div className="business-hero-copy"><div className="business-company-meta"><span className="business-pill">{company.entity_type === 'other' ? translate('회사') : company.entity_type}</span><span>{[company.country, company.jurisdiction].filter(Boolean).join(' · ')}</span></div><h2>{company.name}</h2><p>{company.description || translate('설립부터 매일의 운영까지, 다음 단계를 이어가세요.')}</p>
-            <div className="business-card-actions"><Button onClick={() => upcoming[0] ? chooseStage(upcoming[0].stage) : navigate(path('operations'))}>{translate('다음 업무 보기')} <BusinessIcon name="arrow" size={16} /></Button><Button variant="ghost" onClick={() => setCompanyModal('edit')}>{translate('회사 정보 · 캠페인 연결')}</Button></div>
+            <div className="business-card-actions"><Button onClick={() => company.formation_task_id ? openTask(company.formation_task_id) : setStartWork(true)}>{company.formation_task_id ? translate('회사 설립 진행 보기') : translate('회사 설립 맡기기')} <BusinessIcon name="arrow" size={16} /></Button><Button variant="ghost" onClick={() => setCompanyModal('edit')}>{translate('회사 정보 · 캠페인 연결')}</Button></div>
           </div><ProgressRing done={done} total={tasks.length} />
         </section>
-        <BusinessHowItWorks onStart={() => chooseStage(upcoming[0]?.stage || 'formation')} />
+        {detail.formation_work && <BusinessExecutionStatus runs={[detail.formation_work]} onReply={() => openTask(detail.formation_work!.task_id)} onConfigure={() => setStartWork(true)} />}
+        <BusinessHowItWorks onStart={() => company.formation_task_id ? openTask(company.formation_task_id) : setStartWork(true)} />
         <div className="business-stats">
           <button onClick={() => navigate(path('operations'))}><span className="business-stat-icon"><BusinessIcon name="check" /></span><div><small>{translate('완료한 업무')}</small><strong>{done}<em> / {tasks.length}</em></strong></div></button>
           <button onClick={() => chooseStage(tasks.find(t => t.status === 'in_progress')?.stage || 'formation')}><span className="business-stat-icon blue"><BusinessIcon name="workflow" /></span><div><small>{translate('진행 중')}</small><strong>{tasks.filter(t => t.status === 'in_progress').length}<em>{translate('건')}</em></strong></div></button>

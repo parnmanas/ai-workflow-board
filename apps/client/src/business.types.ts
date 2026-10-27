@@ -1,6 +1,8 @@
+import type { RuntimeSpecDraft } from './runtime/runtimeSpec';
 export type BusinessStage = 'formation' | 'trademark' | 'banking' | 'payments' | 'accounting' | 'support' | 'growth';
 export type BusinessTaskStatus = 'todo' | 'in_progress' | 'waiting' | 'done';
 export interface BusinessCompany {
+  agent_runtime?: RuntimeSpecDraft | null; formation_task_id?: string | null;
   self_service?: Record<string, { answers: Record<string, boolean>; version: string; confirmed_at: string; actor_id: string }>;
   id: string; account_id: string; name: string; entity_type: 'LLC' | 'CCorp' | 'other'; country: string;
   service_choices: Partial<Record<BusinessStage, { provider: string; plan: string }>>;
@@ -22,6 +24,8 @@ export interface BusinessTaskEntry {
 }
 export interface BusinessTaskJournal {
   task: BusinessTask; company_revision: number; entries: BusinessTaskEntry[]; next_before: number | null;
+  runs?: BusinessTaskRun[];
+  execution_messages?: Array<{ id: string; content: string; type: string; created_at: string }>;
   result: BusinessTaskEntry | null; decision: BusinessTaskEntry | null; open_requests: BusinessTaskEntry[];
 }
 export interface BusinessTaskEntryInput {
@@ -49,6 +53,7 @@ export interface BusinessConnection {
   snapshot: BusinessSnapshot | null; last_error: string; synced_at: string | null; attempted_at: string | null; revision: number;
 }
 export interface BusinessDetail {
+  formation_work?: BusinessTaskRun | null;
   company: BusinessCompany; formations: BusinessFormation[]; tasks: BusinessTask[]; connections: BusinessConnection[];
   campaigns: Array<{ id: string; name: string; status: string; goal: string; cycle_count: number; next_cycle_at: string | null }>;
   events: Array<{ id: string; message: string; kind: string; created_at: string }>;
@@ -75,6 +80,7 @@ export interface Cashbook {
 }
 
 export interface BusinessFormation {
+  continuation_error?: string;
   id: string; company_id: string; provider: string; credential_id: string; environment: 'sandbox' | 'live';
   payload_digest: string; revision: number; status: 'draft' | 'submitting' | 'uncertain' | 'submitted';
   summary: { name: string; state: string; entity_type: string; industry: string };
@@ -135,3 +141,10 @@ export interface TrademarkIntegrationAction {
   review?: { subject: string; from?: string; to?: string; reply_to?: string; text?: string; roles?: Array<{ role: string; name: string; email: string }>; template_name?: string; template_id?: string; documents?: string[] };
 }
 export interface TrademarkIntegrationsView { connectors: TrademarkConnectorDefinition[]; connections: TrademarkIntegration[]; records: TrademarkSourceRecord[]; actions: TrademarkIntegrationAction[] }
+
+export interface BusinessRunInput { request_id: string; content: string; agent_runtime?: Record<string, unknown> }
+export interface BusinessTaskRun {
+  id: string; task_id: string; status: 'queued' | 'running' | 'needs_input' | 'completed' | 'failed';
+  agent_runtime: RuntimeSpecDraft; room_id: string; summary: string; question: string; last_error: string;
+  created_at: string; started_at: string | null; completed_at: string | null;
+}

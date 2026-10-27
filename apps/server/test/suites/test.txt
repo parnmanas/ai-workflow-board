@@ -56,6 +56,7 @@ test/business-mcp.test.mjs
 test/business-self-service.test.mjs
 test/business-trademark-integrations.test.mjs
 test/business-trademark.test.mjs
+test/business-workflow.test.mjs
 test/catalog-list-aggregation.test.mjs
 test/chat-attachments-guard.test.mjs
 test/chat-dm-promotion.test.mjs
