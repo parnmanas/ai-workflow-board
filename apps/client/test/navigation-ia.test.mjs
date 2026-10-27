@@ -127,7 +127,10 @@ test('Business groups company workflows and Marketing while preserving permissio
   const marketingRow = sidebarSource.indexOf("key: 'marketing'");
   assert.ok(work < marketingRow && marketingRow < automation, 'Marketing 행은 Business 섹션 안에 있다');
   assert.match(sidebarSource.slice(work, automation), /canUseBusiness/);
-  for (const path of ['business', 'business/operations', 'business/connectors']) assert.ok(appSource.includes(`path="${path}"`));
+  for (const path of ['business', 'business/operations', 'business/mail', 'business/connectors']) {
+    assert.ok(appSource.includes(`path="${path}"`));
+    assert.ok(sidebarSource.slice(work, automation).includes(`path: '/${path}'`), `${path} is reachable from the left Business menu`);
+  }
   assert.ok(appSource.includes('element={<BusinessLayout />}'));
   assert.match(sidebarSource.slice(work, automation), /\.\.\.\(canUseMarketing\s*\?/, '권한이 없으면 행 자체를 그리지 않는다');
   // 배지는 서버 승인함 합계(이 사용자가 처리할 수 있는 것) — 렌더 계약은 marketing-inbox-badge.test.mjs 가 본다.

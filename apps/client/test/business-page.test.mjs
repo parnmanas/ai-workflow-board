@@ -427,3 +427,21 @@ test('a failed work journal save preserves the draft and reuses the same request
   assert.match(container.textContent, /Revise the costs/);
   assert.equal(calls.some(([name]) => name === 'createBusinessTaskTicket' || name === 'addComment'), false);
 });
+
+test('a task server failure explains the failed read and retry recovers without exposing SQL as setup guidance', async t => {
+  let failed = true;
+  const { container } = await render(t, { entry: '/business/operations?task=task-1', stubs: {
+    getBusinessTask: async () => {
+      if (failed) throw Object.assign(new Error('operator does not exist: character varying = uuid'), { status: 500 });
+      return { task: task(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] };
+    },
+  } });
+  assert.match(container.textContent, uiPattern('업무 기록을 불러오지 못했습니다. 서버 오류입니다. 잠시 후 다시 시도해 주세요.'));
+  assert.doesNotMatch(container.textContent, /operator does not exist|character varying/);
+  failed = false;
+  click(container.querySelector('[role="alert"] button')); await flush(); await flush();
+  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.equal(button(container, '기록 남기기').disabled, true, 'the recovered composer waits for content');
+  typeInto(field(container, '업무 기록 내용'), 'Continue the formation work');
+  assert.equal(button(container, '기록 남기기').disabled, false);
+});

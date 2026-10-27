@@ -247,7 +247,8 @@ export class BusinessService {
       repo.findOne({ where: { ...where, kind: 'result' }, order: { revision: 'DESC' } }),
       repo.findOne({ where: { ...where, kind: 'decision' }, order: { revision: 'DESC' } }),
       repo.createQueryBuilder('entry').where(where).andWhere('entry.kind = :kind', { kind: 'request' })
-        .leftJoin(BusinessTaskEntry, 'resolution', 'resolution.resolves_entry_id = entry.id AND resolution.task_id = entry.task_id AND resolution.account_id = entry.account_id')
+        // UUID primary keys are native uuid on PostgreSQL; task references are varchar on both databases.
+        .leftJoin(BusinessTaskEntry, 'resolution', 'resolution.resolves_entry_id = CAST(entry.id AS varchar) AND resolution.task_id = entry.task_id AND resolution.account_id = entry.account_id')
         .andWhere('resolution.id IS NULL').orderBy('entry.revision', 'ASC').getMany(),
       task.ticket_id ? this.ds.getRepository(Ticket).findOne({ where: { id: task.ticket_id, account_id: accountId }, select: ['id', 'title', 'status'] }) : null,
     ]);

@@ -217,6 +217,7 @@ export default function Sidebar({
         ...(canUseBusiness ? [
           { key: 'business', path: '/business', label: translate('회사 · 전체 흐름'), icon: '◈', exact: true },
           { key: 'business-operations', path: '/business/operations', label: translate('운영 워크플로'), icon: '↗' },
+          { key: 'business-mail', path: '/business/mail', label: translate('메일'), icon: '✉' },
           { key: 'business-connectors', path: '/business/connectors', label: translate('커넥터'), icon: '⌘' },
         ] : []),
         ...(canUseMarketing

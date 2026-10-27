@@ -245,3 +245,17 @@ test('one business work item keeps original outcomes, revision requests and reso
   expect(f.requests.filter(path => path.endsWith('/ticket'))).toHaveLength(0);
   expect(f.errors).toEqual([]);
 });
+
+test('left Business menu exposes Mail and opens the same inbox as the top navigation', async ({ page }) => {
+  const f = await fixture(page);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/business?company=company-header');
+  const sidebar = page.locator('section[aria-labelledby="sidebar-business"]');
+  const mail = sidebar.getByRole('button', { name: ui('메일'), exact: true });
+  await expect(mail).toBeVisible();
+  await mail.click();
+  await expect(page).toHaveURL(/\/business\/mail$/);
+  await expect(page.getByRole('region', { name: ui('통합 메일 목록') })).toBeVisible();
+  await expect(page.locator('.business-nav a[href="/business/mail"]')).toHaveClass(/active/);
+  expect(f.errors).toEqual([]);
+});

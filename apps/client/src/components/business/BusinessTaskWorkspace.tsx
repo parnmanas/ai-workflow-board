@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, rawResourceUrl } from '../../api';
+import { api, rawResourceUrl, type ApiError } from '../../api';
 import type { BusinessConnector, BusinessDetail, BusinessFormation, BusinessTaskEntry, BusinessTaskEntryInput, BusinessTaskJournal } from '../../business.types';
 import type { Comment } from '../../types';
 import { ticketStatusLabel } from '../../tickets/status';
@@ -67,7 +67,11 @@ export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onCh
       if (!preserveHistory || !loaded.current || newestEntry.current !== next.entries[0]?.id) setBefore(next.next_before);
       newestEntry.current = next.entries[0]?.id;
       loaded.current = true; setError('');
-    } catch (e) { if (version === generation.current) setError((e as Error).message); }
+    } catch (e) {
+      const status = (e as ApiError).status;
+      if (version === generation.current) setError(typeof status === 'number' && status >= 500
+        ? t('업무 기록을 불러오지 못했습니다. 서버 오류입니다. 잠시 후 다시 시도해 주세요.') : (e as Error).message);
+    }
   }, [company.id, taskId]);
   useEffect(() => { void load(); return () => { generation.current++; }; }, [load, company.revision]);
 
@@ -91,12 +95,12 @@ export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onCh
     return () => { commentGeneration.current++; };
   }, [loadComments]);
   useEffect(() => {
-    if (editing || busy) return;
+    if (editing || busy || error) return;
     const update = () => { if (!document.hidden) { void load(true); void loadComments(true); } };
     const timer = window.setInterval(update, 15000);
     window.addEventListener('focus', update);
     return () => { window.clearInterval(timer); window.removeEventListener('focus', update); };
-  }, [load, loadComments, editing, busy]);
+  }, [load, loadComments, editing, busy, error]);
   const refresh = async () => { await Promise.all([load(), loadComments()]); };
 
   const write = async () => {

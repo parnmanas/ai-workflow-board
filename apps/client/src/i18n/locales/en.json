@@ -7007,5 +7007,6 @@
   "추가·수정 요청에 대한 처리 기록": "Resolution of a change request",
   "티켓에 댓글 보내기": "Send comment to ticket",
   "필요할 때 이 업무의 실행 티켓을 만들 수 있습니다.": "Create an execution ticket for this work item when needed.",
-  "연결 티켓의 최근 답변": "Latest reply from the linked ticket"
+  "연결 티켓의 최근 답변": "Latest reply from the linked ticket",
+  "업무 기록을 불러오지 못했습니다. 서버 오류입니다. 잠시 후 다시 시도해 주세요.": "Work history could not be loaded because of a server error. Please try again shortly."
 }
