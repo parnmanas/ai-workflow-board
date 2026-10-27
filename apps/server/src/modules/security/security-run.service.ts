@@ -155,10 +155,19 @@ export class SecurityRunService {
       throw makeError(400, 'target agent not found');
     }
 
-    // Scope decision: incremental needs both scope_mode='incremental' and a
-    // baseline SHA. Without a baseline (first run, or scope_mode='full') the run
-    // is a full inspection with no baseline.
-    const useIncremental = profile.scope_mode !== 'full' && !!profile.last_passed_commit;
+    // Scope decision: incremental needs internal/code + scope_mode='incremental'
+    // and a baseline SHA. EXTERNAL (or host) targets have no git baseline —
+    // always full so a stale baseline can never fake a green external scan.
+    const category = (profile as any).category === 'external' ? 'external' : 'internal';
+    const targetKind = (profile as any).target_kind ?? 'code';
+    if (category === 'external') {
+      const cfg = (profile as any).scan_driver_config ?? {};
+      const target = cfg.target_url || cfg.target_host || profile.target_resource_id;
+      if (!target) {
+        throw makeError(400, `external profile '${profile.name}' needs scan_driver_config.target_url (or target_host) — 자사 자산 URL/호스트를 지정하세요`);
+      }
+    }
+    const useIncremental = category === 'internal' && targetKind === 'code' && profile.scope_mode !== 'full' && !!profile.last_passed_commit;
     const baselineCommit = useIncremental ? profile.last_passed_commit : null;
     const scopeUsed: 'incremental' | 'full' = useIncremental ? 'incremental' : 'full';
 

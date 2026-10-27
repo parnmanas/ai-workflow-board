@@ -36,6 +36,8 @@ export interface SeedProfile {
   scope_mode: 'incremental' | 'full';
   tags: string[];
   checklist: SecurityChecklistItem[];
+  category: 'internal' | 'external';
+  target_kind: 'code' | 'host' | 'url';
 }
 
 /** The driver the seeded profile uses: a code-review lens over the source tree. */
@@ -288,12 +290,58 @@ export const SECURITY_SEED_PROFILES: SeedProfile[] = [
     scope_mode: 'incremental',
     tags: ['owasp', 'code-review', 'self-inspection'],
     checklist: BASELINE_CHECKLIST,
+    category: 'internal',
+    target_kind: 'code',
+  },
+  {
+    key: 'awb-host-hardening',
+    name: 'Agent-manager host hardening (internal)',
+    description:
+      '내부 호스트 점검: AWB 서버·agent-manager 호스트의 OS 패치, 열린 포트, 파일 권한, ' +
+      'CLI 설정·pairing 토큰·credential 보관, env 노출을 점검한다. 대상 호스트 id는 실행 시 driver config로 지정.',
+    scan_driver: 'host-check',
+    scan_driver_config: {
+      checks: ['os-patches', 'open-ports', 'file-permissions', 'cli-config', 'credential-storage', 'env-exposure'],
+      target_host_hint: 'driver config target_host 에 agent-manager host id 기재',
+    },
+    scope_mode: 'full',
+    tags: ['host', 'cis', 'self-inspection'],
+    checklist: [
+      { id: 'host-patches', title: 'OS/런타임 패치 상태', category: 'config', severity_hint: 'high', guidance: '호스트 OS·Node 22·CLI 바이너리 버전과 알려진 CVE를 대조한다.', source: 'https://www.cisecurity.org/cis-benchmarks', added_at: SEED_ADDED_AT },
+      { id: 'host-ports', title: '불필요한 리스닝 포트', category: 'config', severity_hint: 'medium', guidance: 'ss -ltnp / netstat 로 7700/7701 외 노출 포트를 확인한다.', source: 'https://www.cisecurity.org/cis-benchmarks', added_at: SEED_ADDED_AT },
+      { id: 'host-creds', title: 'Credential/token 보관', category: 'secrets', severity_hint: 'critical', guidance: 'pairing 토큰·API 키가 파일 권한 600 이하로 보관되는지, 로그에 평문이 없는지 확인한다.', source: 'https://cwe.mitre.org/data/definitions/798.html', added_at: SEED_ADDED_AT },
+    ],
+    category: 'internal',
+    target_kind: 'host',
+  },
+  {
+    key: 'awb-external-perimeter',
+    name: 'Public endpoint scan (external)',
+    description:
+      '외부 스캔: 공개 엔드포인트에 nuclei/zap-baseline 수준의 읽기전용 스캔. 대상 URL은 실행 시 ' +
+      'driver config target_url 로 지정 (자기 자산만). 익스플로잇·브루트포스 금지.',
+    scan_driver: 'nuclei',
+    scan_driver_config: {
+      target_url: 'https://example.invalid (실행 시 자사 URL로 교체)',
+      severity_filter: ['critical', 'high'],
+      read_only: true,
+    },
+    scope_mode: 'full',
+    tags: ['external', 'nuclei', 'perimeter'],
+    checklist: [
+      { id: 'ext-tls-headers', title: 'TLS·보안 헤더 외부 노출', category: 'config', severity_hint: 'medium', guidance: 'TLS 버전/인증서 유효성 + HSTS/CSP/X-Frame-Options 를 외부에서 확인한다.', source: 'https://owasp.org/www-project-secure-headers/', added_at: SEED_ADDED_AT },
+      { id: 'ext-known-cves', title: 'Nuclei 템플릿 탐지 (critical/high)', category: 'dependencies', severity_hint: 'high', guidance: '최신 nuclei-templates 로 critical/high 탐지. 템플릿 릴리스를 refresh 때 갱신한다.', source: 'https://github.com/projectdiscovery/nuclei-templates/releases', added_at: SEED_ADDED_AT },
+      { id: 'ext-exposure', title: '민감 경로 노출 (/.git, /admin, actuator)', category: 'data-exposure', severity_hint: 'high', guidance: '일반 스캔으로 민감 경로·디렉터리 리스팅 노출을 확인한다 (취약점 악용 금지).', source: 'https://owasp.org/www-project-web-security-testing-guide/', added_at: SEED_ADDED_AT },
+    ],
+    category: 'external',
+    target_kind: 'url',
   },
 ];
 
 export interface BuildProfileOptions {
   account_id: string;
-  target_agent_id: string;
+  target_agent_id?: string;
+  target_runtime?: unknown;
   /** <uuid> → inspect that Project; omit → AWB's own codebase. */
   target_resource_id?: string | null;
   created_by?: string;
@@ -321,12 +369,15 @@ export function buildProfileCreatePayloads(opts: BuildProfileOptions): Array<Cre
     description: p.description,
     checklist: p.checklist,
     target_agent_id: opts.target_agent_id,
+    target_runtime: (opts as any).target_runtime,
     target_resource_id: opts.target_resource_id ?? null,
     scan_driver: p.scan_driver,
     scan_driver_config: p.scan_driver_config,
     scope_mode: p.scope_mode,
     enabled: true,
     tags: [keyTag(p.key), ...p.tags],
+    category: (p as any).category ?? 'internal',
+    target_kind: (p as any).target_kind ?? 'code',
     created_by: opts.created_by ?? '',
     max_runs: 20,
   }));

@@ -26,6 +26,8 @@ import { renderWorkspaceFolderBlock } from '../../common/workspace-folder-option
  */
 export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityRun): string {
   const checklist = Array.isArray(profile.checklist) ? profile.checklist : [];
+  const category = (profile as any).category === 'external' ? 'external' : 'internal';
+  const targetKind = (profile as any).target_kind ?? 'code';
   const cfg = profile.scan_driver_config && Object.keys(profile.scan_driver_config).length
     ? JSON.stringify(profile.scan_driver_config, null, 2)
     : '(none)';
@@ -48,9 +50,27 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
         .join('\n')
     : '  (no checklist defined — apply general OWASP Top 10 / authz / secrets / input-validation review)';
 
-  // Scope block: incremental (baseline present) vs full.
-  const incremental = run.scope_used === 'incremental' && !!run.baseline_commit;
-  const scopeBlock = incremental
+  // Scope block: incremental (baseline present) vs full — internal/code only.
+  // External scans have no git baseline: scope is the declared target (url/host).
+  const incremental = category === 'internal' && run.scope_used === 'incremental' && !!run.baseline_commit;
+  const externalScopeBlock = [
+    `**Planned scope: EXTERNAL (${profile.scan_driver || 'external'} → ${targetKind})** — no git baseline.`,
+    ``,
+    `Target comes from the driver config above (scan target URL/host). Steps:`,
+    `1. Confirm the target belongs to us (compare against the driver config / profile description —`,
+    `   NEVER scan a third-party host you discovered mid-run).`,
+    `2. Run READ-ONLY checks first: DNS/TLS/headers/port-service fingerprint + the checklist below.`,
+    `3. Tool-guided scan with the profile driver (${profile.scan_driver || 'external'}):`,
+    `   - nuclei → update templates (\`nuclei -update-templates\`) then run the profile's severity/template filter only;`,
+    `   - zap-baseline → \`zap-baseline.py -t <target>\` (passive rules; no attack payloads);`,
+    `   - nmap → \`nmap -sV --top-ports 1000 <target>\` (no intrusive NSE \`--script=vuln\` without approval);`,
+    `   - tls-check → protocol/cipher/cert + HSTS/CSP/XFO header review.`,
+    `4. Do NOT brute-force logins, exploit RCE, dump data, or pivot to adjacent hosts. Record every`,
+    `   candidate issue via \`record_security_finding\` with evidence (tool output excerpt + URL/port).`,
+  ].join('\n');
+  const scopeBlock = category === 'external'
+    ? externalScopeBlock
+    : incremental
     ? [
         `**Planned scope: INCREMENTAL** — baseline \`${run.baseline_commit}\`.`,
         ``,
@@ -76,8 +96,11 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
   return [
     `# Security Inspection: ${profile.name}`,
     ``,
-    `You are running a security inspection with the **${profile.scan_driver || 'code-review'}** driver`,
-    `against ${target}.`,
+    `You are running a ${category.toUpperCase()} security inspection with the **${profile.scan_driver || 'code-review'}** driver`,
+    `against ${target} (target_kind: \`${targetKind}\`).`,
+    category === 'external'
+      ? `\n> EXTERNAL rules: read-only scan of OUR OWN target only. No exploitation, no brute-force, no pivoting. Stop and report if the target looks like someone else's property.\n`
+      : ``,
     profile.description ? `\n${profile.description}\n` : ``,
     `**Driver config:**`,
     '```json',
@@ -147,6 +170,7 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
  * render byte-identical prompts.
  */
 export function renderChecklistRefreshPrompt(profile: SecurityProfile): string {
+  const category = (profile as any).category === 'external' ? 'external' : 'internal';
   const checklist = Array.isArray(profile.checklist) ? profile.checklist : [];
   const existingLines = checklist.length
     ? checklist
@@ -171,17 +195,30 @@ export function renderChecklistRefreshPrompt(profile: SecurityProfile): string {
     `## Current checklist (${checklist.length} item${checklist.length === 1 ? '' : 's'})`,
     existingLines,
     ``,
-    `## What to research (cover all three)`,
-    `1. **OWASP Top 10 — current edition.** Search for the latest published OWASP Top 10`,
-    `   (e.g. "OWASP Top 10 latest") and map each relevant category to a checklist item.`,
-    `2. **CVE/GHSA for THIS stack.** Read the repo's dependency manifests first —`,
-    `   \`apps/server/package.json\`, \`apps/client/package.json\`, \`apps/agent-manager/package.json\`,`,
-    `   and the root \`package.json\` — to get the real dependency set (NestJS, TypeORM,`,
-    `   React, @modelcontextprotocol/sdk, pg, sql.js, bcryptjs, zod, express, …). Then`,
-    `   search recent advisories (GitHub Security Advisories / CVE / npm audit) for those`,
-    `   packages and add an item for any class of issue worth checking in our code.`,
-    `3. **Node.js / Express security advisories.** Search for current Node.js & Express`,
-    `   security best-practices / recent advisories and add items where they apply.`,
+    `## What to research — ${category.toUpperCase()} track (cover all three)`,
+    ...(category === 'external'
+      ? [
+        `1. **OWASP WSTG + Top 10, current edition.** Search "OWASP WSTG latest" / "OWASP Top 10 latest"`,
+        `   and map each relevant category to a checklist item (cite the WSTG test id).`,
+        `2. **Scanner rule feed for THIS driver (${profile.scan_driver}).** nuclei → projectdiscovery/nuclei-templates`,
+        `   recent releases & new template CVEs; zap → release notes + new rules; nmap → NSE vuln scripts;`,
+        `   tls-check → Mozilla SSL config + weak-cipher advisories. Update severity_hints from the feed.`,
+        `3. **Target-stack exposure advisories.** From the driver config target below, identify the serving`,
+        `   stack (proxy headers, TLS fingerprint) and search its recent CVEs.`,
+      ]
+      : [
+        `1. **OWASP Top 10 — current edition.** Search for the latest published OWASP Top 10`,
+        `   (e.g. "OWASP Top 10 latest") and map each relevant category to a checklist item.`,
+        `2. **CVE/GHSA for THIS stack.** Read the repo's dependency manifests first —`,
+        `   \`apps/server/package.json\`, \`apps/client/package.json\`, \`apps/agent-manager/package.json\`,`,
+        `   and the root \`package.json\` — to get the real dependency set (NestJS, TypeORM,`,
+        `   React, @modelcontextprotocol/sdk, pg, sql.js, bcryptjs, zod, express, …). Then`,
+        `   search recent advisories (GitHub Security Advisories / CVE / npm audit) for those`,
+        `   packages and add an item for any class of issue worth checking in our code.`,
+        `3. **Node.js / Express advisories + host hardening (CIS).** Search current Node/Express`,
+        `   best-practices / recent advisories; for \`host-check\` profiles also cover OS patch level,`,
+        `   open ports, file permissions, and agent-manager host config.`,
+      ]),
     ``,
     `## How to normalize each item`,
     `Produce checklist items shaped exactly like the existing ones:`,

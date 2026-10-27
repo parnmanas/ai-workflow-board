@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { In, Repository, DataSource } from 'typeorm';
-import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode, SecurityOnFailureTicketConfig, SecuritySeverity } from '../../entities/SecurityProfile';
+import { SecurityProfile, SecurityChecklistItem, SecurityScopeMode, SecurityCategory, SecurityTargetKind, SecurityOnFailureTicketConfig, SecuritySeverity } from '../../entities/SecurityProfile';
+import { normalizeCategory, normalizeTargetKind } from './security-driver-catalog';
 import { SecurityRun, SecurityRunStatus } from '../../entities/SecurityRun';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
@@ -113,6 +114,8 @@ export interface CreateProfileInput {
   target_resource_id?: string | null;
   scan_driver?: string;
   scan_driver_config?: Record<string, any> | null;
+  category?: any;
+  target_kind?: any;
   scope_mode?: any;
   enabled?: boolean;
   tags?: any;
@@ -236,6 +239,8 @@ export class SecurityProfileService {
       target_resource_id: input.target_resource_id || null,
       scan_driver: input.scan_driver ?? 'code-review',
       scan_driver_config: input.scan_driver_config ?? null,
+      category: normalizeCategory((input as any).category),
+      target_kind: normalizeTargetKind((input as any).target_kind),
       scope_mode: normalizeScopeMode(input.scope_mode),
       last_passed_commit: null,
       enabled: input.enabled !== false,
@@ -276,6 +281,8 @@ export class SecurityProfileService {
     if (patch.target_resource_id !== undefined) existing.target_resource_id = patch.target_resource_id || null;
     if (patch.scan_driver !== undefined) existing.scan_driver = patch.scan_driver ?? 'code-review';
     if (patch.scan_driver_config !== undefined) existing.scan_driver_config = patch.scan_driver_config ?? null;
+    if ((patch as any).category !== undefined) existing.category = normalizeCategory((patch as any).category);
+    if ((patch as any).target_kind !== undefined) existing.target_kind = normalizeTargetKind((patch as any).target_kind);
     if (patch.scope_mode !== undefined) existing.scope_mode = normalizeScopeMode(patch.scope_mode);
     // last_passed_commit is normally advanced by completeRun, but allow an
     // explicit reset (e.g. force a full re-scan by clearing the baseline).

@@ -45,7 +45,8 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const baseUrl = args['base-url'] || process.env.AWB_BASE_URL || 'http://localhost:7701';
-  const workspaceId = args.workspace || process.env.AWB_WORKSPACE_ID;
+  const accountId = args.account || args.workspace || process.env.AWB_ACCOUNT_ID || process.env.AWB_WORKSPACE_ID;
+  const workspaceId = accountId;
   const agentId = args.agent || process.env.AWB_SECURITY_AGENT_ID;
   const resourceId = args.resource || null;
   const apiKey = args['api-key'] || process.env.AWB_API_KEY || '';
@@ -67,8 +68,8 @@ async function main() {
   });
 
   const payloads = buildProfileCreatePayloads({
-    workspace_id: workspaceId,
-    target_agent_id: agentId,
+    account_id: workspaceId,
+    target_runtime: { manager_agent_id: agentId, cli: 'claude', working_dir: '.' },
     target_resource_id: resourceId,
     created_by: 'seed-security-profiles',
     only,
@@ -82,7 +83,7 @@ async function main() {
   await mcp.initialize();
 
   // Existing profiles in the same scope, indexed by their key tag.
-  const existing = await mcp.callTool('list_security_profiles', { workspace_id: workspaceId });
+  const existing = await mcp.callTool('list_security_profiles', { account_id: workspaceId });
   if (existing?.isError) throw new Error(`list_security_profiles failed: ${JSON.stringify(existing.error)}`);
   const byKey = new Map();
   for (const s of Array.isArray(existing) ? existing : []) {
@@ -99,7 +100,7 @@ async function main() {
       continue;
     }
     if (prior) {
-      const res = await mcp.callTool('update_security_profile', { profile_id: prior.id, workspace_id: workspaceId, ...payload });
+      const res = await mcp.callTool('update_security_profile', { profile_id: prior.id, account_id: workspaceId, ...payload });
       if (res?.isError) throw new Error(`update ${_key} failed: ${JSON.stringify(res.error)}`);
       updated++;
       console.log(`  UPDATED  ${_key.padEnd(32)} ${res.id}`);

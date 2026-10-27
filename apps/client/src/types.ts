@@ -764,6 +764,8 @@ export interface SecurityProfile {
   target_resource_id: string | null;
   scan_driver: string;
   scan_driver_config: Record<string, any> | null;
+  category: 'internal' | 'external';
+  target_kind: 'code' | 'host' | 'url';
   scope_mode: SecurityScopeMode;
   /** HEAD SHA of the most recent PASS run — baseline for the next incremental run. */
   last_passed_commit: string | null;

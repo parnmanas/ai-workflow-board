@@ -1165,6 +1165,8 @@ export const api = {
     target_resource_id?: string | null;
     scan_driver?: string;
     scan_driver_config?: Record<string, any> | null;
+    category?: SecurityProfile['category'];
+    target_kind?: SecurityProfile['target_kind'];
     scope_mode?: SecurityProfile['scope_mode'];
     enabled?: boolean;
     tags?: string[];
@@ -1188,6 +1190,8 @@ export const api = {
       target_resource_id?: string | null;
       scan_driver?: string;
       scan_driver_config?: Record<string, any> | null;
+      category?: SecurityProfile['category'];
+      target_kind?: SecurityProfile['target_kind'];
       scope_mode?: SecurityProfile['scope_mode'];
       enabled?: boolean;
       tags?: string[];

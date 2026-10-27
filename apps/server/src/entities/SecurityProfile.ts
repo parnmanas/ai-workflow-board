@@ -72,13 +72,28 @@ export class SecurityProfile {
   target_resource_id: string | null;
 
   // Which inspection driver/lens runs, e.g. 'code-review', 'dependency',
-  // 'secrets'. Free-text so new drivers don't require a schema change.
+  // 'secrets' (internal) or 'nuclei', 'zap-baseline', 'nmap', 'tls-check'
+  // (external). Free-text so new drivers don't require a schema change —
+  // the curated catalog lives in security-driver-catalog.ts.
   @Column({ type: 'varchar', default: 'code-review' })
   scan_driver: string;
 
   // Driver-specific config (paths to include/exclude, ruleset, manifest globs…).
   @Column({ type: 'simple-json', nullable: true, default: null })
   scan_driver_config: Record<string, any> | null;
+
+  // ── 내/외부 구분 (security hardening) ──
+  // 'internal' = 내부 코드·설정·환경 위주 (프로젝트/자체 코드베이스, host 설정).
+  // 'external' = 외부에서 스캔/모의침투 툴로 점검 (nuclei/zap/nmap 등, URL/host 대상).
+  // 기본 'internal' — 기존 행 호환.
+  @Column({ type: 'varchar', default: 'internal' })
+  category: SecurityCategory;
+
+  // 점검 대상 종류: 'code' (repo/워크트리), 'host' (agent-manager host·서버 설정),
+  // 'url' (외부 공개 엔드포인트). target_resource_id(프로젝트) / scan_driver_config
+  // (host id, url 등)와 함께 해석한다.
+  @Column({ type: 'varchar', default: 'code' })
+  target_kind: SecurityTargetKind;
 
   // 'incremental' = diff last_passed_commit..HEAD first (promote to full if a
   // change touches a security-sensitive area or there is no baseline);
@@ -161,6 +176,9 @@ export class SecurityProfile {
 }
 
 export type SecurityScopeMode = 'incremental' | 'full';
+
+export type SecurityCategory = 'internal' | 'external';
+export type SecurityTargetKind = 'code' | 'host' | 'url';
 
 export interface SecurityChecklistItem {
   /** Stable id within the profile — findings reference it via checklist_item_id. */

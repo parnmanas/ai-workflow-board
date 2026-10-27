@@ -109,8 +109,13 @@ function SeverityBadge({ severity, size = 'sm' }: { severity: SecuritySeverity; 
   );
 }
 
-/** 'self' (AWB own codebase) vs 'repo' (a Project — same id as the old repo Resource). */
-function TargetBadge({ resourceId }: { resourceId: string | null }) {
+/** 'self' (AWB own codebase) vs 'repo' (a Project) vs host/url targets. */
+function TargetBadge({ resourceId, kind, driverConfig }: { resourceId: string | null; kind?: string; driverConfig?: Record<string, any> | null }) {
+  useLocale();
+  const cfg = driverConfig ?? {};
+  const label = (cfg.target_url || cfg.target_host || '') as string;
+  if (kind === 'url') return <span title={label || translate('외부 공개 엔드포인트')} style={{ display: 'inline-flex' }}><Pill variant="warning">url{label ? `: ${String(label).slice(0, 32)}` : ''}</Pill></span>;
+  if (kind === 'host') return <span title={label || translate('agent-manager 호스트')} style={{ display: 'inline-flex' }}><Pill variant="warning">host{label ? `: ${String(label).slice(0, 24)}` : ''}</Pill></span>;
   useLocale();
   return resourceId
     ? <span title={translate('project {0}', { 0: resourceId })} style={{ display: 'inline-flex' }}><Pill variant="info">{translate('repo')}</Pill></span>
@@ -145,6 +150,7 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
   const [confirmDelete, setConfirmDelete] = useState<SecurityProfile | null>(null);
   // Sequential-batch state.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [trackFilter, setTrackFilter] = useState<'all' | 'internal' | 'external'>('all');
   const [activeBatch, setActiveBatch] = useState<SecurityRunBatch | null>(null);
   const [batchStarting, setBatchStarting] = useState(false);
   // Schedule (자동 트리거 레이어) state.
@@ -241,9 +247,10 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
     });
   }, []);
 
-  // Profiles in display order whose id is checked — preserves table order so the
-  // sequential batch runs top-to-bottom.
-  const orderedSelected = profiles.filter((p) => selectedIds.has(p.id));
+  // Profiles in display order whose id is checked — preserves table top-to-bottom.
+  // Track filter narrows the visible (and batchable) set.
+  const visibleProfiles = trackFilter === 'all' ? profiles : profiles.filter((p) => ((p as any).category ?? 'internal') === trackFilter);
+  const orderedSelected = visibleProfiles.filter((p) => selectedIds.has(p.id));
 
   const startBatch = useCallback(async (payload: { all?: boolean; profile_ids?: string[] }) => {
     setBatchStarting(true);
@@ -426,6 +433,15 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
             {translate('▶ 선택 순차 실행')}{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
           </Button>
           <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ 새 프로파일')}</Button>
+          <Select
+            value={trackFilter}
+            options={[
+              { value: 'all', label: translate('전체 트랙') },
+              { value: 'internal', label: translate('internal') },
+              { value: 'external', label: translate('external') },
+            ]}
+            onChange={(e) => setTrackFilter((e.target as HTMLSelectElement).value as 'all' | 'internal' | 'external')}
+          />
         </div>
       </div>
 
@@ -437,14 +453,14 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
         />
       )}
 
-      {profiles.length === 0 ? (
+      {visibleProfiles.length === 0 ? (
         <Card padding="20px">
           <div style={{ color: tokens.colors.textSecondary }}>
             {translate('아직 보안 프로파일이 없습니다. "+ 새 프로파일" 로 체크리스트와 scan driver(code-review / dependency / secrets)를 가리키는 프로파일을 만드세요.')}</div>
         </Card>
       ) : (
         <ProfileTable
-          profiles={profiles}
+          profiles={visibleProfiles}
           agentName={agentName}
           running={running}
           refreshing={refreshing}
@@ -786,7 +802,8 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       <td style={TD}>
         {p.scan_driver ? <Pill variant="info">{p.scan_driver}</Pill> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={TD}><TargetBadge resourceId={p.target_resource_id} /></td>
+      <td style={TD}><TargetBadge resourceId={p.target_resource_id} kind={(p as any).target_kind} driverConfig={(p as any).scan_driver_config} />
+        <div style={{ marginTop: 2 }}><Pill variant={(p as any).category === 'external' ? 'warning' : 'success'}>{(p as any).category ?? 'internal'}</Pill></div></td>
       <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{p.scope_mode}</span>
       </td>
@@ -881,7 +898,8 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{profile.name}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
             {profile.scan_driver && <Pill variant="info">{profile.scan_driver}</Pill>}
-            <TargetBadge resourceId={profile.target_resource_id} />
+            <TargetBadge resourceId={profile.target_resource_id} kind={(profile as any).target_kind} driverConfig={(profile as any).scan_driver_config} />
+            <Pill variant={(profile as any).category === 'external' ? 'warning' : 'success'}>{(profile as any).category ?? 'internal'}</Pill>
             <Pill variant="neutral">{translate('scope:')} {profile.scope_mode}</Pill>
             <Pill variant="neutral">{translate('agent:')} {agentName(profile.target_agent_id, (profile as any).target_runtime)}</Pill>
             {passRate !== null && <Pill variant={passRate === 100 ? 'success' : 'warning'}>{passRate}{translate('% pass')}</Pill>}
@@ -1230,6 +1248,8 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
   const [targetResourceId, setTargetResourceId] = useState(profile?.target_resource_id ?? '');
   const { projects, loading: projectsLoading } = useProjects(accountId);
   const [scanDriver, setScanDriver] = useState(profile?.scan_driver ?? 'code-review');
+  const [category, setCategory] = useState<'internal' | 'external'>((profile as any)?.category ?? 'internal');
+  const [targetKind, setTargetKind] = useState<'code' | 'host' | 'url'>((profile as any)?.target_kind ?? 'code');
   const [scopeMode, setScopeMode] = useState<SecurityScopeMode>(profile?.scope_mode ?? 'incremental');
   const [enabled, setEnabled] = useState(profile?.enabled ?? true);
   const [checklistText, setChecklistText] = useState(JSON.stringify(profile?.checklist ?? [], null, 2));
@@ -1272,6 +1292,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
         name, description, ...targetPayload,
         target_resource_id: targetResourceId.trim() || null,
         scan_driver: scanDriver, scan_driver_config: config, scope_mode: scopeMode,
+        category, target_kind: targetKind,
         checklist, tags, enabled, on_failure_ticket: onFailureTicket, max_runs: maxRunsNum,
         ...buildWorkspaceFolderPayload(wf),
       };
@@ -1336,7 +1357,38 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
         />
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
-            <Input label={translate('Scan driver (code-review / dependency / secrets)')} value={scanDriver} onChange={(e) => setScanDriver((e.target as HTMLInputElement).value)} />
+            <Select
+              label={translate('트랙 (내부/외부)')}
+              value={category}
+              options={[
+                { value: 'internal', label: translate('internal — 코드·설정·호스트') },
+                { value: 'external', label: translate('external — 외부 스캔/모의침투') },
+              ]}
+              onChange={(e) => {
+                const v = (e.target as HTMLSelectElement).value as 'internal' | 'external';
+                setCategory(v);
+                if (v === 'external' && scanDriver === 'code-review') setScanDriver('nuclei');
+                if (v === 'internal' && (scanDriver === 'nuclei' || scanDriver === 'zap-baseline')) setScanDriver('code-review');
+                if (v === 'external' && targetKind === 'code') setTargetKind('url');
+              }}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <Select
+              label={translate('대상 종류')}
+              value={targetKind}
+              options={[
+                { value: 'code', label: translate('code — repo/워크트리') },
+                { value: 'host', label: translate('host — agent-manager 호스트') },
+                { value: 'url', label: translate('url — 공개 엔드포인트') },
+              ]}
+              onChange={(e) => setTargetKind((e.target as HTMLSelectElement).value as 'code' | 'host' | 'url')}
+            />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Input label={translate('Scan driver (code-review / dependency / secrets / nuclei / zap-baseline / nmap / tls-check …)')} value={scanDriver} onChange={(e) => setScanDriver((e.target as HTMLInputElement).value)} />
           </div>
           <div style={{ flex: 1 }}>
             <Select

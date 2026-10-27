@@ -57,6 +57,36 @@
 - **backward-compat** — 기존 scan 스케줄이 NULL `kind` 로 와도 `'scan'` 으로 취급
   (`normalizeScheduleKind`). 마이그레이션은 synchronize 가 default `'scan'` 컬럼을 자동 추가.
 
+## 내/외부 트랙 — 어떻게 나누고 스케줄하는가
+
+`SecurityProfile.category` (`internal` | `external`) + `target_kind` (`code` | `host` | `url`) +
+`scan_driver` 카탈로그 (`modules/security/security-driver-catalog.ts`) 가 트랙을 나눈다:
+
+- **internal** — 개발중 프로젝트 코드·설정·환경 + agent-manager 호스트.
+  드라이버: `code-review` / `secrets` / `dependency` / `config-iac` / `host-check`.
+  `host-check` 는 호스트 id를 `scan_driver_config.target_host` 에 적고 `target_kind='host'`.
+  incremental baseline(`last_passed_commit`) 은 internal/code 트랙에서만 쓴다.
+- **external** — 외부에서 스캔·모의침투 툴로 점검. 드라이버: `nuclei` / `zap-baseline` /
+  `nmap` / `tls-check`. 대상은 `scan_driver_config.target_url` (자사 자산만, 읽기전용 —
+  익스플로잇·브루트포스·피벗 금지, 프롬프트에 명시). baseline 없이 매번 full.
+
+**지속 업데이트 프레임워크** = `checklist_refresh` 스케줄이 카테고리별 리서치 프롬프트를
+주기 발화: internal 은 OWASP Top 10 + 스택 CVE/GHSA + Node/CIS, external 은 WSTG +
+스캐너 룰피드(nuclei-templates/ZAP 릴리스) + 대상 스택 CVE. run 프롬프트는 저장된
+체크리스트를 고정 적용하므로, 점검과 갱신이 분리된 채 둘 다 자동화된다.
+
+권장 스케줄 편성 (트랙당 2개):
+
+| 스케줄 | kind | scope 예 | cadence 예 |
+|---|---|---|---|
+| internal-scan | `scan` | internal 프로파일들 | 코드 변경 리듬 (예: 일 1회) |
+| internal-refresh | `checklist_refresh` | internal 프로파일들 | 주 1회 |
+| external-scan | `scan` | external 프로파일들 | 주 1회 (배포 뒤) |
+| external-refresh | `checklist_refresh` | external 프로파일들 | 주 1회 (템플릿 릴리스 추적) |
+
+시드 (`security-seed-profiles.ts`): `awb-self-code-review` (internal/code) +
+`awb-host-hardening` (internal/host) + `awb-external-perimeter` (external/url).
+
 ## Moving parts
 
 | Piece | Where | Role |
