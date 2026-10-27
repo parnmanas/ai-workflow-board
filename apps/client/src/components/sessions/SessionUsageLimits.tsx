@@ -14,7 +14,9 @@ function windowLabel(window: SessionLimitWindow): string {
   return window.limitName ? `${window.limitName} · ${duration}` : duration;
 }
 
-export default function SessionUsageLimits({ events }: { events: AgentSessionEventRecord[] }) {
+export default function SessionUsageLimits({ events, variant = 'compact' }: {
+  events: AgentSessionEventRecord[]; variant?: 'compact' | 'details';
+}) {
   useLocale();
   const windows = useMemo(() => sessionLimitWindows(events), [events]);
   const [now, setNow] = useState(Date.now);
@@ -22,37 +24,43 @@ export default function SessionUsageLimits({ events }: { events: AgentSessionEve
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
+  const compact = variant === 'compact';
+  if (compact && windows.length === 0) return null;
+  // Multiple model quotas must not grow the header; the menu always lists them all.
+  const visible = compact && windows.length > 2 ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent).slice(0, 2) : windows;
   const formatTime = (iso: string) => new Date(iso).toLocaleString(getLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   return (
-    <section aria-label={t('Usage limits')} data-session-usage-limits style={{
-      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px 16px', padding: '7px 16px',
-      borderBottom: `1px solid ${tokens.colors.border}`, background: tokens.colors.surfaceSubtle, flexShrink: 0,
-    }}>
-      <span style={{ fontSize: 11, color: tokens.colors.textSecondary }}>{t('Usage limits')}</span>
-      {windows.length === 0 ? (
-        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{t('No usage limits reported by this CLI')}</span>
-      ) : windows.map((w) => {
+    <span role="group" aria-label={t('Usage limits')} data-session-usage-limits={variant} style={compact
+      ? { display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, width: 42, height: 11, flexShrink: 0 }
+      : { display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {windows.length === 0 && <span style={{ fontSize: 12, color: tokens.colors.textSecondary }}>{t('No usage limits reported by this CLI')}</span>}
+      {visible.map((w) => {
         const expired = w.resetsAt !== null && Date.parse(w.resetsAt) <= now;
         const label = windowLabel(w);
         const color = expired ? tokens.colors.textMuted : w.usedPercent >= 90 ? tokens.colors.dangerLight
           : w.usedPercent >= 75 ? tokens.colors.warningLight : tokens.colors.accentSubtle;
-        const percent = Math.round(w.usedPercent);
+        const usage = expired ? t('Awaiting update') : t('{0}% used', { 0: Math.round(w.usedPercent) });
+        const meter = (
+          <span role={expired ? undefined : 'meter'} aria-label={label} aria-valuemin={expired ? undefined : 0}
+            aria-valuemax={expired ? undefined : 100} aria-valuenow={expired ? undefined : w.usedPercent}
+            aria-valuetext={expired ? undefined : usage} title={`${label} · ${usage}`}
+            style={{ display: 'block', height: 4, borderRadius: 4, background: tokens.colors.border, overflow: 'hidden' }}>
+            <span style={{ display: 'block', height: '100%', width: expired ? '0%' : `${w.usedPercent}%`, background: color, borderRadius: 4 }} />
+          </span>
+        );
+        if (compact) return <span key={w.key}>{meter}</span>;
         return (
-          <div key={w.key} title={t('Last reported {0}', { 0: formatTime(w.observedAt) })} style={{ flex: '1 1 125px', maxWidth: 260, minWidth: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11, lineHeight: '16px' }}>
-              <span style={{ color: tokens.colors.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-              <span style={{ color, whiteSpace: 'nowrap' }}>{expired ? t('Awaiting update') : t('{0}% used', { 0: percent })}</span>
-            </div>
-            <div role={expired ? undefined : 'meter'} aria-label={label} aria-valuemin={expired ? undefined : 0}
-              aria-valuemax={expired ? undefined : 100} aria-valuenow={expired ? undefined : w.usedPercent}
-              aria-valuetext={expired ? undefined : t('{0}% used', { 0: percent })}
-              style={{ height: 4, margin: '3px 0', borderRadius: 4, background: tokens.colors.border, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: expired ? '0%' : `${w.usedPercent}%`, background: color, borderRadius: 4 }} />
-            </div>
-            {w.resetsAt && !expired && <div style={{ fontSize: 10, color: tokens.colors.textMuted }}>{t('Resets {0}', { 0: formatTime(w.resetsAt) })}</div>}
-          </div>
+          <span key={w.key} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+            <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+              <span style={{ color: tokens.colors.textPrimary }}>{label}</span>
+              <span style={{ color, whiteSpace: 'nowrap' }}>{usage}</span>
+            </span>
+            {meter}
+            {w.resetsAt && !expired && <span style={{ fontSize: 11, color: tokens.colors.textSecondary }}>{t('Resets {0}', { 0: formatTime(w.resetsAt) })}</span>}
+            <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>{t('Last reported {0}', { 0: formatTime(w.observedAt) })}</span>
+          </span>
         );
       })}
-    </section>
+    </span>
   );
 }

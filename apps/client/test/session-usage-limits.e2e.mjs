@@ -4,7 +4,7 @@ import { cliCatalog } from '../src/cli/catalog.ts';
 async function fixture(page, { missing = false, expired = false } = {}) {
   const account = { id: 'quota-account', name: 'Personal', owner_user_id: 'quota-user' };
   const host = { manager_id: 'quota-host', instance_id: 'instance', hostname: 'host', name: 'Host', clis: ['codex'], plugin_version: '1.0.0', last_seen_at: new Date().toISOString() };
-  const live = { manager_id: host.manager_id, manager_name: 'Host', cli: 'codex', session_id: 'quota-session', title: 'Usage limit gauge', cwd: '/repo', status: 'ready', available_modes: [], current_mode: null, config_options: [], available_commands: [], updated_at: new Date().toISOString() };
+  const live = { manager_id: host.manager_id, manager_name: 'Host', cli: 'codex', session_id: 'quota-session', title: 'Usage limit gauge with a long session title that must not push controls off screen', cwd: '/repo', status: 'ready', available_modes: [], current_mode: null, config_options: ['mode', 'model', 'thought_level'].map((category) => ({ config_id: category, category, name: category === 'thought_level' ? 'Effort' : category === 'model' ? 'Model' : 'Mode', type: 'select', current_value: 'default', options: [{ value: 'default', name: 'Default' }] })), available_commands: [], updated_at: new Date().toISOString() };
   const events = missing ? [] : [{ id: 'quota-snapshot', seq: 1, turn_id: '', type: 'usage_limits', created_at: live.updated_at, payload: {
     limit_id: 'codex', observed_at: live.updated_at,
     windows: [
@@ -41,32 +41,61 @@ async function fixture(page, { missing = false, expired = false } = {}) {
   await page.goto(`/sessions/${host.manager_id}/codex/${live.session_id}`);
 }
 
-for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }, { width: 667, height: 375 }]) {
-  test(`quota gauges and composer remain visible at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }, { width: 667, height: 375 }]) {
+  test(`quota stays in the bar and details open from the menu at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
     await page.setViewportSize(size);
     await fixture(page);
-    const primary = page.getByRole('meter', { name: '5h limit', exact: true });
+    const compact = page.locator('[data-session-usage-limits="compact"]');
+    const primary = compact.getByRole('meter', { name: '5h limit', exact: true });
     await expect(primary).toHaveAttribute('aria-valuenow', '42');
-    await expect(page.getByRole('meter', { name: '7d limit', exact: true })).toHaveAttribute('aria-valuenow', '91');
-    await expect(page.getByText('42% used', { exact: true })).toBeVisible();
-    await expect(page.locator('[data-session-usage-limits]')).toContainText('Resets');
+    await expect(compact.getByRole('meter', { name: '7d limit', exact: true })).toHaveAttribute('aria-valuenow', '91');
+    await expect(page.getByText('42% used', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Usage limits', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeInViewport();
     await expect(primary).toBeInViewport();
+    expect(await compact.textContent()).toBe('');
+    expect((await compact.boundingBox()).height).toBeLessThanOrEqual(11);
+    const header = await page.locator('.awb-session-header').boundingBox();
+    expect(header.height).toBeLessThanOrEqual(116);
+    const transcript = await page.locator('.awb-session-transcript').boundingBox();
+    expect(transcript.y).toBeLessThanOrEqual(header.y + header.height + 1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath('usage-limits.png') });
+    await page.screenshot({ path: testInfo.outputPath('usage-limits-compact.png') });
+    const trigger = page.getByRole('button', { name: 'Session menu', exact: true });
+    await trigger.click();
+    const details = page.locator('[data-session-usage-limits="details"]');
+    await expect(details.getByText('42% used', { exact: true })).toBeVisible();
+    await expect(details.getByText('91% used', { exact: true })).toBeVisible();
+    await expect(details).toContainText('Resets');
+    await expect(details).toContainText('Last reported');
+    await expect(details).toBeInViewport();
+    const panel = await page.locator('.awb-session-menu-panel').boundingBox();
+    expect(panel.x).toBeGreaterThanOrEqual(0);
+    expect(panel.x + panel.width).toBeLessThanOrEqual(size.width);
+    expect(panel.y + panel.height).toBeLessThanOrEqual(size.height);
+    await page.screenshot({ path: testInfo.outputPath('usage-limits-menu.png') });
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   });
 }
 
-test('missing quota is unknown, and an expired snapshot waits for another report', async ({ page }) => {
+test('missing quota occupies no bar space; missing and expired details live in the menu', async ({ page }) => {
   await fixture(page, { missing: true });
+  await expect(page.locator('[data-session-usage-limits="compact"]')).toHaveCount(0);
+  await expect(page.getByText('No usage limits reported by this CLI', { exact: true })).toHaveCount(0);
+  const emptyHeaderHeight = (await page.locator('.awb-session-header').boundingBox()).height;
+  await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await expect(page.getByText('No usage limits reported by this CLI', { exact: true })).toBeVisible();
   await expect(page.getByRole('meter')).toHaveCount(0);
   await page.unroute('**/api/**');
   await fixture(page, { expired: true });
+  await expect(page.locator('[data-session-usage-limits="compact"]')).toBeVisible();
+  expect((await page.locator('.awb-session-header').boundingBox()).height).toBe(emptyHeaderHeight);
+  await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await expect(page.getByText('Awaiting update', { exact: true })).toBeVisible();
-  await expect(page.getByRole('meter')).toHaveCount(1);
+  await expect(page.locator('[data-session-usage-limits="details"]').getByRole('meter')).toHaveCount(1);
 });
-
 
 test('new quota reports update the gauge without rendering a chat message', async ({ page }) => {
   await fixture(page);
@@ -81,6 +110,8 @@ test('new quota reports update the gauge without rendering a chat message', asyn
     }) }));
   });
   await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '87');
+  await expect(page.getByText('87% used', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await expect(page.getByText('87% used', { exact: true })).toBeVisible();
   await expect(page.locator('.awb-session-transcript')).not.toContainText('87');
 });

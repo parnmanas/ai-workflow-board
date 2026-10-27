@@ -15,7 +15,7 @@
 .awb-session-title { font-size: 15px; font-weight: 700; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .awb-session-subtitle { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11.5px; line-height: 1.3; white-space: nowrap; }
 .awb-session-subtitle > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.awb-session-status { flex-shrink: 0; display: inline-flex; }
+.awb-session-status { flex-shrink: 0; display: inline-flex; flex-direction: column; align-items: center; gap: 3px; }
 .awb-session-controls { grid-area: controls; display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
 .awb-session-control { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .awb-session-control > span { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.2; white-space: nowrap; }

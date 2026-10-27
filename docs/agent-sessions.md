@@ -826,7 +826,9 @@ A requested history query that times out, cannot launch OpenCode, or returns inv
 
 ## 세션 사용 한도 게이지
 
-세션 헤더 아래의 **사용 한도**는 토큰 합계나 컨텍스트 창과 별개인 공급자 quota다.
+세션 바의 상태 아래에는 작은 **사용 한도** 게이지만 표시하고, 기간별 사용률·초기화 시각·마지막 보고 시각은
+햄버거 메뉴의 사용 한도 구획에서 확인한다. 별도의 행을 차지하지 않으며, 한도가 여러 개면
+바에는 사용률이 높은 두 개까지 표시한다. 사용 한도는 토큰 합계나 컨텍스트 창과 별개인 공급자 quota다.
 현재 Codex rollout의 `event_msg.token_count.rate_limits`에서 `primary` / `secondary`의
 실제 `used_percent`, `window_minutes`, `resets_at`을 읽는다. 따라서 5시간·7일 등
 기간은 CLI가 보고한 값에 따라 달라지고, 같은 로그인으로 실행한 다른 세션과 한도를 공유할 수 있다.
@@ -839,4 +841,4 @@ A requested history query that times out, cannot launch OpenCode, or returns inv
 비밀·계정 신원을 포함하지 않는다. 서버도 같은 이벤트 타입을 허용한다.
 기록을 다시 열 때는 최근 snapshot을 복원하며, 대화가 길어 생략돼도 한도는 남긴다.
 화면은 보고 시각으로 최신 값을 고르고 합산하지 않는다. 초기화 시각이 지난 값은
-0%로 추정하지 않고 **갱신 대기**로 표시한다. 마지막 보고 시각은 게이지 tooltip에서 확인한다.
+0%로 추정하지 않고 **갱신 대기**로 표시한다. 마지막 보고 시각도 햄버거 메뉴에서 확인한다.
