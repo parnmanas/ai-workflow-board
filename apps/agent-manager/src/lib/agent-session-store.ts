@@ -27,8 +27,9 @@ import {
   isRecord,
   SESSION_ID_RE,
 } from './agent-session-history.js';
-import type { CliSessionStoreContext, CliSessionStoreDriver } from './clis/cli-module.js';
+import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionWatcher } from './clis/cli-module.js';
 import type { SessionUsage } from './session-usage.js';
+import type { SessionUsageLimits } from './session-usage-limits.js';
 import { cliSessions } from './clis/index.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
@@ -340,6 +341,36 @@ export class AgentSessionStore {
     return bound?.driver.watchAsyncQuestions?.(bound.ctx, sessionId, receive) ?? null;
   }
 
+  /** Quota collection never starts a CLI or makes a provider request. */
+  async watchUsageLimits(cli: string, sessionId: string, receive: (limits: SessionUsageLimits) => void): Promise<CliSessionWatcher | null> {
+    if (!SESSION_ID_RE.test(sessionId)) return null;
+    const bound = this.#driverFor(cli);
+    const read = bound?.driver.readLatestUsageLimits;
+    if (!bound || !read) return null;
+    let closed = false;
+    let inFlight: Promise<void> | null = null;
+    const seen = new Map<string, string>();
+    const poll = (): Promise<void> => {
+      if (closed) return Promise.resolve();
+      if (inFlight) return inFlight;
+      inFlight = read(bound.ctx, sessionId).then((snapshots) => {
+        if (closed) return;
+        for (const limits of snapshots) {
+          const fingerprint = JSON.stringify(limits);
+          if (seen.get(limits.limit_id) === fingerprint) continue;
+          seen.set(limits.limit_id, fingerprint);
+          if (seen.size > 8) seen.delete(seen.keys().next().value!);
+          receive(limits);
+        }
+      }).catch(() => undefined).finally(() => { inFlight = null; });
+      return inFlight;
+    };
+    const timer = setInterval(() => { void poll(); }, 30_000);
+    timer.unref();
+    await poll();
+    return { poll, close: () => { closed = true; clearInterval(timer); } };
+  }
+
   /**
    * 이 세션에서 마지막으로 기록된 토큰 사용량. 라이브 턴이 끝났는데 ACP 어댑터가
    * usage 를 주지 않은 경우의 메꿈용이다 — CLI 자신의 기록이 권위 있는 출처다.
@@ -397,7 +428,7 @@ export class AgentSessionStore {
     // 다시 읽어도 앞부분이 변하지 않는 한 같은 이벤트가 같은 id 를 갖는다.
     const events: HistoryEvent[] = read.events.map((e, i) => {
       const absolute = read.offset + i + 1;
-      return { ...e, seq: absolute, id: `${sessionId}:${absolute}` };
+      return { ...e, seq: absolute, id: e.id || `${sessionId}:${absolute}` };
     });
     // 생략분 = 창 앞의 것(offset) + 바이트 상한으로 떨어진 것. 스캐너가 화면에 안 그리는
     // 항목(opencode 의 step-start 등)을 건너뛰어도 그것을 "생략" 으로 세지 않는다.

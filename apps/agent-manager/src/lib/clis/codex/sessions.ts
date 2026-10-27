@@ -1,3 +1,5 @@
+import { codexUsageLimits } from './usage-limits.js';
+import type { SessionUsageLimits } from '../../session-usage-limits.js';
 import { stripDirectWorkPolicy } from '../../ticket-creation-policy.js';
 // Codex 세션 기록 스캐너 — `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`.
 
@@ -127,6 +129,20 @@ export const codexSessionStore: CliSessionStoreDriver = {
   findSessionFile,
   watchAsyncQuestions: (ctx, sessionId, receive) => watchCodexAsyncQuestions(() => findSessionFile(ctx, sessionId), receive),
 
+  async readLatestUsageLimits(ctx, sessionId) {
+    const path = await findSessionFile(ctx, sessionId);
+    if (!path) return [];
+    const st = await stat(path);
+    const len = Math.min(st.size, 1024 * 1024);
+    const records = parseLines(await readChunk(path, st.size - len, len), st.size > len, true);
+    const latest = new Map<string, SessionUsageLimits>();
+    for (const record of records) {
+      const limits = codexUsageLimits(record);
+      if (limits) latest.set(limits.limit_id, limits);
+    }
+    return [...latest.values()].slice(-8);
+  },
+
   /** 파일 꼬리에서 마지막 token_count 를 읽는다(ACP 어댑터가 usage 를 안 줄 때의 메꿈). */
   async readLatestUsage(ctx, sessionId) {
     const path = await findSessionFile(ctx, sessionId);
@@ -182,6 +198,7 @@ export const codexSessionStore: CliSessionStoreDriver = {
     const push = (type: string, payload: Record<string, unknown>, ts: string | undefined) => {
       events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: ts || createdAt || new Date().toISOString() });
     };
+    const latestLimits = new Map<string, SessionUsageLimits>();
     let pendingUsage: SessionUsage | null = null;
     let pendingUsageAt: string | undefined;
     const flushUsage = () => {
@@ -191,6 +208,11 @@ export const codexSessionStore: CliSessionStoreDriver = {
       pendingUsageAt = undefined;
     };
     for await (const rec of readJsonlRecords(path)) {
+      const limits = codexUsageLimits(rec);
+      if (limits) {
+        latestLimits.set(limits.limit_id, limits);
+        if (latestLimits.size > 8) latestLimits.delete(latestLimits.keys().next().value!);
+      }
       const payload = isRecord(rec.payload) ? rec.payload : {};
       const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
       if (rec.type === 'session_meta') {
@@ -279,6 +301,14 @@ export const codexSessionStore: CliSessionStoreDriver = {
       }
     }
     flushUsage();
+    // Keep the latest quota outside the conversation window, even after history trimming.
+    for (const limits of latestLimits.values()) {
+      events.push({
+        // A snapshot appended for display must not occupy a future conversation event's id.
+        id: `${sessionId}:limits:${limits.limit_id}:${limits.observed_at}`, seq: 0, turn_id: '',
+        type: 'usage_limits', payload: { ...limits }, created_at: limits.observed_at,
+      });
+    }
     return {
       events: events.items(),
       total: events.total,

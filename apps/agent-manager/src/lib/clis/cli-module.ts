@@ -184,12 +184,16 @@ export interface CliAsyncQuestion {
   schema: Record<string, unknown>;
 }
 
-export interface CliAsyncQuestionWatcher {
+export interface CliSessionWatcher {
   poll(): Promise<void>;
   close(): void;
 }
 
+export type CliAsyncQuestionWatcher = CliSessionWatcher;
+
 export interface CliSessionStoreDriver {
+  /** Latest provider quota snapshots from this session's own native records. */
+  readLatestUsageLimits?(ctx: CliSessionStoreContext, sessionId: string): Promise<import('../session-usage-limits.js').SessionUsageLimits[]>;
   /** Native nonblocking questions omitted by the ACP adapter. Only new records are delivered. */
   watchAsyncQuestions?(ctx: CliSessionStoreContext, sessionId: string, receive: (question: CliAsyncQuestion) => void): Promise<CliAsyncQuestionWatcher>;
   /** Optional native failure evidence for this turn only; null if unavailable or stale. */

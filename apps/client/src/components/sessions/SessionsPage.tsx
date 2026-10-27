@@ -31,6 +31,7 @@ import { noteHostSessionModels } from '../../cli/hostModels';
 import SessionComposer from './SessionComposer';
 import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
+import SessionUsageLimits from './SessionUsageLimits';
 import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
@@ -1133,6 +1134,8 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
           )}
         </div>
       )}
+
+      <SessionUsageLimits events={events} />
 
       <SessionProposalCards
         proposals={proposals}

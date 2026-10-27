@@ -23,7 +23,7 @@ import { AgentSessionDelivery } from './agent-session-delivery.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
 import { cliModulesWith, cliSessions, findCliModule } from './clis/index.js';
-import type { CliAsyncQuestion, CliAsyncQuestionWatcher } from './clis/cli-module.js';
+import type { CliAsyncQuestion, CliAsyncQuestionWatcher, CliSessionWatcher } from './clis/cli-module.js';
 import { findOnPath } from './find-on-path.js';
 import { describeHolders, findLockHolders, killHolder, selectKillTargets, type LockHolder } from './file-lock-holders.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
@@ -247,6 +247,7 @@ interface LiveSession {
   pendingElicitations: Map<string, PendingElicitation>;
   asyncQuestions: Map<string, { question: CliAsyncQuestion; event: StampedEvent; timer: NodeJS.Timeout }>;
   asyncQuestionWatcher: CliAsyncQuestionWatcher | null;
+  usageLimitsWatcher: CliSessionWatcher | null;
   /** 지금 턴이 끝나면 새 턴으로 보낼 프롬프트 — 비동기 질문의 답, 그리고 steering 을 못 하는 어댑터에 턴 중 온 프롬프트. */
   queuedPrompts: QueuedPrompt[];
   /** 세션 id 를 알기 전(session/new 응답 전)에 어댑터가 보낸 행 — 열리는 즉시 순서대로 흘려보낸다. */
@@ -971,6 +972,7 @@ export class AgentSessionRunner {
         pendingElicitations: new Map(),
         asyncQuestions: new Map(),
         asyncQuestionWatcher: null,
+        usageLimitsWatcher: null,
         queuedPrompts: [],
         preSessionEvents: [],
         configOptions: [],
@@ -1043,6 +1045,11 @@ export class AgentSessionRunner {
       this.#live.set(key, live);
       live.asyncQuestionWatcher = await this.#store.watchAsyncQuestions(cli, live.sessionId, (question) => {
         if (live && !live.closing && !live.exited) this.#onAsyncQuestion(live, question);
+      }).catch(() => null);
+      live.usageLimitsWatcher = await this.#store.watchUsageLimits(cli, live.sessionId, (limits) => {
+        if (live && !live.closing && !live.exited) {
+          this.#enqueue(live, [{ type: 'usage_limits', payload: { ...limits } }]);
+        }
       }).catch(() => null);
       client.process.once('exit', (code, signal) => this.#onProcessExit(key, code, signal));
       if (live.preSessionEvents.length) {
@@ -1663,9 +1670,11 @@ export class AgentSessionRunner {
       }
       events.push({ type: 'turn', payload: { phase: 'finished', stop_reason: response?.stopReason || 'end_turn' }, turn_id: turnId });
       await live.asyncQuestionWatcher?.poll();
+      await live.usageLimitsWatcher?.poll();
       this.#enqueue(live, events, { status: 'ready', last_error: null, reason: 'turn_finished' });
       await this.#store.touchAwbSession(live.cli, live.sessionId).catch(() => undefined);
     } catch (err: any) {
+      await live.usageLimitsWatcher?.poll();
       this.#flushBuffers(live, turnId);
       const native = err?.code === 'acp_remote_error'
         ? await this.#store.readTurnFailure(live.cli, live.sessionId, live.turn?.startedAt ?? Date.now()).catch(() => null)
@@ -2543,6 +2552,8 @@ export class AgentSessionRunner {
   #closeAsyncQuestions(live: LiveSession): void {
     live.asyncQuestionWatcher?.close();
     live.asyncQuestionWatcher = null;
+    live.usageLimitsWatcher?.close();
+    live.usageLimitsWatcher = null;
     for (const [id, pending] of live.asyncQuestions) {
       clearTimeout(pending.timer);
       this.#enqueue(live, [{ type: 'elicitation_decision', payload: { elicitation_id: id, action: 'cancel', decided_by: 'system' } }]);

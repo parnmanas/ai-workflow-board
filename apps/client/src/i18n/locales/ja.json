@@ -6940,5 +6940,16 @@
   "IRS 외국 파트너 원천징수": "IRSの外国パートナー源泉徴収",
   "IRS 1120 서명·준비자": "IRS 1120の署名・作成者",
   "IRS S-Corp 주주 요건": "IRS S-Corpの株主要件",
-  "다른 서버에 연결 (현재 {0})": "別のサーバーに接続（現在: {0}）"
+  "다른 서버에 연결 (현재 {0})": "別のサーバーに接続（現在: {0}）",
+  "Usage limits": "使用上限",
+  "No usage limits reported by this CLI": "このCLIから使用上限の情報が提供されていません",
+  "Primary limit": "基本上限",
+  "Secondary limit": "追加上限",
+  "{0}d limit": "{0}日間の上限",
+  "{0}h limit": "{0}時間の上限",
+  "{0}m limit": "{0}分間の上限",
+  "{0}% used": "{0}% 使用",
+  "Awaiting update": "更新待ち",
+  "Last reported {0}": "最終報告 {0}",
+  "Resets {0}": "リセット {0}"
 }

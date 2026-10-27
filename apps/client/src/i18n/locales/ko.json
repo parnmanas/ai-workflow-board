@@ -6940,5 +6940,16 @@
   "IRS 외국 파트너 원천징수": "IRS 외국 파트너 원천징수",
   "IRS 1120 서명·준비자": "IRS 1120 서명·준비자",
   "IRS S-Corp 주주 요건": "IRS S-Corp 주주 요건",
-  "다른 서버에 연결 (현재 {0})": "다른 서버에 연결 (현재 {0})"
+  "다른 서버에 연결 (현재 {0})": "다른 서버에 연결 (현재 {0})",
+  "Usage limits": "사용 한도",
+  "No usage limits reported by this CLI": "이 CLI가 제공한 사용 한도 정보가 없습니다",
+  "Primary limit": "기본 한도",
+  "Secondary limit": "추가 한도",
+  "{0}d limit": "{0}일 한도",
+  "{0}h limit": "{0}시간 한도",
+  "{0}m limit": "{0}분 한도",
+  "{0}% used": "{0}% 사용",
+  "Awaiting update": "갱신 대기",
+  "Last reported {0}": "마지막 보고 {0}",
+  "Resets {0}": "초기화 {0}"
 }

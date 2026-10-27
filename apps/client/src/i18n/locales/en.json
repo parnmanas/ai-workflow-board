@@ -6940,5 +6940,16 @@
   "IRS 외국 파트너 원천징수": "IRS withholding for foreign partners",
   "IRS 1120 서명·준비자": "IRS Form 1120 signatures and preparers",
   "IRS S-Corp 주주 요건": "IRS S-Corp shareholder requirements",
-  "다른 서버에 연결 (현재 {0})": "Connect to another server (current: {0})"
+  "다른 서버에 연결 (현재 {0})": "Connect to another server (current: {0})",
+  "Usage limits": "Usage limits",
+  "No usage limits reported by this CLI": "No usage limits reported by this CLI",
+  "Primary limit": "Primary limit",
+  "Secondary limit": "Secondary limit",
+  "{0}d limit": "{0}d limit",
+  "{0}h limit": "{0}h limit",
+  "{0}m limit": "{0}m limit",
+  "{0}% used": "{0}% used",
+  "Awaiting update": "Awaiting update",
+  "Last reported {0}": "Last reported {0}",
+  "Resets {0}": "Resets {0}"
 }

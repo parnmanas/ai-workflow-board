@@ -51,6 +51,9 @@ export const AGENT_SESSION_EVENT_TYPES = [
   // 달라(claude 제외 / codex 포함) 매니저가 정규화해서 보낸다. 자세한 근거는
   // agent-manager `src/lib/session-usage.ts`. 화면은 합계와 캐시를 함께 보여 준다.
   'usage',
+  // Provider quota snapshot: { limit_id, limit_name?, observed_at, windows: [{ id, used_percent, window_minutes, resets_at }] }.
+  // Independent of token usage; no provider credentials or account identity.
+  'usage_limits',
   'turn',                 // { phase: 'started'|'finished', stop_reason? }
   'error',                // { message, code? }
   'system',               // { text }

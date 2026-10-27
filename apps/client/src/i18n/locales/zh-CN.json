@@ -6940,5 +6940,16 @@
   "IRS 외국 파트너 원천징수": "IRS 外国合伙人预扣税",
   "IRS 1120 서명·준비자": "IRS 1120 签名、编制人",
   "IRS S-Corp 주주 요건": "IRS S-Corp 股东要求",
-  "다른 서버에 연결 (현재 {0})": "连接其他服务器（当前：{0}）"
+  "다른 서버에 연결 (현재 {0})": "连接其他服务器（当前：{0}）",
+  "Usage limits": "使用限额",
+  "No usage limits reported by this CLI": "此CLI未提供使用限额信息",
+  "Primary limit": "主要限额",
+  "Secondary limit": "次要限额",
+  "{0}d limit": "{0}天限额",
+  "{0}h limit": "{0}小时限额",
+  "{0}m limit": "{0}分钟限额",
+  "{0}% used": "已使用{0}%",
+  "Awaiting update": "等待更新",
+  "Last reported {0}": "最后报告 {0}",
+  "Resets {0}": "重置时间 {0}"
 }

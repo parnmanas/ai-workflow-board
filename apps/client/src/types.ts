@@ -3008,6 +3008,7 @@ export type AgentSessionEventType =
   | 'elicitation_decision'
   | 'plan'
   | 'usage'
+  | 'usage_limits'
   | 'turn'
   | 'error'
   | 'system';

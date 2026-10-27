@@ -823,3 +823,20 @@ A requested history query that times out, cannot launch OpenCode, or returns inv
 고치는 것이다. 회귀는 `apps/client/test/conversation-scroll.test.mjs` 가 규칙 단위로
 (첫 진입 고정 · 근접 추종 · prepend 보정 · 대화 전환 · followPaused · 최신으로 버튼)
 고정하고, 마지막 케이스가 실제 미션 패널로 보고된 증상 자체를 단언한다.
+
+## 세션 사용 한도 게이지
+
+세션 헤더 아래의 **사용 한도**는 토큰 합계나 컨텍스트 창과 별개인 공급자 quota다.
+현재 Codex rollout의 `event_msg.token_count.rate_limits`에서 `primary` / `secondary`의
+실제 `used_percent`, `window_minutes`, `resets_at`을 읽는다. 따라서 5시간·7일 등
+기간은 CLI가 보고한 값에 따라 달라지고, 같은 로그인으로 실행한 다른 세션과 한도를 공유할 수 있다.
+한도 데이터를 기록하지 않는 CLI·로그인 방식에는 조회 불가 안내를 표시한다.
+
+매니저는 세션별 네이티브 기록만 읽으며, 추가 CLI 실행이나 공급자 API 호출은 하지 않는다.
+`CliSessionStoreDriver.readLatestUsageLimits`가 있는 CLI는 세션을 열 때, 30초마다,
+턴 종료 시 `usage_limits` 이벤트를 보낸다. payload는
+`{ limit_id, limit_name?, observed_at, windows: [{ id, used_percent, window_minutes, resets_at }] }`이며
+비밀·계정 신원을 포함하지 않는다. 서버도 같은 이벤트 타입을 허용한다.
+기록을 다시 열 때는 최근 snapshot을 복원하며, 대화가 길어 생략돼도 한도는 남긴다.
+화면은 보고 시각으로 최신 값을 고르고 합산하지 않는다. 초기화 시각이 지난 값은
+0%로 추정하지 않고 **갱신 대기**로 표시한다. 마지막 보고 시각은 게이지 tooltip에서 확인한다.

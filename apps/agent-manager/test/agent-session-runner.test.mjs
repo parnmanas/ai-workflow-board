@@ -1547,3 +1547,19 @@ for (const stage of ['LOAD', 'PROMPT']) {
     assert.equal(server.rpc('policy-history').result.live.title, 'Original task');
   });
 }
+
+test('native quota reaches the session stream when a turn finishes', async (t) => {
+  const { cwd, root, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
+  await runner.handle(request('open', { cli: 'codex', request_id: 'quota-open', cwd }));
+  const sid = server.rpc('quota-open').result.session_id;
+  const dir = join(root, 'codex', 'sessions', '2026', '10', '27');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `rollout-test-${sid}.jsonl`), JSON.stringify({
+    type: 'event_msg', timestamp: '2026-10-27T10:00:00Z', payload: { type: 'token_count', info: null, rate_limits: {
+      primary: { used_percent: 42, window_minutes: 300, resets_at: 1793124000 },
+    } },
+  }) + '\n');
+  await runner.handle(request('prompt', { cli: 'codex', session_id: sid, turn_id: 'quota-turn', text: 'Continue' }));
+  await waitFor(() => server.states(sid).some((s) => s.reason === 'turn_finished'), 'quota turn finished');
+  assert.equal(server.events(sid).find((e) => e.type === 'usage_limits').payload.windows[0].used_percent, 42);
+});
