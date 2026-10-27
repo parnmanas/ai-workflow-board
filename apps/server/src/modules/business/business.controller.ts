@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, ForbiddenException, Get, Header, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Header, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -44,6 +44,13 @@ export class BusinessController {
   }
   @Patch('companies/:id/tasks/:taskId') task(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
     return this.business.saveTask(id, req.currentAccountId, taskId, body, req.currentUser.id);
+  }
+  @Header('Cache-Control', 'no-store')
+  @Get('companies/:id/tasks/:taskId') taskDetail(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Query('before') before?: string) {
+    return this.business.taskDetail(id, req.currentAccountId, taskId, before === undefined ? undefined : Number(before));
+  }
+  @Post('companies/:id/tasks/:taskId/entries') addTaskEntry(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
+    return this.business.addTaskEntry(id, req.currentAccountId, taskId, body, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' });
   }
   @Delete('companies/:id/tasks/:taskId') removeTask(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
     return this.business.removeTask(id, req.currentAccountId, taskId, body?.revision, req.currentUser.id);

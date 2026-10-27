@@ -26,6 +26,7 @@ const REST_TO_MCP = {
     catalog: 'list_business_connectors', credentials: 'list_business_credentials', list: 'list_business_companies',
     create: 'create_business_company', detail: 'get_business_company', update: 'update_business_company',
     chooseService: 'choose_business_service', addTask: 'save_business_task', task: 'save_business_task',
+    taskDetail: 'get_business_task', addTaskEntry: 'add_business_task_entry',
     assessSelfService: 'assess_business_self_service',
     removeTask: 'delete_business_task', initializeTrademark: 'initialize_business_trademark_tasks', createTaskTicket: 'create_business_task_ticket',
     formationReferences: 'get_business_formation_references', prepareFormation: 'prepare_business_formation',
@@ -98,7 +99,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 61);
+    assert.equal(tools.length, 63);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
     assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
@@ -112,6 +113,20 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   const detail = () => call('get_business_company', companyArgs, read);
   const companyRevision = async () => (await detail()).company.revision;
   const privateCompany = await call('create_business_company', { name: 'Foreign LLC' }, foreign);
+  await t.test('task journal is available to agents with scoped access and preserves revised results', async () => {
+    const task = (await detail()).tasks[0];
+    const args = { ...companyArgs, task_id: task.id };
+    const entry = { request_id: randomUUID(), kind: 'result', content: 'Formation plan with supporting sources' };
+    for (const client of [read, write, foreign]) await denied('add_business_task_entry', { ...args, entry }, client);
+    await denied('get_business_task', args, foreign);
+    const saved = await call('add_business_task_entry', { ...args, entry });
+    const retry = await call('add_business_task_entry', { ...args, entry });
+    assert.equal(saved.id, retry.id);
+    const journal = await call('get_business_task', args, read);
+    assert.equal(journal.result.content, entry.content);
+    assert.equal(journal.result.author_type, 'agent');
+    assert.equal(journal.task.ticket_id, null, 'recording a result does not create a ticket');
+  });
   await t.test('DIY assessment and all cashbook operations are available through real MCP', async () => {
     const assessmentArgs = { ...companyArgs, provider: 'self_bookkeeping', plan: 'cashbook' };
     const assessment = await call('assess_business_self_service', assessmentArgs, read);
@@ -188,7 +203,9 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const ticket = await call('create_business_task_ticket', { ...companyArgs, task_id: task.id, revision: await companyRevision(), user_requested_ticket: true }); assert.ok(ticket.id); assert.equal(ticket.status, 'backlog');
     const retry = await call('create_business_task_ticket', { ...companyArgs, task_id: task.id, revision: 0, user_requested_ticket: true }); assert.equal(retry.id, ticket.id);
     assert.equal(await ds.getRepository('Ticket').countBy({ account_id: mine.id }), 1);
-    await call('delete_business_task', { ...companyArgs, task_id: task.id, revision: await companyRevision() });
+    await denied('delete_business_task', { ...companyArgs, task_id: task.id, revision: await companyRevision() });
+    const disposable = await call('save_business_task', { ...companyArgs, revision: await companyRevision(), changes: { title: 'Unstarted work', stage: 'formation' } });
+    await call('delete_business_task', { ...companyArgs, task_id: disposable.id, revision: await companyRevision() });
     assert.ok(await ds.getRepository('Ticket').existsBy({ id: ticket.id }));
     assert.equal((await call('initialize_business_trademark_tasks', { ...companyArgs, revision: await companyRevision() })).created, 0);
     const metadata = await call('list_business_credentials', {}, read); assert.ok(metadata.some(c => c.id === credentials.doola.id));

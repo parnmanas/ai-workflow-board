@@ -12,6 +12,21 @@ export interface BusinessTask {
   description: string; notes: string; owner: string; due_on: string | null; depends_on: string[]; blocked_by: string[];
   ticket_id: string | null; ticket: { id: string; title: string; status: string } | null; position: number;
 }
+export type BusinessTaskEntryKind = 'progress' | 'result' | 'decision' | 'request' | 'resolution' | 'change';
+export interface BusinessTaskEntry {
+  id: string; task_id: string; kind: BusinessTaskEntryKind; content: string;
+  actor_id: string; author: string; author_type: string; revision: number; created_at: string;
+  resolves_entry_id: string | null;
+  request?: Pick<BusinessTaskEntry, 'id' | 'content' | 'author' | 'created_at'> | null;
+  changes: Record<string, { before: unknown; after: unknown }> | null;
+}
+export interface BusinessTaskJournal {
+  task: BusinessTask; company_revision: number; entries: BusinessTaskEntry[]; next_before: number | null;
+  result: BusinessTaskEntry | null; decision: BusinessTaskEntry | null; open_requests: BusinessTaskEntry[];
+}
+export interface BusinessTaskEntryInput {
+  request_id: string; kind: Exclude<BusinessTaskEntryKind, 'change'>; content: string; resolves_entry_id?: string | null;
+}
 export interface ServiceOffering {
   best_for: string; features: string[]; api_access: 'public' | 'partner' | 'unverified' | 'not_applicable'; api_note: string; external_steps: string[];
   pricing: { plans: Array<{ id: string; name: string; price: string; detail: string }>; extra: string; url: string; checked_at: string };

@@ -17,6 +17,7 @@ import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
 import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
 import { BusinessTrademarks } from './BusinessTrademarks';
 import { BusinessPageHeader } from './BusinessPageHeader';
+import { BusinessTaskWorkspace } from './BusinessTaskWorkspace';
 
 type View = 'overview' | 'operations' | 'connectors';
 
@@ -33,7 +34,7 @@ function ProgressRing({ done, total }: { done: number; total: number }) {
   </div>;
 }
 
-function TaskRow({ task, busy, onOpen, onToggle, onCreateTicket }: { task: BusinessTask; busy: boolean; onOpen(): void; onToggle(): void; onCreateTicket?: () => void }) {
+function TaskRow({ task, busy, onOpen, onToggle }: { task: BusinessTask; busy: boolean; onOpen(): void; onToggle(): void }) {
   useLocale();
   const stage = STAGES.find(s => s.id === task.stage)!;
   const blocked = task.blocked_by.length > 0 && task.status !== 'done';
@@ -46,8 +47,7 @@ function TaskRow({ task, busy, onOpen, onToggle, onCreateTicket }: { task: Busin
       <span className="business-task-meta"><span style={{ color: stage.color }}>{stage.label}</span>{task.owner && <span>◉ {task.owner}</span>}{task.due_on && <span className={overdue(task) ? 'business-overdue' : ''}><BusinessIcon name="clock" size={12} />{task.due_on}{overdue(task) ? translate(' · 기한 지남') : ''}</span>}</span>
     </button>
     <span className={`business-pill ${blocked ? 'blocked' : task.status}`}>{blocked ? translate('선행 {0}건 대기', { 0: task.blocked_by.length }) : TASK_STATUS[task.status]}</span>
-    {task.ticket && <Link className="business-ticket-link" to={`/tickets?ticket=${encodeURIComponent(task.ticket.id)}`} title={`${task.ticket.title} · ${task.ticket.status}`}><BusinessIcon name="external" size={14} /><span>{translate('티켓 ·')} {task.ticket.status}</span></Link>}
-    {!task.ticket_id && task.status !== 'done' && onCreateTicket && <button type="button" className="business-ticket-link business-create-ticket" disabled={busy || blocked} onClick={onCreateTicket} aria-label={translate('{0} 티켓 만들기', { 0: task.title })} title={blocked ? translate('선행 업무를 먼저 완료하세요') : translate('Backlog 티켓을 만들고 담당 에이전트와 실행 상태를 지정하세요')}><BusinessIcon name="plus" size={13} />{translate('티켓 만들기')}</button>}
+    <button type="button" className="business-ticket-link" onClick={onOpen}>{translate('과정·결과 보기')} <BusinessIcon name="arrow" size={14} /></button>
   </div>;
 }
 
@@ -149,15 +149,6 @@ export default function BusinessPage({ view }: { view: View }) {
     catch (e) { showToast((e as Error).message, 'error'); await loadDetail(); }
     finally { setBusy(''); }
   };
-  const createTicket = async (task: BusinessTask) => {
-    if (!detail) return;
-    setBusy(task.id);
-    try {
-      const result = await api.createBusinessTaskTicket(selectedId, task.id, detail.company.revision);
-      if (selectedRef.current === selectedId) navigate(`/tickets?ticket=${encodeURIComponent(result.ticket.id)}`);
-    } catch (e) { showToast((e as Error).message, 'error'); await loadDetail(); }
-    finally { setBusy(''); }
-  };
   const sync = async (provider: string) => {
     setBusy(provider);
     try {
@@ -176,7 +167,11 @@ export default function BusinessPage({ view }: { view: View }) {
   const connected = detail?.connections.filter(c => c.status === 'connected').length || 0;
   const activeStageTasks = tasks.filter(t => t.stage === stage.id);
   const visibleTasks = activeStageTasks.filter(t => filter === 'all' || (filter === 'open' && t.status !== 'done') || (filter === 'attention' && (overdue(t) || t.status === 'waiting')) || (filter === 'done' && t.status === 'done'));
-  const renderTask = (task: BusinessTask) => <TaskRow key={task.id} task={task} busy={!!busy || loading} onOpen={() => setTaskModal(task)} onToggle={() => void toggleTask(task)} onCreateTicket={hasPermission('tickets.create') ? () => void createTicket(task) : undefined} />;
+  const openTask = (taskId: string) => {
+    const task = tasks.find(item => item.id === taskId);
+    navigate(`${path('operations', task?.stage || stage.id)}&task=${encodeURIComponent(taskId)}`);
+  };
+  const renderTask = (task: BusinessTask) => <TaskRow key={task.id} task={task} busy={!!busy || loading} onOpen={() => openTask(task.id)} onToggle={() => void toggleTask(task)} />;
   const chooseService = async (connector: BusinessConnector, plan: string) => {
     if (!company) return;
     if (connector.mode === 'manual') { setSelfModal({ connector, plan }); return; }
@@ -186,6 +181,8 @@ export default function BusinessPage({ view }: { view: View }) {
     finally { setBusy(''); }
   };
   const renderConnector = (connector: BusinessConnector, comparing?: boolean, onCompare?: () => void) => company && <BusinessConnectorCard key={connector.id} connector={connector} company={company} connection={detail?.connections.find(c => c.provider === connector.id)} busy={!!busy || loading} onSetup={() => setConnectorModal(connector)} onSync={() => void sync(connector.id)} onChoose={plan => void chooseService(connector, plan)} onFormation={() => setFormationModal(connector)} comparing={comparing} onCompare={onCompare} onOpenData={view === 'connectors' ? () => chooseStage(connector.stage) : undefined} />;
+
+  if (company && detail && params.get('task')) return <BusinessTaskWorkspace key={`${company.id}-${params.get('task')}`} detail={detail} taskId={params.get('task')!} connectors={connectors} onBack={() => navigate(path('operations', stage.id))} onChanged={reload} onOpenTask={openTask} />;
 
   return <div className="business-page" aria-busy={loading}>
     <BusinessPageHeader

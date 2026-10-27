@@ -56,7 +56,7 @@ export function CompanyForm({ company, onClose, onSaved }: { company?: BusinessC
   </Modal>;
 }
 
-export function TaskForm({ company, task, tasks, stage, onClose, onSaved }: { company: BusinessCompany; task?: BusinessTask; tasks: BusinessTask[]; stage: BusinessStage; onClose(): void; onSaved(): Promise<void> }) {
+export function TaskForm({ company, task, tasks, stage, onClose, onSaved }: { company: BusinessCompany; task?: BusinessTask; tasks: BusinessTask[]; stage: BusinessStage; onClose(): void; onSaved(deleted?: boolean): Promise<void> }) {
   useLocale();
   const [input, setInput] = useState<BusinessTaskInput>({ title: task?.title || '', stage: task?.stage || stage, status: task?.status || 'todo', description: task?.description || '', owner: task?.owner || '', due_on: task?.due_on || null, notes: task?.notes || '', depends_on: task?.depends_on || [], ticket_id: task?.ticket_id || null });
   const [error, setError] = useState('');
@@ -80,7 +80,7 @@ export function TaskForm({ company, task, tasks, stage, onClose, onSaved }: { co
     try {
       if (remove && task) await api.deleteBusinessTask(company.id, task.id, company.revision);
       else await api.saveBusinessTask(company.id, task?.id || null, { ...input, revision: company.revision });
-      await onSaved();
+      await onSaved(remove && !!task);
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
   return <Modal isOpen onClose={() => { if (!busy) onClose(); }} title={task ? translate('업무 관리') : translate('운영 업무 추가')} maxWidth={620}

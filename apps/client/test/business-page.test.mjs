@@ -125,27 +125,42 @@ test('connector setup saves a reference, triggers a read and renders a persisted
   assert.equal(Boolean(container.querySelector('input[type="password"]')), false);
 });
 
-test('ready work creates an execution ticket and opens its detail; blocked work cannot create one', async t => {
-  let release;
+test('work opens its own history; explicit ticket creation stays in that work item', async t => {
+  let linked = false;
+  const currentTask = () => task(linked ? { ticket_id: 'new-ticket', ticket: { id: 'new-ticket', title: 'Company task', status: 'backlog' } } : {});
   const { container, calls } = await render(t, { entry: '/business/operations', permissions: ['business.manage', 'tickets.create'], stubs: {
-    createBusinessTaskTicket: () => new Promise(resolve => { release = resolve; }),
+    getBusinessTask: async () => ({ task: currentTask(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] }),
+    getTicketComments: async () => [],
+    createBusinessTaskTicket: async () => { linked = true; return { ticket: currentTask().ticket }; },
   } });
-  assert.equal(field(container, '설립 신청 티켓 만들기').disabled, true);
-  click(field(container, '설립 계획 정하기 티켓 만들기'));
-  assert.equal(field(container, '설립 계획 정하기 티켓 만들기').disabled, true);
+  assert.equal(calls.some(([name]) => name === 'createBusinessTaskTicket'), false);
+  click(button(container, '설립 계획 정하기')); await flush(); await flush();
+  assert.match(container.textContent, uiPattern('진행 과정과 변경 내역'));
+  click(button(container, '티켓 만들기')); await flush(); await flush();
   assert.deepEqual(calls.find(([name]) => name === 'createBusinessTaskTicket').slice(1), ['company-1', 'task-1', 0]);
-  await act(async () => release({ ticket: { id: 'new-ticket', title: 'Company task', status: 'backlog' } }));
-  assert.match(container.textContent, /Execution ticket new-ticket/);
+  assert.ok(container.querySelector('.business-task-workspace'));
+  assert.match(container.textContent, uiPattern('Backlog'));
 });
 
-test('ticket creation requires its own permission and existing tickets are opened without creating more', async t => {
-  const { container } = await render(t, { entry: '/business/operations', stubs: {
-    getBusinessCompany: async () => detail({ tasks: [task({ ticket_id: 'linked-ticket', ticket: { id: 'linked-ticket', title: 'Existing ticket', status: 'review' } }), task({ id: 'unlinked', title: 'Other task' })] }),
+test('blocked work and missing ticket permission cannot create execution tickets', async t => {
+  const blocked = task({ blocked_by: ['task-2'] });
+  const { container } = await render(t, { entry: '/business/operations?task=task-1', permissions: ['business.manage', 'tickets.create'], stubs: {
+    getBusinessTask: async () => ({ task: blocked, company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] }),
   } });
-  assert.equal(container.querySelectorAll('.business-create-ticket').length, 0);
-  const link = container.querySelector('a[href="/tickets?ticket=linked-ticket"]'); assert.ok(link);
-  click(link); await flush();
-  assert.match(container.textContent, /Execution ticket linked-ticket/);
+  assert.equal(button(container, '티켓 만들기').disabled, true);
+});
+
+test('existing ticket comments are readable inside business without ticket creation permission', async t => {
+  const linked = task({ ticket_id: 'linked-ticket', ticket: { id: 'linked-ticket', title: 'Existing ticket', status: 'review' } });
+  const { container } = await render(t, { entry: '/business/operations?task=task-1', stubs: {
+    getBusinessTask: async () => ({ task: linked, company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] }),
+    getTicketComments: async () => [{ id: 'comment', content: 'Evidence and formation research from the agent', author: 'Runtime', author_type: 'agent', created_at: '2026-10-27T00:00:00Z', attachments: [] }],
+  } });
+  await flush();
+  assert.match(container.textContent, /Evidence and formation research/);
+  assert.equal([...container.querySelectorAll('button')].some(b => b.textContent === ui('티켓 만들기')), false);
+  click(button(container, '이 답변으로 결과 정리'));
+  assert.equal(field(container, '업무 기록 내용').value, 'Evidence and formation research from the agent');
 });
 
 test('a late response for the previous company cannot overwrite the selected company', async t => {
@@ -385,4 +400,30 @@ test('DIY formation checks every condition, explains overseas routes and saves c
   assert.equal(saved[3].self_service_answers.operator_abroad, true); assert.equal(saved[3].self_service_answers.responsible_tax_id, false);
   assert.match(container.textContent, uiPattern("직접 처리 진행 안내"));
   assert.equal(Boolean(container.querySelector('[role="dialog"]')), false, '직접 처리 선택 후 조건 확인 대화상자가 닫힌다');
+});
+
+test('a failed work journal save preserves the draft and reuses the same request ID on retry', async t => {
+  let attempts = 0;
+  const sent = [];
+  const state = { task: task(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [] };
+  const { container, calls } = await render(t, { entry: '/business/operations?task=task-1', stubs: {
+    getBusinessTask: async () => structuredClone(state),
+    addBusinessTaskEntry: async (_company, _task, input) => {
+      sent.push(input); attempts++;
+      if (attempts === 1) throw new Error('Connection interrupted; retry the saved request');
+      const record = { ...input, id: input.request_id, task_id: 'task-1', revision: 1, created_at: '2026-10-27T00:00:00Z', author: 'Owner', author_type: 'user', changes: null };
+      state.entries = [record]; state.open_requests = [record]; state.company_revision = 1;
+      return record;
+    },
+  } });
+  typeInto(field(container, '업무 기록 내용'), 'Revise the costs in the formation plan');
+  click(button(container, '기록 남기기')); await flush(); await flush();
+  assert.equal(field(container, '업무 기록 내용').value, 'Revise the costs in the formation plan');
+  assert.match(container.textContent, /Connection interrupted/);
+  click(button(container, '기록 남기기')); await flush(); await flush();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].request_id, sent[1].request_id);
+  assert.equal(field(container, '업무 기록 내용').value, '');
+  assert.match(container.textContent, /Revise the costs/);
+  assert.equal(calls.some(([name]) => name === 'createBusinessTaskTicket' || name === 'addComment'), false);
 });

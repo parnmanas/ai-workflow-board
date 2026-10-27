@@ -93,7 +93,7 @@ test('Business formation: reviewed partner requests, owner boundaries, prices an
       await lastValueFrom(interceptor.intercept({ switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }) }, { handle: () => of(responseBody) }));
     };
     await invoke('/api/business/companies', 'GET', undefined, { visible: 'control' });
-    for (const path of [`/api${url}`, `/api${url}/cashbook/entries`, `/api${url}/cashbook/months/2020-01`, `/api${url}/self-service/assess`, `/api${url}/services/accounting`]) {
+    for (const path of [`/api${url}/tasks`, `/api${url}/tasks/task-private`, `/api${url}/tasks/task-private/entries`, `/api${url}`, `/api${url}/cashbook/entries`, `/api${url}/cashbook/months/2020-01`, `/api${url}/self-service/assess`, `/api${url}/services/accounting`]) {
       await invoke(path, 'POST', { description: 'private-founder' }, { evidence: '123 Test Road' });
     }
     for (const [path, method] of [[`/api${url}/formation/doola/prepare`, 'POST'], [`/api${url}/formations/${draft.id}/review`, 'GET'], [`/api${url}/formations/${draft.id}/signature`, 'POST'], ['/api/credentials', 'POST'], [`/api/credentials/${credential.id}`, 'PATCH']]) {

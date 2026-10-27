@@ -218,3 +218,84 @@ test('Business: owned workflows, dependency transitions, credential protection a
   assert.equal((await call(`${url}/connections/stripe`, { method: 'DELETE', body: { revision: state.company.revision } })).status, 200);
   assert.equal((await call(`/credentials/${key.id}`, { method: 'DELETE' })).status, 200, 'disconnect releases credential reference');
 });
+
+test('Business task journal keeps outcomes, revisions and requests together without creating tickets', { timeout: 120000 }, async t => {
+  const { app, port, modules } = await bootApp();
+  t.after(() => closeTestApp(app));
+  const ds = app.get(modules.getDataSourceToken());
+  const owner = await createUser(app, modules.getDataSourceToken, { name: 'Journal owner', role: 'admin' });
+  const other = await createUser(app, modules.getDataSourceToken, { name: 'Other journal owner', role: 'admin' });
+  const account = await createAccount(app, modules.getDataSourceToken, 'journal-owner', { ownerUserId: owner.id });
+  const foreignAccount = await createAccount(app, modules.getDataSourceToken, 'journal-other', { ownerUserId: other.id });
+  const token = app.get(modules.AuthService).createSession(owner.id);
+  const foreignToken = app.get(modules.AuthService).createSession(other.id);
+  const call = async (path, method = 'GET', body, foreign = false) => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/business${path}`, { method,
+      headers: { Authorization: `Bearer ${foreign ? foreignToken : token}`, 'X-Account-Id': foreign ? foreignAccount.id : account.id, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, body: await response.json() };
+  };
+  const company = (await call('/companies', 'POST', { name: 'Formation history LLC' })).body;
+  const base = `/companies/${company.id}`;
+  const task = (await call(base)).body.tasks[0];
+  const path = `${base}/tasks/${task.id}`;
+  const count = await ds.getRepository('Ticket').count();
+  const add = (kind, content, extra = {}) => call(`${path}/entries`, 'POST', { request_id: randomUUID(), kind, content, ...extra });
+  const first = await add('result', 'Original incorporation plan');
+  assert.equal(first.status, 201, JSON.stringify(first));
+  const request = await add('request', 'Compare a different jurisdiction and revise the plan');
+  assert.equal(request.status, 201);
+  const decision = await add('decision', 'Choose option B because the documented costs fit the budget');
+  assert.equal(decision.status, 201);
+  const second = await add('result', 'Revised plan with document https://example.test/plan');
+  assert.equal(second.status, 201);
+  let state = (await call(path)).body;
+  assert.equal(state.result.id, second.body.id);
+  assert.equal(state.decision.id, decision.body.id);
+  assert.equal(state.entries.some(entry => entry.id === first.body.id), true, 'earlier outcome remains readable');
+  assert.deepEqual(state.open_requests.map(entry => entry.id), [request.body.id]);
+  assert.equal(state.task.status, 'todo', 'recording a result is not implicit completion');
+  assert.equal((await call(path, 'GET', undefined, true)).status, 403);
+  assert.equal((await call(`${path}/entries`, 'POST', { request_id: randomUUID(), kind: 'result', content: 'foreign' }, true)).status, 403);
+  assert.equal((await add('change', 'spoof a system change')).status, 400);
+  assert.equal((await add('result', '  ')).status, 400);
+  assert.equal((await add('resolution', 'wrong parent', { resolves_entry_id: decision.body.id })).status, 400);
+  const sibling = (await call(base)).body.tasks[1];
+  assert.equal((await call(`${base}/tasks/${sibling.id}/entries`, 'POST', { request_id: randomUUID(), kind: 'resolution', content: 'wrong task', resolves_entry_id: request.body.id })).status, 400);
+  const resolutionId = randomUUID();
+  const resolution = { request_id: resolutionId, kind: 'resolution', content: 'Compared both options and updated the plan above', resolves_entry_id: request.body.id };
+  assert.equal((await call(`${path}/entries`, 'POST', resolution)).status, 201);
+  assert.equal((await call(`${path}/entries`, 'POST', resolution)).body.id, resolutionId, 'identical retry is idempotent');
+  assert.equal((await call(`${path}/entries`, 'POST', { ...resolution, content: 'different' })).status, 409);
+  assert.equal((await add('resolution', 'close again', { resolves_entry_id: request.body.id })).status, 409);
+  state = (await call(path)).body;
+  assert.equal(state.open_requests.length, 0);
+  const revision = state.company_revision;
+  assert.equal((await call(path, 'PATCH', { revision, notes: 'Keep this evidence', status: 'done' })).status, 200);
+  assert.equal((await call(path, 'PATCH', { revision, notes: 'stale overwrite' })).status, 409);
+  state = (await call(path)).body;
+  assert.equal(state.entries[0].kind, 'change');
+  assert.deepEqual(state.entries[0].changes.status, { before: 'todo', after: 'done' });
+  assert.equal((await add('request', 'Follow up after completion')).status, 201, 'completed work keeps its original context');
+  state = (await call(path)).body;
+  assert.equal(state.task.status, 'done');
+  assert.equal(state.open_requests.length, 1);
+  assert.equal((await call(path, 'DELETE', { revision: state.company_revision })).status, 409, 'journal history cannot be silently deleted');
+  const rollback = t.mock.method(app.get(BusinessService), 'event', async () => { throw new Error('audit failure'); });
+  try { assert.equal((await add('result', 'must roll back')).status, 500); } finally { rollback.mock.restore(); }
+  state = (await call(path)).body;
+  assert.equal(state.result.id, second.body.id);
+  // Multiple pages include each persisted record exactly once even with identical timestamps.
+  for (let i = 0; i < 53; i++) assert.equal((await add('progress', `Step ${i}`)).status, 201);
+  state = (await call(path)).body;
+  assert.equal(state.entries.length, 50);
+  assert.ok(state.next_before);
+  const older = (await call(`${path}?before=${state.next_before}`)).body;
+  assert.equal(older.next_before, null);
+  assert.ok(older.entries.some(entry => entry.id === first.body.id));
+  const ids = [...state.entries, ...older.entries].map(entry => entry.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(older.result.id, second.body.id, 'summary stays current when paging into the past');
+  assert.equal((await call(`${path}?before=invalid`)).status, 400);
+  assert.equal(await ds.getRepository('Ticket').count(), count);
+});

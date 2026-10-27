@@ -497,3 +497,48 @@
 .business-mail-pagination { justify-content: space-between; margin-top: 14px; }
 @container business (max-width: 800px) { .business-mail-workspace { grid-template-columns: 1fr; } }
 .business-mail-reply { border-top: 1px solid var(--border-color, #8885); margin-top: 24px; padding-top: 16px; display: flex; flex-direction: column; gap: 12px; }
+
+/* A work item keeps its outcome, requests and history on one reading surface. */
+.business-task-workspace { max-width: 1200px; width: 100%; box-sizing: border-box; }
+.business-task-company { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #94a3b8; font-size: 12px; }
+.business-task-back, .business-inline-link { background: none; border: 0; color: #c4b5fd; cursor: pointer; text-align: left; padding: 8px 0; font: inherit; }
+.business-task-back { margin: -12px 0 16px; min-height: 44px; }
+.business-inline-link { margin-inline: 8px; text-decoration: underline; }
+.business-task-workspace > .business-panel { margin-bottom: 20px; }
+.business-task-workspace h2 { font-size: 15px; margin: 0 0 14px; }
+.business-task-workspace .business-work-title { font-size: 18px; line-height: 1.6; overflow-wrap: anywhere; }
+.business-task-context-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: #94a3b8; }
+.business-task-summary { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; margin-bottom: 20px; }
+.business-task-summary .business-panel { min-width: 0; border-top: 2px solid #a78bfa; }
+.business-task-workspace small { display: block; color: #94a3b8; font-size: 11px; margin: 8px 0; }
+.business-record-body { overflow-wrap: anywhere; min-width: 0; font-size: 13px; line-height: 1.8; }
+.business-record-body summary { cursor: pointer; color: #cbd5e1; white-space: pre-wrap; }
+.business-record-body summary span { color: #c4b5fd; }
+.business-record-body .awb-markdown { font-size: inherit; }
+.business-task-workspace details > summary { cursor: pointer; min-height: 30px; line-height: 1.6; }
+.business-open-request { display: flex; align-items: flex-start; gap: 16px; padding: 16px 0; border-top: 1px solid #334155; }
+.business-open-request > div { flex: 1; min-width: 0; }
+.business-open-request > button { flex-shrink: 0; }
+.business-task-compose-options { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; }
+.business-task-compose-options label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; flex: 1; min-width: 160px; }
+.business-task-compose-options select { background: #0f172a; border: 1px solid #475569; border-radius: 8px; padding: 10px; color: #e2e8f0; width: 100%; }
+.business-work-history { list-style: none; margin: 0; padding: 0; }
+.business-work-entry { padding: 20px 0 20px 16px; border-left: 2px solid #334155; border-bottom: 1px solid #33415588; margin: 0 0 12px; min-width: 0; }
+.business-work-entry.result, .business-work-entry.decision { border-left-color: #a78bfa; }
+.business-work-entry.request { border-left-color: #fbbf24; }
+.business-work-entry.resolution { border-left-color: #34d399; }
+.business-work-entry-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; font-size: 11px; color: #94a3b8; }
+.business-work-entry-meta strong { color: #e2e8f0; font-size: 12px; }
+.business-work-entry-meta time { margin-left: auto; }
+.business-work-changes { margin: 12px 0; font-size: 12px; }
+.business-work-changes dt { font-weight: 600; margin: 12px 0 6px; }
+.business-work-changes dd { margin: 0; padding: 12px; background: #0f172a; border-radius: 8px; }
+.business-work-changes dd > span { color: #94a3b8; }
+.business-work-changes pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 6px 0 14px; }
+.business-record-attachment { display: block; overflow-wrap: anywhere; color: #c4b5fd; margin-top: 8px; }
+@container business (max-width: 700px) {
+  .business-task-summary { grid-template-columns: 1fr; gap: 12px; }
+  .business-open-request { flex-direction: column; gap: 8px; }
+  .business-work-entry-meta time { margin-left: 0; }
+  .business-task-workspace .business-heading-actions > button { font-size: 12px; padding-inline: 10px; }
+}

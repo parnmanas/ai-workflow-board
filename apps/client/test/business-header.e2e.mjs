@@ -19,6 +19,9 @@ const campaign = { id: 'campaign-header', account_id: account.id, name: longName
 
 async function fixture(page, permissions = ['business.manage', 'marketing.manage']) {
   const errors = []; const requests = [];
+  const task = { id: 'task-header', title: longName, company_id: company.id, account_id: account.id, stage: 'formation', status: 'in_progress', description: '설립 방향을 비교하고 근거와 결과를 기록합니다.', notes: '', owner: 'Owner', due_on: null, depends_on: [], blocked_by: [], ticket_id: 'ticket-header', ticket: { id: 'ticket-header', title: 'Formation research', status: 'in_progress' } };
+  const result = { id: 'result-first', kind: 'result', content: 'Initial formation plan with [supporting document](https://example.test/plan)', author: 'Owner', author_type: 'user', revision: 1, created_at: '2026-10-25T01:00:00Z', changes: null, resolves_entry_id: null };
+  const journal = { task, company_revision: 1, entries: [result], result, decision: null, open_requests: [], next_before: null };
   page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(({ accountId, locale }) => {
     localStorage.setItem('awb.locale', locale);
@@ -36,6 +39,17 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
     else if (path === '/accounts') body = [account];
     else if (path === `/accounts/${account.id}`) body = account;
     else if (path === '/business/companies') body = [company, { ...company, id: 'company-other', name: 'Second LLC' }];
+    else if (path === `/business/companies/${company.id}/tasks/task-header/entries`) {
+      const input = route.request().postDataJSON();
+      const row = { ...input, id: input.request_id, task_id: task.id, revision: ++journal.company_revision, author: 'Owner', author_type: 'user', created_at: new Date().toISOString(), changes: null };
+      journal.entries.unshift(row);
+      if (row.kind === 'result' || row.kind === 'decision') journal[row.kind] = row;
+      if (row.kind === 'request') journal.open_requests.push(row);
+      if (row.kind === 'resolution') journal.open_requests = journal.open_requests.filter(request => request.id !== row.resolves_entry_id);
+      body = row;
+    }
+    else if (path === `/business/companies/${company.id}/tasks/task-header`) body = journal;
+    else if (path === '/tickets/ticket-header/comments') body = [{ id: 'comment-header', content: 'Agent research and supporting evidence', author: 'Agent', author_type: 'agent', created_at: '2026-10-25T01:30:00Z', attachments: [] }];
     else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company, tasks: [], connections: [], campaigns: [], events: [], formations: [] };
     else if (path.includes('/cashbook/')) body = { month: '2026-10', currency: 'USD', company_revision: 0, entries: [], period: null, summary: { inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0, active_count: 0, unreconciled_count: 0 } };
     else if (path === '/business/mail/connections') body = { connections: [{ id: 'mail-header', name: longName, config: { addresses: ['ops@example.test'] }, enabled: true, purpose: 'operations' }], connectors: [], credentials: [] };
@@ -50,7 +64,7 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  return { errors, requests };
+  return { errors, requests, journal };
 }
 
 async function expectHeaderFits(page) {
@@ -89,6 +103,7 @@ for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (loca
     for (const [path, title] of [
       ['/business?company=company-header', ui("비즈니스 전체 흐름")],
       ['/business/operations?company=company-header&stage=growth', ui("운영 워크플로")],
+      ['/business/operations?company=company-header&stage=formation&task=task-header', longName],
       ['/business/connectors?company=company-header', ui("커넥터")],
       ['/business/mail', ui("비즈니스 메일")],
       ['/marketing', ui('Marketing')],
@@ -97,7 +112,7 @@ for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (loca
     ]) {
       await page.goto(path);
       await expect(page.locator('.business-page-heading h1')).toHaveText(title);
-      if (path.includes('company=')) await expect(page.getByLabel(ui("관리할 회사"))).toHaveValue(company.id);
+      if (path.includes('company=') && !path.includes('&task=')) await expect(page.getByLabel(ui("관리할 회사"))).toHaveValue(company.id);
       await expectHeaderFits(page);
       const file = path.split('?')[0].replaceAll('/', '-');
       await page.screenshot({ path: testInfo.outputPath(`${file}.png`) });
@@ -114,7 +129,7 @@ for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (loca
       await page.keyboard.press('Escape');
       await expect(menu).toBeFocused();
       await expect(menu).toHaveAttribute('aria-expanded', 'false');
-      if (path.includes('/operations')) {
+      if (path.includes('/operations') && !path.includes('&task=')) {
         const tabs = page.getByRole('group', { name: ui("운영 영역") });
         const active = tabs.locator('[aria-pressed=true]');
         const tabBounds = await tabs.boundingBox(); const activeBounds = await active.boundingBox();
@@ -122,6 +137,11 @@ for (const [locale, size] of ['en', 'ko', 'ja', 'zh-CN'].flatMap(locale => (loca
         expect(activeBounds.x).toBeGreaterThanOrEqual(tabBounds.x);
         expect(activeBounds.x + activeBounds.width).toBeLessThanOrEqual(tabBounds.x + tabBounds.width + 1);
         await expect(page.locator('.business-operations-heading')).toBeInViewport();
+      }
+      if (path.includes('&task=')) {
+        await page.getByRole('button', { name: ui('추가·수정 요청'), exact: true }).click();
+        await expect(page.getByLabel(ui('업무 기록 내용'))).toBeFocused();
+        await expect(page.getByLabel(ui('업무 기록 내용'))).toBeInViewport();
       }
       if (path === '/business/mail') {
         await expect(page.getByRole('region', { name: ui("통합 메일 목록") })).toBeInViewport();
@@ -186,5 +206,42 @@ test('Marketing-only permissions keep Business navigation and menus scoped', asy
   await expect(page.locator('.business-heading-menu-info')).toContainText(ui("캠페인 에이전트가 주기마다 채널을 찾고 글 · 메일 · 예산을 제안합니다. 돈 · 외부 발신 · 채널 개설은 사람이 승인합니다."));
   await expect(page.getByRole('button', { name: ui("+ 새 캠페인"), exact: true })).toHaveCount(0);
   expect(f.requests.some(p => p.startsWith('/business/'))).toBe(false);
+  expect(f.errors).toEqual([]);
+});
+
+test('one business work item keeps original outcomes, revision requests and resolutions together', async ({ page }) => {
+  activeLocale = 'ko';
+  const f = await fixture(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const url = '/business/operations?company=company-header&stage=formation&task=task-header';
+  await page.goto(url);
+  await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('Initial formation plan');
+  await expect(page.getByRole('region', { name: ui('진행 과정과 변경 내역'), exact: true })).toContainText('Agent research and supporting evidence');
+  const record = page.getByRole('region', { name: ui('업무에 이어서 기록'), exact: true });
+  await record.getByLabel(ui('업무 기록 내용')).fill('기존 설립 계획에서 비용 비교와 다음 단계를 보완해 주세요.');
+  await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
+  const requests = page.getByRole('region', { name: ui('남은 추가·수정 요청'), exact: true });
+  await expect(requests).toContainText('비용 비교와 다음 단계');
+  await page.reload();
+  await expect(requests).toContainText('비용 비교와 다음 단계');
+  await page.getByRole('button', { name: ui('수정 결과 남기기'), exact: true }).click();
+  await record.getByLabel(ui('업무 기록 내용')).fill('수정 결과: 두 옵션의 비용을 비교했습니다. 다음 단계는 서류 검토입니다.');
+  await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
+  await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('수정 결과: 두 옵션');
+  await requests.getByRole('button', { name: ui('처리 결과 남기기'), exact: true }).click();
+  await record.getByLabel(ui('업무 기록 내용')).fill('수정 결과에 비용 비교와 다음 단계를 반영했습니다.');
+  await record.getByRole('button', { name: ui('기록 남기기'), exact: true }).click();
+  await expect(requests).toContainText(ui('처리를 기다리는 업무 요청이 없습니다.'));
+  const history = page.getByRole('region', { name: ui('진행 과정과 변경 내역'), exact: true });
+  await expect(history).toContainText('Initial formation plan');
+  await expect(history).toContainText('수정 결과에 비용 비교와 다음 단계를 반영했습니다.');
+  await expect(history).toContainText(ui('처리 기록 있음'));
+  await page.getByRole('button', { name: ui('업무 목록으로'), exact: false }).first().click();
+  await expect(page).not.toHaveURL(/task=/);
+  await page.goBack();
+  await expect(page).toHaveURL(/task=task-header/);
+  await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('수정 결과: 두 옵션');
+  expect(f.journal.entries.filter(entry => entry.kind === 'result')).toHaveLength(2);
+  expect(f.requests.filter(path => path.endsWith('/ticket'))).toHaveLength(0);
   expect(f.errors).toEqual([]);
 });
