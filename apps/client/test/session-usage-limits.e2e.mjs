@@ -42,25 +42,30 @@ async function fixture(page, { missing = false, expired = false } = {}) {
 }
 
 for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }, { width: 667, height: 375 }]) {
-  test(`quota stays in the bar and details open from the menu at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+  test(`quota forms the header divider and details open from the menu at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
     await page.setViewportSize(size);
     await fixture(page);
-    const compact = page.locator('[data-session-usage-limits="compact"]');
-    const primary = compact.getByRole('meter', { name: '5h limit', exact: true });
+    const boundary = page.locator('[data-session-usage-limits="boundary"]');
+    const primary = boundary.getByRole('meter', { name: '5h limit', exact: true });
     await expect(primary).toHaveAttribute('aria-valuenow', '42');
-    await expect(compact.getByRole('meter', { name: '7d limit', exact: true })).toHaveAttribute('aria-valuenow', '91');
+    await expect(boundary.getByRole('meter', { name: '7d limit', exact: true })).toHaveAttribute('aria-valuenow', '91');
     await expect(page.getByText('42% used', { exact: true })).toHaveCount(0);
     await expect(page.getByText('Usage limits', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('textbox', { name: 'Prompt', exact: true })).toBeInViewport();
     await expect(primary).toBeInViewport();
-    expect(await compact.textContent()).toBe('');
-    expect((await compact.boundingBox()).height).toBeLessThanOrEqual(11);
+    expect(await boundary.textContent()).toBe('');
+    expect((await boundary.boundingBox()).height).toBeLessThanOrEqual(5);
+    await expect(page.locator('.awb-session-status [data-session-usage-limits]')).toHaveCount(0);
     const header = await page.locator('.awb-session-header').boundingBox();
     expect(header.height).toBeLessThanOrEqual(116);
+    const divider = await boundary.boundingBox();
+    expect(Math.abs(divider.x - header.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(divider.width - header.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(divider.y + divider.height - header.y - header.height)).toBeLessThanOrEqual(1);
     const transcript = await page.locator('.awb-session-transcript').boundingBox();
     expect(transcript.y).toBeLessThanOrEqual(header.y + header.height + 1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath('usage-limits-compact.png') });
+    await page.screenshot({ path: testInfo.outputPath('usage-limits-boundary.png') });
     const trigger = page.getByRole('button', { name: 'Session menu', exact: true });
     await trigger.click();
     const details = page.locator('[data-session-usage-limits="details"]');
@@ -80,9 +85,9 @@ for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { 
   });
 }
 
-test('missing quota occupies no bar space; missing and expired details live in the menu', async ({ page }) => {
+test('missing quota keeps the normal divider; missing and expired details live in the menu', async ({ page }) => {
   await fixture(page, { missing: true });
-  await expect(page.locator('[data-session-usage-limits="compact"]')).toHaveCount(0);
+  await expect(page.locator('[data-session-usage-limits="boundary"]')).toHaveCount(0);
   await expect(page.getByText('No usage limits reported by this CLI', { exact: true })).toHaveCount(0);
   const emptyHeaderHeight = (await page.locator('.awb-session-header').boundingBox()).height;
   await page.getByRole('button', { name: 'Session menu', exact: true }).click();
@@ -90,7 +95,7 @@ test('missing quota occupies no bar space; missing and expired details live in t
   await expect(page.getByRole('meter')).toHaveCount(0);
   await page.unroute('**/api/**');
   await fixture(page, { expired: true });
-  await expect(page.locator('[data-session-usage-limits="compact"]')).toBeVisible();
+  await expect(page.locator('[data-session-usage-limits="boundary"]')).toBeVisible();
   expect((await page.locator('.awb-session-header').boundingBox()).height).toBe(emptyHeaderHeight);
   await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await expect(page.getByText('Awaiting update', { exact: true })).toBeVisible();

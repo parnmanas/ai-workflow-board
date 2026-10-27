@@ -14,8 +14,8 @@ function windowLabel(window: SessionLimitWindow): string {
   return window.limitName ? `${window.limitName} · ${duration}` : duration;
 }
 
-export default function SessionUsageLimits({ events, variant = 'compact' }: {
-  events: AgentSessionEventRecord[]; variant?: 'compact' | 'details';
+export default function SessionUsageLimits({ events, variant = 'boundary' }: {
+  events: AgentSessionEventRecord[]; variant?: 'boundary' | 'details';
 }) {
   useLocale();
   const windows = useMemo(() => sessionLimitWindows(events), [events]);
@@ -24,14 +24,14 @@ export default function SessionUsageLimits({ events, variant = 'compact' }: {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  const compact = variant === 'compact';
-  if (compact && windows.length === 0) return null;
-  // Multiple model quotas must not grow the header; the menu always lists them all.
-  const visible = compact && windows.length > 2 ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent).slice(0, 2) : windows;
+  const boundary = variant === 'boundary';
+  if (boundary && windows.length === 0) return null;
+  // The divider keeps a fixed thickness even with multiple model quotas; the menu always lists them all.
+  const visible = boundary && windows.length > 2 ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent).slice(0, 2) : windows;
   const formatTime = (iso: string) => new Date(iso).toLocaleString(getLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   return (
-    <span role="group" aria-label={t('Usage limits')} data-session-usage-limits={variant} style={compact
-      ? { display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, width: 42, height: 11, flexShrink: 0 }
+    <span role="group" aria-label={t('Usage limits')} data-session-usage-limits={variant} style={boundary
+      ? { position: 'absolute', left: 0, right: 0, bottom: -1, display: 'flex', flexDirection: 'column', gap: 1, height: visible.length === 1 ? 3 : 5 }
       : { display: 'flex', flexDirection: 'column', gap: 12 }}>
       {windows.length === 0 && <span style={{ fontSize: 12, color: tokens.colors.textSecondary }}>{t('No usage limits reported by this CLI')}</span>}
       {visible.map((w) => {
@@ -44,11 +44,11 @@ export default function SessionUsageLimits({ events, variant = 'compact' }: {
           <span role={expired ? undefined : 'meter'} aria-label={label} aria-valuemin={expired ? undefined : 0}
             aria-valuemax={expired ? undefined : 100} aria-valuenow={expired ? undefined : w.usedPercent}
             aria-valuetext={expired ? undefined : usage} title={`${label} · ${usage}`}
-            style={{ display: 'block', height: 4, borderRadius: 4, background: tokens.colors.border, overflow: 'hidden' }}>
-            <span style={{ display: 'block', height: '100%', width: expired ? '0%' : `${w.usedPercent}%`, background: color, borderRadius: 4 }} />
+            style={{ display: 'block', height: boundary ? (visible.length === 1 ? 3 : 2) : 4, borderRadius: boundary ? 0 : 4, background: tokens.colors.border, overflow: 'hidden' }}>
+            <span style={{ display: 'block', height: '100%', width: expired ? '0%' : `${w.usedPercent}%`, background: boundary ? `linear-gradient(90deg, ${color}99, ${color})` : color, borderRadius: boundary ? 0 : 4 }} />
           </span>
         );
-        if (compact) return <span key={w.key}>{meter}</span>;
+        if (boundary) return <span key={w.key}>{meter}</span>;
         return (
           <span key={w.key} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
             <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>

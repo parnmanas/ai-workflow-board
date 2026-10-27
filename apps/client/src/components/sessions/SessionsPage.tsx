@@ -969,9 +969,9 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     <>
       <header
         className="awb-session-header"
-        style={{ background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '8px 16px', flexShrink: 0 }}
+        style={{ position: 'relative', background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}`, padding: '8px 16px', flexShrink: 0 }}
       >
-        {/* 늘 보이는 것은 정체(제목 · 호스트 · CLI) · 상태와 작은 한도 게이지 · mode/model/effort · 연결 동작뿐이다.
+        {/* 늘 보이는 것은 정체(제목 · 호스트 · CLI) · 상태 · mode/model/effort · 연결 동작뿐이다.
             폴더 · 세션 id · 로그인 · 덜 쓰는 설정과 동작은 햄버거 메뉴로 접는다 — 폭은 화면이 아니라
             헤더 자신의 폭(container query)으로 판단해 사이드바·패널이 열려도 같은 규칙으로 접힌다. */}
         <div className="awb-session-bar">
@@ -994,7 +994,6 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             </div>
             <span className="awb-session-status">
               <StatusPill status={status} />
-              <SessionUsageLimits events={events} />
             </span>
           </div>
           {(headerOptions.length > 0 || showLegacyModeSelect) && (
@@ -1121,6 +1120,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             </SessionHeaderMenu>
           </div>
         </div>
+        <SessionUsageLimits events={events} />
       </header>
 
       {/* 오류 배너 — 서버가 상태에 적어 둔 사유(last_error)와, 그게 도착하기 전의
