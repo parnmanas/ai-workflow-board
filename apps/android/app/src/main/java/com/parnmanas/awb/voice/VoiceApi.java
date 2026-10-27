@@ -4,7 +4,8 @@ import android.content.Context;
 import android.net.Uri;
 import com.parnmanas.awb.Auth;
 import com.parnmanas.awb.Http;
-import com.parnmanas.awb.Prefs;
+import com.parnmanas.awb.Server;
+import com.parnmanas.awb.Servers;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,7 +15,8 @@ import org.json.JSONObject;
 
 /**
  * 상시 음성 서비스가 쓰는 서버 API — 웹 화면이 쓰는 것과 같은 엔드포인트다(새 경로를 만들지 않는다).
- * 401 이면 단말 자격으로 세션을 다시 받아 한 번 더 시도한다.
+ * 401 이면 단말 자격으로 세션을 다시 받아 한 번 더 시도한다. 서버 하나에 묶인다 — 다른 서버로 옮겨 가면
+ * 서비스가 새로 만든다.
  */
 final class VoiceApi {
   static final class Unauthorized extends IOException {
@@ -52,8 +54,10 @@ final class VoiceApi {
       return managerId.equals(m) && cli.equals(c) && sessionId.equals(s);
     }
 
-    String deepLink() {
-      return "awb://sessions/" + Uri.encode(managerId) + "/" + Uri.encode(cli) + "/" + Uri.encode(sessionId);
+    /** 알림을 누르면 이 세션으로 — 그사이 다른 서버로 옮겨 갔어도 이 서버로 돌아온다. */
+    String deepLink(String serverId) {
+      return "awb://sessions/" + Uri.encode(managerId) + "/" + Uri.encode(cli) + "/" + Uri.encode(sessionId)
+          + "?server=" + Uri.encode(serverId);
     }
   }
 
@@ -81,9 +85,11 @@ final class VoiceApi {
   }
 
   private final Context ctx;
+  private final String serverId;
 
-  VoiceApi(Context ctx) {
+  VoiceApi(Context ctx, String serverId) {
     this.ctx = ctx.getApplicationContext();
+    this.serverId = serverId;
   }
 
   private interface Call {
@@ -91,15 +97,16 @@ final class VoiceApi {
   }
 
   private Http.Response call(String accountId, Call call) throws IOException {
-    String base = Prefs.serverUrl(ctx);
-    if (base.isEmpty()) throw new Unauthorized();
-    String token = Auth.token(ctx);
+    Server server = Servers.get(ctx, serverId);
+    if (server == null) throw new Unauthorized();
+    String base = server.url;
+    String token = Auth.token(ctx, serverId);
     if (token.isEmpty()) throw new Unauthorized();
     Map<String, String> h = Auth.headers(token);
     if (accountId != null && !accountId.isEmpty()) h.put("X-Account-Id", accountId);
     Http.Response r = call.run(base, h);
     if (r.code != 401) return r;
-    token = Auth.refresh(ctx, token);
+    token = Auth.refresh(ctx, serverId, token);
     if (token.isEmpty()) throw new Unauthorized();
     h.put("Authorization", "Bearer " + token);
     r = call.run(base, h);

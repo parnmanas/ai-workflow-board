@@ -161,8 +161,31 @@ export function startNativeGoogleLogin(): void {
   callNative('oauth.google').catch(() => undefined);
 }
 
+/** 앱의 서버 목록(전환 · 추가 · 관리)을 연다. 2.1 이하 앱은 서버 주소 화면을 연다. */
 export function changeNativeServer(): void {
   callNative('server.change').catch(() => undefined);
+}
+
+export interface NativeAppInfo {
+  app: 'android';
+  version: string;
+  version_code: number;
+  /** 지금 서버 주소. */
+  server: string;
+  /** 앱에서 붙인 서버 이름, 없으면 host — 2.2 부터. */
+  server_name?: string;
+  /** 앱에 등록된 서버 수 — 2.2 부터. */
+  servers?: number;
+}
+
+/** 앱 정보(`hello`). 앱이 아니거나 답이 없으면 null. */
+export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
+  if (!isAndroidApp()) return null;
+  try {
+    return await callNative<NativeAppInfo>('hello');
+  } catch {
+    return null;
+  }
 }
 
 // ─── 상시 음성 ─────────────────────────────────────────────────────────────

@@ -8,24 +8,31 @@ import androidx.webkit.JavaScriptReplyProxy;
 import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
 import com.parnmanas.awb.voice.VoiceService;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
  * 웹 화면 ↔ 앱 — `window.AwbAndroid` (androidx.webkit WebMessageListener).
  *
- * 서버 오리진의 최상위 문서에만 주입된다(다른 사이트로 나가면 객체가 없다). 웹은 `{id, type, …}` 를
+ * 지금 서버 오리진의 최상위 문서에만 주입된다(다른 사이트로 나가면 객체가 없다). 웹은 `{id, type, …}` 를
  * postMessage 하고, 앱은 `{id, ok, result | error}` 로 답한다. 앱이 먼저 알리는 것은 `{event, …}`
  * (음성 상태 변화 · 알림을 눌러 세션으로 가기). 웹 쪽 짝은 `apps/client/src/native/androidBridge.ts`.
+ *
+ * 요청은 그것을 보낸 오리진의 서버에 대해 처리하고, 답은 그 요청을 보낸 문서에만 보낸다 — 답을 기다리는 사이
+ * 다른 서버로 옮겨 가도 한 서버의 토큰이 다른 서버의 화면에 닿지 않는다.
  */
 public final class WebBridge implements WebViewCompat.WebMessageListener {
   public static final String NAME = "AwbAndroid";
 
   private final MainActivity activity;
   private final Handler main = new Handler(Looper.getMainLooper());
-  private final ExecutorService io = Executors.newSingleThreadExecutor();
+  /** 서버마다 한 줄 — 같은 서버의 요청은 온 순서대로, 응답 없는 서버가 다른 서버의 요청을 붙잡지 않게. */
+  private final Map<String, ExecutorService> io = new ConcurrentHashMap<>();
   private JavaScriptReplyProxy proxy;
   private String origin = "";
 
@@ -60,69 +67,87 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
     } catch (JSONException e) {
       return;
     }
-    handle(req.optString("id", ""), req.optString("type", ""), req);
+    handle(replyProxy, req.optString("id", ""), req.optString("type", ""), req);
   }
 
-  private void handle(String id, String type, JSONObject req) {
+  private void handle(JavaScriptReplyProxy to, String id, String type, JSONObject req) {
+    Server s = Servers.byOrigin(activity, origin);
+    if (s == null) {
+      replyError(to, id, "no_server");
+      return;
+    }
     switch (type) {
       case "hello":
-        reply(id, Http.obj(
+        reply(to, id, Http.obj(
             "app", "android",
             "version", BuildConfig.VERSION_NAME,
             "version_code", BuildConfig.VERSION_CODE,
-            "server", Prefs.serverUrl(activity),
-            "voice", VoiceService.statusJson(activity)));
+            "server", s.url,
+            "server_id", s.id,
+            "server_name", s.label(),
+            "servers", Servers.list(activity).size(),
+            "voice", VoiceService.statusJson(activity, s.id)));
         break;
       case "session.get":
-        io.execute(() -> reply(id, Http.obj("token", Auth.token(activity))));
+        run(s, () -> reply(to, id, Http.obj("token", Auth.token(activity, s.id))));
         break;
       case "session.refresh":
-        io.execute(() -> reply(id, Http.obj("token", Auth.refresh(activity, req.optString("rejected", "")))));
+        run(s, () -> reply(to, id, Http.obj("token", Auth.refresh(activity, s.id, req.optString("rejected", "")))));
         break;
       case "session.loggedIn":
-        io.execute(() -> {
+        run(s, () -> {
           boolean device;
           try {
-            device = Auth.onLoggedIn(activity, req.optString("token", ""));
+            device = Auth.onLoggedIn(activity, s.id, req.optString("token", ""));
           } catch (Exception e) {
             device = false;
           }
-          reply(id, Http.obj("device", device));
-          if (device) main.post(activity::onSignedIn);
+          reply(to, id, Http.obj("device", device));
+          if (device) main.post(() -> activity.onSignedIn(s.id));
         });
         break;
       case "session.loggedOut":
         VoiceService.stop(activity);
-        io.execute(() -> {
-          Auth.onLoggedOut(activity);
-          reply(id, new JSONObject());
+        run(s, () -> {
+          Auth.onLoggedOut(activity, s.id);
+          reply(to, id, new JSONObject());
         });
         break;
       case "voice.status":
-        reply(id, VoiceService.statusJson(activity));
+        reply(to, id, VoiceService.statusJson(activity, s.id));
         break;
       case "voice.setEnabled":
         if (req.optBoolean("enabled", false)) {
-          activity.enableVoice(() -> reply(id, VoiceService.statusJson(activity)));
+          activity.enableVoice(s.id, () -> reply(to, id, VoiceService.statusJson(activity, s.id)));
         } else {
-          activity.disableVoice();
-          reply(id, VoiceService.statusJson(activity));
+          activity.disableVoice(s.id);
+          reply(to, id, VoiceService.statusJson(activity, s.id));
         }
         break;
       case "voice.batterySettings":
         activity.openBatterySettings();
-        reply(id, new JSONObject());
+        reply(to, id, new JSONObject());
         break;
       case "server.change":
-        reply(id, new JSONObject());
-        main.post(activity::showServerSetup);
+        // 예전 이름 그대로 — 이제 서버 목록(전환 · 추가 · 관리)을 연다.
+        reply(to, id, new JSONObject());
+        main.post(activity::showServers);
         break;
       case "oauth.google":
-        reply(id, new JSONObject());
-        main.post(() -> GoogleLogin.start(activity));
+        reply(to, id, new JSONObject());
+        main.post(() -> GoogleLogin.start(activity, s));
         break;
       default:
-        replyError(id, "unknown_type");
+        replyError(to, id, "unknown_type");
+    }
+  }
+
+  private void run(Server s, Runnable task) {
+    ExecutorService e = io.computeIfAbsent(s.id, k -> Executors.newSingleThreadExecutor());
+    try {
+      e.execute(task);
+    } catch (RejectedExecutionException ignored) {
+      // 화면이 닫히는 중
     }
   }
 
@@ -138,21 +163,18 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
     });
   }
 
-  private void reply(String id, JSONObject result) {
-    JSONObject out = Http.obj("id", id, "ok", true, "result", result);
-    send(out);
+  private void reply(JavaScriptReplyProxy to, String id, JSONObject result) {
+    send(to, Http.obj("id", id, "ok", true, "result", result));
   }
 
-  private void replyError(String id, String error) {
-    send(Http.obj("id", id, "ok", false, "error", error));
+  private void replyError(JavaScriptReplyProxy to, String id, String error) {
+    send(to, Http.obj("id", id, "ok", false, "error", error));
   }
 
-  private void send(JSONObject out) {
-    final JavaScriptReplyProxy target = proxy;
+  private void send(JavaScriptReplyProxy to, JSONObject out) {
     main.post(() -> {
-      if (target == null) return;
       try {
-        target.postMessage(out.toString());
+        to.postMessage(out.toString());
       } catch (Exception ignored) {
         // 문서가 바뀌었다 — 새 문서가 다시 물어본다.
       }
@@ -161,13 +183,10 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
 
   static String originOf(Uri uri) {
     if (uri == null || uri.getScheme() == null || uri.getHost() == null) return "";
-    String scheme = uri.getScheme().toLowerCase();
-    int port = uri.getPort();
-    boolean defaultPort = port < 0 || ("https".equals(scheme) && port == 443) || ("http".equals(scheme) && port == 80);
-    return scheme + "://" + uri.getHost().toLowerCase() + (defaultPort ? "" : ":" + port);
+    return ServerUrls.origin(uri.getScheme(), uri.getHost(), uri.getPort());
   }
 
   void shutdown() {
-    io.shutdownNow();
+    for (ExecutorService e : io.values()) e.shutdownNow();
   }
 }

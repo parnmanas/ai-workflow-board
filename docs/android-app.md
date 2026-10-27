@@ -16,9 +16,11 @@ CORS 설정이 필요했고, 구글 로그인은 페이지째 이동이라 시�
 ## 구성
 
 ```
-MainActivity      WebView(서버 오리진) + 서버 주소 / 오프라인 화면 + 딥링크(awb://oauth · awb://sessions/…)
+MainActivity      WebView(서버 오리진) + 서버 목록 / 오프라인 화면 + 딥링크(awb://oauth · awb://sessions/…)
+Servers · Server  서버 목록 · 현재 서버 · 서버별 단말 자격과 음성 설정
+ServerUrls        서버 주소 정규화 · 오리진 중복 검사
 WebBridge         window.AwbAndroid — 서버 오리진의 최상위 문서에만 주입(androidx.webkit WebMessageListener)
-Auth              세션 토큰의 단일 출처. 단말 자격으로 세션을 다시 받는다
+Auth              서버별 세션 토큰의 단일 출처. 해당 서버의 단말 자격으로 세션을 다시 받는다
 GoogleLogin       PKCE + Custom Tab
 voice/VoiceService  상시 음성 포그라운드 서비스(microphone|mediaPlayback)
 voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
@@ -26,6 +28,16 @@ voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
 
 웹 쪽 짝: `apps/client/src/native/androidBridge.ts`(요청/응답 · 이벤트), `native/AndroidAppBridge.tsx`(이동 · 스위치 맞추기 ·
 숨으면 대화 내려놓기), `components/AndroidVoiceCard.tsx`(설정 → Device).
+
+### 서버 전환
+
+사이드바 사용자 줄의 전환 버튼이나 설정의 **서버 전환 · 관리**에서 서버 목록을 연다.
+서버를 추가하고 이름을 붙이거나 삭제할 수 있으며, 각 서버의 로그인 상태를 유지한 채 전환한다.
+WebView 저장소는 오리진 단위라 같은 오리진을 중복 등록하지 않는다. 2.1 이하의 단일 서버 설정은
+처음 실행할 때 목록의 첫 서버로 옮기며 로그인 정보와 음성 설정도 보존한다.
+
+화면과 상시 음성은 현재 선택한 서버를 사용한다. 전환하면 이전 서버의 음성 연결을 정리하고,
+알림에는 서버 이름과 해당 서버를 가리키는 딥링크를 넣는다. 각 서버의 인증 정보는 그 서버에만 보낸다.
 
 ### WebView 가 대신 해 주지 않는 것 — 화면 쪽에서 맞춘다
 
@@ -96,11 +108,11 @@ voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
 ```
 cd apps/android
 JAVA_HOME=<jdk 17+> ./gradlew assembleRelease      # local.properties 의 awb.keystore.* 로 서명
-JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # VoiceRules · Vad 단위 테스트
+JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # ServerUrls · VoiceRules · Vad 단위 테스트
 ```
 
 - `applicationId com.parnmanas.awb` 와 릴리즈 키가 Capacitor 껍데기와 같아 덮어 설치로 올라간다. `versionCode` 는 손으로
-  올린다(10 = 이 재작성, 11 = Qwen 스트리밍).
+  올린다(10 = 이 재작성, 11 = Qwen 스트리밍, 12 = 서버 목록과 서버별 로그인).
 - 배포는 GitHub release 의 `awb-android.apk` 자산이다 — 설정 · 자료실의 "Android 앱 받기" 가 `releases/latest` 를 본다
   (`apps/client/src/githubRelease.ts`).
 - **서버를 먼저 배포한다.** 앱의 로그인 유지 · 구글 로그인은 서버의 `/api/auth/devices*` · `oauth/app/exchange` 가 있어야 한다.

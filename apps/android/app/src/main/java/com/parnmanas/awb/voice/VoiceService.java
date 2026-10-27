@@ -24,8 +24,9 @@ import com.parnmanas.awb.AppState;
 import com.parnmanas.awb.BuildConfig;
 import com.parnmanas.awb.Http;
 import com.parnmanas.awb.MainActivity;
-import com.parnmanas.awb.Prefs;
 import com.parnmanas.awb.R;
+import com.parnmanas.awb.Server;
+import com.parnmanas.awb.Servers;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayDeque;
@@ -51,8 +52,12 @@ import org.json.JSONObject;
  *
  * 앱 화면이 보이는 동안은 마이크를 놓는다 — 그때는 웹 화면이 같은 일을 한다(AppState).
  * 상태바에 상시 알림이 있고, Android 12+ 는 초록 마이크 표시가 뜬다.
+ *
+ * 서버 하나에 묶인다 — 화면이 보여 주는 "지금 서버". 다른 서버로 옮겨 가면 마이크 · 알림은 그대로 두고
+ * 서버에 묶인 것(이벤트 스트림 · API · 대화)만 그 서버로 바꾼다(`rebind`). 떠나는 서버에는 이 단말이 더는
+ * 듣지 않는다고 알린다 — 듣는 사람 없는 서버의 operator 가 보고를 이어 가지 않게.
  */
-public class VoiceService extends Service implements AppState.Listener, EventStream.Handler {
+public class VoiceService extends Service implements AppState.Listener {
   public static final String ACTION_START = "com.parnmanas.awb.voice.START";
   public static final String ACTION_STOP = "com.parnmanas.awb.voice.STOP";
   public static final String ACTION_SLEEP = "com.parnmanas.awb.voice.SLEEP";
@@ -67,8 +72,9 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   private static final long MIC_BLOCKED_AFTER_MS = 15_000;
   private static final long BUSY_GIVE_UP_MS = 2 * 60_000;
 
+  /** 상태가 바뀌었다 — 듣는 쪽이 자기 서버의 상태를 {@link #statusJson} 으로 다시 읽는다. */
   public interface StatusListener {
-    void onStatus(JSONObject status);
+    void onStatusChanged();
   }
 
   private static final String TAG = "AWB-Voice";
@@ -87,9 +93,28 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     }
   }
 
+  /**
+   * 지금 서버에 맞춘다 — 상시 음성은 화면이 보여 주는 서버를 따른다. 그 서버에서 켜 두었으면 띄우거나 그
+   * 서버로 옮기고, 아니면 멈춘다(떠나는 서버에는 이 단말이 더는 듣지 않는다고 알린다). 앱이 보이는 동안 부를 것.
+   */
+  public static void sync(Context c) {
+    Server s = Servers.active(c);
+    if (s != null && s.voiceEnabled && !s.deviceToken.isEmpty() && micGranted(c)) {
+      start(c);
+    } else {
+      VoiceService v = instance;
+      if (v != null) v.shutdown(true);
+    }
+  }
+
+  /** 멈춘다. 그 서버에서 상시 음성을 꺼 둔 경우에만 서버에도 꺼졌다고 알린다(로그아웃은 Auth 가 알린다). */
   public static void stop(Context c) {
     VoiceService s = instance;
-    if (s != null) s.shutdown();
+    if (s != null) s.shutdown(false);
+  }
+
+  private static boolean micGranted(Context c) {
+    return c.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
   }
 
   public static void addStatusListener(StatusListener l) {
@@ -100,13 +125,16 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     STATUS_LISTENERS.remove(l);
   }
 
-  public static JSONObject statusJson(Context c) {
-    VoiceService s = instance;
-    boolean mic = c.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+  /** 그 서버에서 본 상시 음성 — 서비스가 다른 서버에 묶여 있으면 이 서버에는 꺼져 있다. */
+  public static JSONObject statusJson(Context c, String serverId) {
+    VoiceService v = instance;
+    VoiceService s = v != null && v.serverId.equals(serverId) ? v : null;
+    Server server = Servers.get(c, serverId);
+    boolean mic = micGranted(c);
     boolean notif = Build.VERSION.SDK_INT < 33
         || c.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
     return Http.obj(
-        "enabled", Prefs.voiceEnabled(c),
+        "enabled", server != null && server.voiceEnabled,
         "running", s != null,
         "state", s == null ? "off" : s.stateName(),
         "detail", s == null ? "" : s.detail,
@@ -156,18 +184,20 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     if (segment == null) return;
     String text = segment.text;
     long generation = speechGeneration;
+    // 줄 세운 순간의 서버로 — 그사이 다른 서버로 옮겨 가면 세대가 바뀌어 아래에서 버려진다.
+    final VoiceApi a = api;
     speech.execute(() -> {
       if (!running || generation != speechGeneration) return;
       try {
-        String ready = String.join(" ", api.speakable(text, true, partial));
+        String ready = String.join(" ", a.speakable(text, true, partial));
         if (!ready.startsWith(segment.spoken)) return;
         String next = ready.substring(segment.spoken.length()).trim();
         if (!next.isEmpty() && generation == speechGeneration) {
           withSpeaking(() -> {
             try {
-              if (config != null && config.ttsStreaming) api.streamSpeech(next, speaker);
+              if (config != null && config.ttsStreaming) a.streamSpeech(next, speaker);
               else {
-                VoiceApi.Audio audio = api.speech(next);
+                VoiceApi.Audio audio = a.speech(next);
                 if (generation == speechGeneration) speaker.play(audio.bytes, audio.contentType);
               }
             } catch (Exception e) {
@@ -200,7 +230,10 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   private volatile List<VoiceApi.Operator> operators = new ArrayList<>();
   private volatile long operatorsAt = 0;
   private long lastPresenceAt = 0;
-  private String tabId = "";
+  private volatile String tabId = "";
+  /** 묶인 서버 — 지운 서버에 작별 인사를 할 때 쓰려고 단말 id 도 들고 있다. */
+  private volatile String serverId = "";
+  private volatile String boundDeviceId = "";
   private BroadcastReceiver debugReceiver;
 
   private String stateName() {
@@ -224,17 +257,18 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   public int onStartCommand(Intent intent, int flags, int startId) {
     String action = intent == null ? ACTION_START : intent.getAction();
     if (ACTION_STOP.equals(action)) {
-      Prefs.setVoiceEnabled(this, false);
-      shutdown();
+      if (!serverId.isEmpty()) Servers.setVoiceEnabled(this, serverId, false);
+      shutdown(false);
       return START_NOT_STICKY;
     }
     if (ACTION_SLEEP.equals(action)) {
       if (worker != null) worker.execute(() -> sleep(true));
       return START_STICKY;
     }
-    if (!Prefs.voiceEnabled(this) || Prefs.deviceToken(this).isEmpty()
-        || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-      stopSelf();
+    Server s = Servers.active(this);
+    if (s == null || !s.voiceEnabled || s.deviceToken.isEmpty() || !micGranted(this)) {
+      if (running) shutdown(true);
+      else stopSelf();
       return START_NOT_STICKY;
     }
     if (!startAsForeground()) {
@@ -243,14 +277,15 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
       stopSelf();
       return START_NOT_STICKY;
     }
-    if (!running) begin();
+    if (!running) begin(s);
+    else if (!s.id.equals(serverId)) rebind(s);
     else if (micBlocked && AppState.isForeground()) micBlocked = false; // 앱이 열렸다 — 다음 배경 전환에서 다시 연다
     return START_STICKY;
   }
 
   @Override
   public void onDestroy() {
-    shutdown();
+    shutdown(false);
     super.onDestroy();
   }
 
@@ -271,16 +306,15 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     }
   }
 
-  private void begin() {
+  private void begin(Server server) {
     running = true;
+    bind(server);
     instance = this;
-    api = new VoiceApi(this);
     speaker = new Speaker(this);
     worker = Executors.newSingleThreadExecutor();
     speech = Executors.newSingleThreadExecutor();
     fetch = Executors.newSingleThreadExecutor();
     ticker = Executors.newSingleThreadScheduledExecutor();
-    tabId = "android-" + (Prefs.deviceId(this).isEmpty() ? "app" : Prefs.deviceId(this));
     getSystemService(NotificationManager.class).cancel(NOTIF_RESUME_ID);
     PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
     if (pm != null) {
@@ -289,13 +323,91 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
       wakeLock.acquire();
     }
     AppState.addListener(this);
-    events = new EventStream(this, this);
+    events = new EventStream(this, serverId, streamHandler(serverId));
     events.start();
     worker.execute(this::refreshSetup);
     ticker.scheduleWithFixedDelay(this::tick, 5, 5, TimeUnit.SECONDS);
     if (!AppState.isForeground()) startListening();
     if (BuildConfig.DEBUG) registerDebugHook();
     publish();
+  }
+
+  /** 서버에 묶인 것 — API · 탭 id · 단말 id. */
+  private void bind(Server server) {
+    serverId = server.id;
+    boundDeviceId = server.deviceId;
+    api = new VoiceApi(this, server.id);
+    tabId = "android-" + (server.deviceId.isEmpty() ? "app" : server.deviceId);
+  }
+
+  /** 단말 id 는 다시 로그인하면 바뀐다 — 묶인 서버에서 새로 읽고, 지운 서버면 묶을 때의 것을 쓴다. */
+  private String deviceId() {
+    Server s = Servers.get(this, serverId);
+    return s == null ? boundDeviceId : s.deviceId;
+  }
+
+  /**
+   * 다른 서버로 옮겨 간다 — 마이크 · 알림 · 실행기는 그대로 두고, 서버에 묶인 것(스트림 · API · 대화)만 바꾼다.
+   * 발화 · 이벤트 처리와 같은 worker 에서 하므로 처리 도중에 서버가 바뀌지 않는다.
+   */
+  private void rebind(Server server) {
+    ExecutorService w = worker;
+    if (w == null) return;
+    w.execute(() -> {
+      if (!running || server.id.equals(serverId)) return;
+      Log.i(TAG, "rebind → " + server.url);
+      EventStream old = events;
+      if (old != null) old.stop();
+      final VoiceApi oldApi = api;
+      final String oldTab = tabId;
+      final String oldDevice = deviceId();
+      final boolean wasAwake = mode == Mode.AWAKE;
+      cancelStreamedAnswer();
+      if (pendingTurnId != null) answers.forget(pendingTurnId);
+      mode = Mode.SLEEPING;
+      awakeOp = null;
+      pendingTurnId = null;
+      synchronized (queued) {
+        queued.clear();
+      }
+      followUpOp = null;
+      followUpUntil = 0;
+      reportTarget = null;
+      reportUntil = 0;
+      busySince = 0;
+      detail = "";
+      error = "";
+      config = null;
+      operators = new ArrayList<>();
+      operatorsAt = 0;
+      bye(oldApi, oldTab, wasAwake, true, oldDevice);
+      bind(server);
+      events = new EventStream(this, serverId, streamHandler(serverId));
+      events.start();
+      updateNotification();
+      publish();
+      refreshSetup();
+    });
+  }
+
+  /** 떠나는 서버에 — 맡던 대화를 내려놓고(awake), 이 단말이 더는 듣지 않는다고(off) 알린다. */
+  private static void bye(VoiceApi a, String tab, boolean awake, boolean off, String deviceId) {
+    if (a == null || (!awake && (!off || deviceId.isEmpty()))) return;
+    // 새 스레드로 — 실행기는 곧 닫히거나 다음 서버의 일을 한다.
+    new Thread(() -> {
+      if (awake) {
+        try {
+          a.presence(tab, null, false);
+        } catch (Exception ignored) {
+        }
+      }
+      if (off && !deviceId.isEmpty()) {
+        try {
+          a.support("android-" + deviceId, false);
+        } catch (Exception ignored) {
+        }
+      }
+    }, "awb-voice-bye").start();
   }
 
   /**
@@ -334,8 +446,11 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     registerReceiver(debugReceiver, new IntentFilter("com.parnmanas.awb.DEBUG_UTTERANCE"), Context.RECEIVER_EXPORTED);
   }
 
-  /** 끈다 — 녹음 · 스트림 · 락을 전부 거둔다. 서버에도 이 단말의 음성 지원이 꺼졌다고 알린다. */
-  void shutdown() {
+  /**
+   * 끈다 — 녹음 · 스트림 · 락을 전부 거둔다. 묶인 서버에서 상시 음성을 껐거나(스위치 · 알림의 "끄기") 그 서버를
+   * 떠나면(leaving — 음성을 켜 두지 않은 서버로 옮겨 감) 서버에도 이 단말의 음성 지원이 꺼졌다고 알린다.
+   */
+  void shutdown(boolean leaving) {
     if (!running) {
       stopSelf();
       return;
@@ -353,19 +468,8 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     stopListening();
     if (events != null) events.stop();
     cancelStreamedAnswer();
-    final VoiceApi a = api;
-    final String tab = tabId;
-    final boolean awake = mode == Mode.AWAKE;
-    final boolean enabled = Prefs.voiceEnabled(this);
-    final String deviceId = Prefs.deviceId(this);
-    // 마지막 알림은 새 스레드로 — 실행기들은 곧 닫는다.
-    new Thread(() -> {
-      try {
-        if (awake) a.presence(tab, null, false);
-        if (!enabled && !deviceId.isEmpty()) a.support("android-" + deviceId, false);
-      } catch (Exception ignored) {
-      }
-    }, "awb-voice-bye").start();
+    Server bound = Servers.get(this, serverId);
+    bye(api, tabId, mode == Mode.AWAKE, leaving || bound == null || !bound.voiceEnabled, deviceId());
     if (worker != null) worker.shutdownNow();
     if (speech != null) speech.shutdownNow();
     if (fetch != null) fetch.shutdownNow();
@@ -378,7 +482,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     } catch (Exception ignored) {
     }
     stopSelf();
-    for (StatusListener l : STATUS_LISTENERS) l.onStatus(statusJson(this));
+    for (StatusListener l : STATUS_LISTENERS) l.onStatusChanged();
   }
 
   // ─── 설정 · 주기 작업 ─────────────────────────────────────────────────────
@@ -395,7 +499,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
       } else {
         error = "";
       }
-      String deviceId = Prefs.deviceId(this);
+      String deviceId = deviceId();
       if (!deviceId.isEmpty()) api.support("android-" + deviceId, true);
     } catch (VoiceApi.Unauthorized e) {
       error = "로그인이 필요합니다 — 앱을 열어 다시 로그인해 주세요";
@@ -746,20 +850,26 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
 
   // ─── 서버 이벤트 ──────────────────────────────────────────────────────────
 
-  @Override
-  public void onConnected() {
-    // 끊긴 사이의 턴 종료는 다시 오지 않는다 — 기다리던 답이 있으면 시간 제한이 거둔다.
-  }
+  /** 그 서버의 스트림에서 온 것만 받는다 — 옮겨 가기 직전 서버의 이벤트가 늦게 도착해도 버린다. */
+  private EventStream.Handler streamHandler(String boundServerId) {
+    return new EventStream.Handler() {
+      @Override
+      public void onConnected() {
+        // 끊긴 사이의 턴 종료는 다시 오지 않는다 — 기다리던 답이 있으면 시간 제한이 거둔다.
+      }
 
-  @Override
-  public void onEvent(String type, JSONObject data) {
-    ExecutorService w = worker;
-    if (w == null || w.isShutdown()) return;
-    w.execute(() -> {
-      if ("agent_session_event".equals(type)) onSessionEvent(data);
-      else if ("agent_session_update".equals(type)) onSessionUpdate(data);
-      else if ("voice_announcement".equals(type)) onAnnouncement(data);
-    });
+      @Override
+      public void onEvent(String type, JSONObject data) {
+        ExecutorService w = worker;
+        if (w == null || w.isShutdown()) return;
+        w.execute(() -> {
+          if (!boundServerId.equals(serverId)) return;
+          if ("agent_session_event".equals(type)) onSessionEvent(data);
+          else if ("agent_session_update".equals(type)) onSessionUpdate(data);
+          else if ("voice_announcement".equals(type)) onAnnouncement(data);
+        });
+      }
+    };
   }
 
   private void onSessionEvent(JSONObject data) {
@@ -812,8 +922,9 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     }
     if (done.speakable()) {
       VoiceRules.SleepSplit split = VoiceRules.splitSleepMarker(done.answer);
+      final VoiceApi a = api;
       speech.execute(() -> {
-        speakAnswer(split.text);
+        speakAnswer(a, split.text);
         lastActivityAt = System.currentTimeMillis();
         if (split.sleep) worker.execute(() -> sleep(true));
       });
@@ -858,10 +969,11 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
         return;
       }
       if (config != null && !config.ttsReady) return;
+      final VoiceApi a = api;
       speech.execute(() -> {
         try {
-          VoiceApi.Audio a = api.announcementAudio(id);
-          withSpeaking(() -> speaker.play(a.bytes, a.contentType));
+          VoiceApi.Audio audio = a.announcementAudio(id);
+          withSpeaking(() -> speaker.play(audio.bytes, audio.contentType));
         } catch (Exception ignored) {
         }
       });
@@ -900,7 +1012,7 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   }
 
   /** 서버가 화면용 글을 소리용 덩어리로 나누고(`speakable`, 요약), 덩어리마다 합성해 이어 읽는다. */
-  private void speakAnswer(String text) {
+  private void speakAnswer(VoiceApi api, String text) {
     if (text == null || text.trim().isEmpty()) return;
     if (config != null && !config.ttsReady) return;
     speaker.resetCancel();
@@ -972,13 +1084,21 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
         .setContentText(text)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
-        .setContentIntent(openApp(op == null ? null : op.deepLink()))
+        .setContentIntent(openApp(op == null ? null : op.deepLink(serverId)))
         .addAction(new Notification.Action.Builder(null, "끄기", serviceIntent(ACTION_STOP, 1)).build());
     if (mode == Mode.AWAKE) {
       b.addAction(new Notification.Action.Builder(null, "잠재우기", serviceIntent(ACTION_SLEEP, 2)).build());
     }
+    String where = serverLabel();
+    if (!where.isEmpty()) b.setSubText(where);
     if (Build.VERSION.SDK_INT >= 31) b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
     return b.build();
+  }
+
+  /** 알림 머리에 보일 서버 이름 — 서버가 여럿이면 어느 서버가 듣고, 어느 서버의 소식인지 알아야 한다. */
+  private String serverLabel() {
+    Server s = Servers.get(this, serverId);
+    return s == null ? "" : s.label();
   }
 
   private void updateNotification() {
@@ -990,16 +1110,19 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
     String link = null;
     if (target != null && "session".equals(target.optString("type"))) {
       link = "awb://sessions/" + Uri.encode(target.optString("manager_id")) + "/"
-          + Uri.encode(target.optString("cli")) + "/" + Uri.encode(target.optString("session_id"));
+          + Uri.encode(target.optString("cli")) + "/" + Uri.encode(target.optString("session_id"))
+          + "?server=" + Uri.encode(serverId);
     }
-    Notification n = new Notification.Builder(this, CHANNEL_ALERT)
+    Notification.Builder b = new Notification.Builder(this, CHANNEL_ALERT)
         .setSmallIcon(R.drawable.ic_stat_voice)
         .setContentTitle(title)
         .setContentText(text)
         .setStyle(new Notification.BigTextStyle().bigText(text))
         .setAutoCancel(true)
-        .setContentIntent(openApp(link))
-        .build();
+        .setContentIntent(openApp(link));
+    String where = serverLabel();
+    if (!where.isEmpty()) b.setSubText(where);
+    Notification n = b.build();
     getSystemService(NotificationManager.class).notify("awb-alert", id.hashCode(), n);
   }
 
@@ -1047,7 +1170,6 @@ public class VoiceService extends Service implements AppState.Listener, EventStr
   }
 
   private void publish() {
-    JSONObject status = statusJson(this);
-    for (StatusListener l : STATUS_LISTENERS) l.onStatus(status);
+    for (StatusListener l : STATUS_LISTENERS) l.onStatusChanged();
   }
 }

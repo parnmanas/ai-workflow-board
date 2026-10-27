@@ -5,6 +5,7 @@ import {
   NATIVE_VOICE_OFF,
   hiddenInAndroidApp,
   isAndroidApp,
+  nativeAppInfo,
   nativeVoiceStatus,
   onNativeEvent,
   parseAwbDeepLink,
@@ -41,6 +42,23 @@ export default function AndroidAppBridge() {
   }, [navigate]);
 
   return null;
+}
+
+/**
+ * Android 앱 안에서 이 화면의 서버 이름(앱에서 붙인 것, 없으면 host). 앱이 아니면 null.
+ * 앱은 서버를 여러 개 둘 수 있어 화면이 어느 서버인지 보여야 한다 — 화면은 서버마다 같은 모양이다.
+ */
+export function useNativeServerLabel(): string | null {
+  const [label, setLabel] = useState<string | null>(() => (isAndroidApp() ? window.location.host : null));
+  useEffect(() => {
+    if (!isAndroidApp()) return;
+    let alive = true;
+    void nativeAppInfo().then((info) => {
+      if (alive && info?.server_name) setLabel(info.server_name);
+    });
+    return () => { alive = false; };
+  }, []);
+  return label;
 }
 
 /** 앱 안에서 이 화면이 숨었는가 — 숨은 동안 마이크 · 소리는 앱이 맡으므로 웹은 손을 뗀다. */

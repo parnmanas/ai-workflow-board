@@ -7,6 +7,7 @@
 //   3. 웹이 부르는 요청 이름이 앱(WebBridge.java)에 모두 있다 — 한쪽만 바꾸면 조용히 unknown_type 이 된다.
 //   4. 화면 쪽 배선: 부팅 · 401 · 로그인 · 로그아웃이 앱에 묻고 알리며, 숨은 동안 웹은 듣지도 읽지도 않는다.
 //   5. 알림 링크 파서: 세션 경로만 받는다.
+//   6. 서버 여러 개: 사이드바가 지금 서버를 보이고 앱의 서버 목록을 열며, 알림 링크는 어느 서버의 소식인지 싣는다.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import {
   callNative,
   isAndroidApp,
+  nativeAppInfo,
   nativeRefreshToken,
   nativeSessionToken,
   nativeVoiceStatus,
@@ -33,6 +35,7 @@ test('웹에서는 앱이 아니고, 앱에만 있는 것을 주지 않는다', 
   assert.equal(await nativeSessionToken(), '');
   assert.equal(await nativeRefreshToken('x'), '');
   assert.deepEqual(await nativeVoiceStatus(), NATIVE_VOICE_OFF);
+  assert.equal(await nativeAppInfo(), null);
   await assert.rejects(callNative('hello'), /not_android_app/);
 });
 
@@ -49,6 +52,7 @@ test('앱 안에서는 요청과 답이 짝지어지고, 앱의 알림은 구독
       if (msg.type === 'session.get') reply({ id: msg.id, ok: true, result: { token: 'fresh' } });
       else if (msg.type === 'session.refresh') reply({ id: msg.id, ok: true, result: { token: msg.rejected } });
       else if (msg.type === 'voice.status') reply({ id: msg.id, ok: true, result: { enabled: true, state: 'sleeping' } });
+      else if (msg.type === 'hello') reply({ id: msg.id, ok: true, result: { app: 'android', server: 'https://a.example', server_name: '집' } });
       else if (msg.type === 'boom') reply({ id: msg.id, ok: false, error: 'unknown_type' });
       // 'silent' 에는 답하지 않는다
     },
@@ -61,6 +65,7 @@ test('앱 안에서는 요청과 답이 짝지어지고, 앱의 알림은 구독
   // 앱이 같은(거절된) 토큰을 돌려주면 새 세션이 아니다 — 401 루프를 만들지 않는다.
   assert.equal(await nativeRefreshToken('dead'), '');
   assert.deepEqual(await nativeVoiceStatus(), { ...NATIVE_VOICE_OFF, enabled: true, state: 'sleeping' });
+  assert.equal((await nativeAppInfo())?.server_name, '집');
   await assert.rejects(callNative('boom'), /unknown_type/);
   await assert.rejects(callNative('silent', {}, 30), /native_timeout/);
   assert.ok(sent.every((m) => typeof m.id === 'string' && m.id.length > 0));
@@ -98,6 +103,29 @@ test('화면 쪽 배선 — 부팅 · 401 · 로그인 · 로그아웃 · 구글
   assert.match(read('apps/client/src/voice/VoiceAnnouncer.tsx'), /if \(hiddenInAndroidApp\(\)\) return;/);
   assert.match(read('apps/client/src/voice/wakeState.ts'), /setNativeVoice\(enabled\)/);
   assert.match(read('apps/client/src/components/AppLayout.tsx'), /<AndroidAppBridge \/>/);
+});
+
+test('서버 여러 개 — 사이드바는 지금 서버를 보이고 앱의 서버 목록을 연다', () => {
+  const sidebar = read('apps/client/src/components/Sidebar.tsx');
+  assert.match(sidebar, /useNativeServerLabel\(\)/, '사용자 줄에 지금 서버 이름');
+  assert.match(sidebar, /onClick=\{\(\) => changeNativeServer\(\)\}/, '서버 전환 단추');
+  // 앱은 예전 이름(server.change)으로 서버 목록을 연다 — 이름을 바꾸면 이미 깔린 웹 · 앱이 서로 못 알아듣는다.
+  const java = read('apps/android/app/src/main/java/com/parnmanas/awb/WebBridge.java');
+  assert.match(java, /case "server\.change":[\s\S]*?showServers/);
+  assert.match(java, /"server_name", s\.label\(\)/);
+});
+
+test('알림 링크는 어느 서버의 소식인지 싣고, 앱은 그 서버로 돌아가며 그 표시를 웹 경로에서 뗀다', () => {
+  const voice = read('apps/android/app/src/main/java/com/parnmanas/awb/voice/VoiceService.java');
+  const api = read('apps/android/app/src/main/java/com/parnmanas/awb/voice/VoiceApi.java');
+  const activity = read('apps/android/app/src/main/java/com/parnmanas/awb/MainActivity.java');
+  assert.match(api, /"\?server=" \+ Uri\.encode\(serverId\)/, 'operator 세션 링크');
+  assert.match(voice, /"\?server=" \+ Uri\.encode\(serverId\)/, '작업 알림 링크');
+  assert.match(activity, /withoutQueryParam\(uri\.getEncodedQuery\(\), "server"\)/);
+  assert.match(activity, /uri\.getQueryParameter\("server"\)/);
+  // 앱 아이콘 바로가기와 그 처리
+  assert.match(activity, /"awb:\/\/servers\/" \+ s\.id/);
+  assert.match(activity, /"servers"\.equals\(host\)/);
 });
 
 test('알림 링크를 세션 경로로 바꾼다', () => {

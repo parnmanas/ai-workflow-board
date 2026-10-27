@@ -6,4 +6,6 @@
     <color name="text_muted">#64748b</color>
     <color name="accent">#6366f1</color>
     <color name="accent_light">#a5b4fc</color>
+    <color name="server_up">#22c55e</color>
+    <color name="server_down">#ef4444</color>
 </resources>

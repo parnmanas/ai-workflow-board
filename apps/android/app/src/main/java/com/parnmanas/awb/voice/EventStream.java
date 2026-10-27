@@ -2,7 +2,8 @@ package com.parnmanas.awb.voice;
 
 import android.content.Context;
 import com.parnmanas.awb.Auth;
-import com.parnmanas.awb.Prefs;
+import com.parnmanas.awb.Server;
+import com.parnmanas.awb.Servers;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -27,13 +28,15 @@ final class EventStream {
   private static final int READ_TIMEOUT_MS = 60_000;
 
   private final Context ctx;
+  private final String serverId;
   private final Handler handler;
   private volatile boolean running = false;
   private volatile HttpURLConnection conn;
   private Thread thread;
 
-  EventStream(Context ctx, Handler handler) {
+  EventStream(Context ctx, String serverId, Handler handler) {
     this.ctx = ctx.getApplicationContext();
+    this.serverId = serverId;
     this.handler = handler;
   }
 
@@ -62,13 +65,13 @@ final class EventStream {
     while (running) {
       String rejected = null;
       try {
-        String token = Auth.token(ctx);
-        String base = Prefs.serverUrl(ctx);
-        if (token.isEmpty() || base.isEmpty()) {
+        Server server = Servers.get(ctx, serverId);
+        String token = server == null ? "" : Auth.token(ctx, serverId);
+        if (token.isEmpty()) {
           sleep(30_000);
           continue;
         }
-        HttpURLConnection c = (HttpURLConnection) new URL(base + "/api/events/stream").openConnection();
+        HttpURLConnection c = (HttpURLConnection) new URL(server.url + "/api/events/stream").openConnection();
         conn = c;
         c.setConnectTimeout(10_000);
         c.setReadTimeout(READ_TIMEOUT_MS);
@@ -91,7 +94,7 @@ final class EventStream {
       }
       if (!running) break;
       if (rejected != null) {
-        if (Auth.refresh(ctx, rejected).isEmpty()) {
+        if (Auth.refresh(ctx, serverId, rejected).isEmpty()) {
           sleep(60_000);
           continue;
         }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 서버 응답 표시 — 색은 코드가 칠한다(확인 중 · 응답 · 응답 없음) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#ffffff" />
+</shape>

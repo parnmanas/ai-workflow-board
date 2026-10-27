@@ -42,6 +42,8 @@ import { runtimeLabel, sessionDisplayTitle } from './sessions/sessionTranscript.
 import { useBoardStream, useBoardStreamEvent } from '../contexts/BoardStreamContext';
 
 import { loadSidebarFold, saveSidebarFold } from './sidebarFold';
+import { useNativeServerLabel } from '../native/AndroidAppBridge';
+import { changeNativeServer } from '../native/androidBridge';
 
 /** 호스트 세션 목록이 실패했을 때 다시 묻는 간격·횟수 — 매니저가 서버 재시작 뒤 다시 붙는 데 걸리는 시간을 덮는다. */
 const SESSION_LIST_RETRY_MS = 5_000;
@@ -100,6 +102,8 @@ export default function Sidebar({
 }: SidebarProps) {
   useLocale();
   const { user, logout, hasPermission } = useAuth();
+  // Android 앱 안에서만 — 앱은 서버를 여러 개 둔다. 사용자 줄에 지금 서버를 보이고 앱의 서버 목록을 연다.
+  const nativeServer = useNativeServerLabel();
   const { counts, countsLoaded, markAllTicketsReadLocal } = useNotifications();
   const { showToast } = useToast();
   const { teams, missions, teamsLoading, missionsLoading } = useWorkNavLists(accountId);
@@ -1404,8 +1408,29 @@ export default function Sidebar({
               }}
             >
               {(user.role || '').toUpperCase()}
+              {nativeServer ? ` · ${nativeServer}` : ''}
             </div>
           </div>
+          {nativeServer !== null && (
+            <button
+              type="button"
+              onClick={() => changeNativeServer()}
+              title={translate('서버 전환 · 관리 (현재 {0})', { 0: nativeServer })}
+              aria-label={translate('서버 전환')}
+              style={{
+                width: 30,
+                height: 30,
+                border: `1px solid ${tokens.colors.border}`,
+                borderRadius: 7,
+                background: 'transparent',
+                color: tokens.colors.textMuted,
+                cursor: 'pointer',
+                fontSize: 13,
+              }}
+            >
+              {'\u21C4'}
+            </button>
+          )}
           <button
             type="button"
             onClick={async () => logout()}

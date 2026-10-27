@@ -11,9 +11,9 @@ android {
         applicationId 'com.parnmanas.awb'
         minSdk 26
         targetSdk 36
-        // 11: Qwen PCM 스트리밍과 operator 호출 응답.
-        versionCode 11
-        versionName '2.1.0'
+        // 11: Qwen PCM 스트리밍과 operator 호출 응답. 12: 서버 여러 개(목록 · 전환 · 서버마다 로그인).
+        versionCode 12
+        versionName '2.2.0'
         buildConfigField 'String', 'DEFAULT_SERVER_URL', '"https://awb.parnmanas.com"'
     }
 

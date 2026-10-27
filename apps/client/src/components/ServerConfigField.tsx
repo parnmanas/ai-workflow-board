@@ -20,7 +20,7 @@ import { changeNativeServer, isAndroidApp } from '../native/androidBridge';
  */
 export default function ServerConfigField({ compact = false }: { compact?: boolean }) {
   useLocale();
-  // Android 앱은 서버 주소를 앱이 쥔다(이 화면은 그 서버가 서빙한 것이다) — 바꾸기는 앱의 연결 화면에서.
+  // Android 앱은 서버 목록을 앱이 쥔다(이 화면은 그중 지금 서버가 서빙한 것이다) — 전환 · 추가는 앱의 서버 목록에서.
   if (isAndroidApp()) return <NativeServerButton />;
   return <WebServerConfigField compact={compact} />;
 }
@@ -37,7 +37,7 @@ function NativeServerButton() {
         borderRadius: tokens.radii.md, fontSize: 12, fontWeight: 600, cursor: 'pointer',
       }}
     >
-      {translate('다른 서버에 연결 (현재 {0})', { 0: typeof window !== 'undefined' ? window.location.host : '' })}
+      {translate('서버 전환 · 관리 (현재 {0})', { 0: typeof window !== 'undefined' ? window.location.host : '' })}
     </button>
   );
 }

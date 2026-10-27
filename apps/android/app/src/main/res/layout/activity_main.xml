@@ -19,10 +19,12 @@
         android:indeterminate="true"
         android:visibility="gone" />
 
+    <!-- 서버 목록 · 서버 추가 · 오프라인 — WebView 위에 덮는 네이티브 화면 -->
     <ScrollView
         android:id="@+id/panel"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:background="@color/surface"
         android:fillViewport="true"
         android:visibility="gone">
 
@@ -66,6 +68,14 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="14sp" />
 
+            <LinearLayout
+                android:id="@+id/server_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:orientation="vertical"
+                android:visibility="gone" />
+
             <EditText
                 android:id="@+id/server_input"
                 android:layout_width="match_parent"
@@ -73,6 +83,7 @@
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/input_bg"
                 android:hint="https://awb.example.com"
+                android:imeOptions="actionNext"
                 android:importantForAutofill="no"
                 android:inputType="textUri"
                 android:padding="14dp"
@@ -80,6 +91,24 @@
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_muted"
                 android:textSize="15sp" />
+
+            <EditText
+                android:id="@+id/name_input"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/input_bg"
+                android:hint="@string/server_name_hint"
+                android:imeOptions="actionGo"
+                android:importantForAutofill="no"
+                android:inputType="text"
+                android:maxLength="40"
+                android:padding="14dp"
+                android:singleLine="true"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted"
+                android:textSize="15sp"
+                android:visibility="gone" />
 
             <Button
                 android:id="@+id/primary_button"
@@ -96,7 +125,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="@string/change_server"
+                android:text="@string/servers"
                 android:textColor="@color/accent_light"
                 android:visibility="gone" />
         </LinearLayout>
