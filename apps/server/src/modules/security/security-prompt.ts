@@ -33,9 +33,15 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
     : '(none)';
 
   // target_resource_id holds a project id (repository Resources became Projects).
-  const target = profile.target_resource_id
-    ? `Project \`${profile.target_resource_id}\``
-    : "AWB's own codebase (your worktree)";
+  // target_kind host/url profiles name their target in scan_driver_config instead.
+  const driverTarget = (profile.scan_driver_config as any)?.target_host
+    || (profile.scan_driver_config as any)?.target_url
+    || null;
+  const target = targetKind === 'code'
+    ? (profile.target_resource_id
+      ? `Project \`${profile.target_resource_id}\``
+      : "AWB's own codebase (your worktree)")
+    : `host/url target \`${driverTarget || '(see driver config)'}\``;
 
   const checklistLines = checklist.length
     ? checklist
@@ -70,6 +76,22 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
   ].join('\n');
   const scopeBlock = category === 'external'
     ? externalScopeBlock
+    : targetKind === 'host'
+    ? [
+      `**Planned scope: HOST (${profile.scan_driver || 'host-check'} → \`${driverTarget || '(see driver config)'}\`)** — no git baseline, no source checkout.`,
+      ``,
+      `Your run folder is an EMPTY scratch dir (only AWB bookkeeping files) — it is NOT`,
+      `the inspection target. Do NOT treat a parent directory's git checkout as the`,
+      `target and do NOT report its HEAD as \`scanned_commit\`.`,
+      ``,
+      `1. Confirm the host identity (\`hostname\`, manager host id) matches the driver config target.`,
+      `2. Run READ-ONLY host checks from the checklist: OS/patch level, listening ports`,
+      `   (\`ss -lntu\`), file permissions of credential/token storage, CLI configs,`,
+      `   plaintext secrets in logs, env exposure. Never change, restart, or update anything.`,
+      `3. Record every candidate issue via \`record_security_finding\` with evidence`,
+      `   (command output excerpt). Omit \`scanned_commit\` at completion — there is no`,
+      `   code baseline for host inspections and none will be advanced.`,
+    ].join('\n')
     : incremental
     ? [
         `**Planned scope: INCREMENTAL** — baseline \`${run.baseline_commit}\`.`,
@@ -138,11 +160,13 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
     `When done, call \`complete_security_run\` with:`,
     `  - \`run_id\`: \`${run.id}\``,
     `  - \`status\`: \`passed\` if there are **no \`critical\` or \`high\` findings**, otherwise \`failed\` (\`error\` if you could not complete the inspection)`,
-    `  - \`scanned_commit\`: the HEAD SHA you resolved in step 1 (required — this becomes the new incremental baseline on a PASS)`,
     `  - \`scope_used\`: \`incremental\` or \`full\` (report \`full\` if you promoted)`,
     `  - \`summary\`: a short overall summary (counts by severity + headline risks)`,
-    ``,
-    `A PASS advances this profile's baseline to \`scanned_commit\`, so the next incremental run only diffs from there.`,
+    ...(targetKind === 'code'
+      ? [`  - \`scanned_commit\`: the HEAD SHA you resolved in step 1 (required — this becomes the new incremental baseline on a PASS)`,
+          ``,
+          `A PASS advances this profile's baseline to \`scanned_commit\`, so the next incremental run only diffs from there.`]
+      : [`  - omit \`scanned_commit\` (host/URL inspections have no code baseline — nothing is advanced on PASS)`]),
   ]
     .filter((l) => l !== undefined)
     .join('\n');
