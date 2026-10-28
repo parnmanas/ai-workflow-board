@@ -59,12 +59,25 @@ export function renderSecurityRunPrompt(profile: SecurityProfile, run: SecurityR
   // Scope block: incremental (baseline present) vs full — internal/code only.
   // External scans have no git baseline: scope is the declared target (url/host).
   const incremental = category === 'internal' && run.scope_used === 'incremental' && !!run.baseline_commit;
+  const toolSetupAuto = (profile.scan_driver_config as any)?.tool_setup === 'auto';
   const externalScopeBlock = [
     `**Planned scope: EXTERNAL (${profile.scan_driver || 'external'} → ${targetKind})** — no git baseline.`,
     ``,
     `Target comes from the driver config above (scan target URL/host). Steps:`,
+    `0. TOOL PREFLIGHT — run \`command -v ${profile.scan_driver || 'nuclei'} nmap\`.`,
+    ...(toolSetupAuto
+      ? [`   If the profile driver is missing AND \`tool_setup\` is \`auto\` (it is): install it into user space`,
+         `   yourself before scanning (\`go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest\`,`,
+         `   \`pipx\`/\`npm i -g\` equivalents) — NEVER sudo without human approval. If the install fails,`,
+         `   record an \`info\` finding (\`tool-missing\`) and continue with whatever is available`,
+         `   (nmap + TLS/header checks), downgrading scope honestly instead of failing silently.`]
+      : [`   If the profile driver is missing: do NOT install anything (tool_setup is off). Record an`,
+         `   \`info\` finding (\`tool-missing\`) and continue with available tools (nmap + TLS/header checks).`]),
     `1. Confirm the target belongs to us (compare against the driver config / profile description —`,
-    `   NEVER scan a third-party host you discovered mid-run).`,
+    `   NEVER scan a third-party host you discovered mid-run). If NO usable target resolves (no target_url`,
+    `   AND target_host unresolvable / private-only with no public vantage): record ONE \`info\` finding`,
+    `   (\`target-missing\`) and finish immediately with \`complete_security_run(status="error")\` —`,
+    `   do NOT burn tokens on a full loop.`,
     `2. Run READ-ONLY checks first: DNS/TLS/headers/port-service fingerprint + the checklist below.`,
     `3. Tool-guided scan with the profile driver (${profile.scan_driver || 'external'}):`,
     `   - nuclei → update templates (\`nuclei -update-templates\`) then run the profile's severity/template filter only;`,
