@@ -421,12 +421,33 @@ export class SecurityRunService {
     const run = await this.getRun(runId, accountId);
     const valid: SecurityRunStatus[] = ['pending', 'running', 'passed', 'failed', 'error'];
     if (!valid.includes(status)) throw makeError(400, `status must be one of ${valid.join(', ')}`);
-    run.status = status;
-    if (args.summary !== undefined) run.summary = args.summary;
-    if (args.scannedCommit) run.scanned_commit = args.scannedCommit;
-    if (args.scopeUsed === 'incremental' || args.scopeUsed === 'full') run.scope_used = args.scopeUsed;
-    run.finished_at = new Date();
-    const saved = await this.runRepo.save(run);
+    // ── Atomic idempotent terminal transition ──
+    // complete_action_run 과 동일 패턴: running → terminal 은 status='running'
+    // 가드 UPDATE 한 번으로만 뒤집힌다. 에이전트가 complete를 호출한 뒤 세션이
+    // 종료되면 agent-manager 의 exit backstop(_runExitCompletionBackstop)이
+    // 같은 complete를 한 번 더 쏘는데, 가드 없이는 에이전트의 실제 결과
+    // (findings 요약 포함)가 "결과 없이 종료" 문구로 덮어씌워졌다.
+    // 진 쪽만 부수효과(baseline 전진·자동티켓·batch 전진)를 일으키고,
+    // 진 run 은 현재 상태 그대로 반환한다.
+    const finishedAt = new Date();
+    const set: Record<string, any> = { status, finished_at: finishedAt };
+    if (args.summary !== undefined) set.summary = args.summary;
+    if (args.scannedCommit) set.scanned_commit = args.scannedCommit;
+    if (args.scopeUsed === 'incremental' || args.scopeUsed === 'full') set.scope_used = args.scopeUsed;
+    const claim = await this.runRepo
+      .createQueryBuilder()
+      .update(SecurityRun)
+      .set(set)
+      .where('id = :id', { id: runId })
+      .andWhere('account_id = :account', { account: accountId })
+      .andWhere("status = 'running'")
+      .execute();
+    if ((claim.affected ?? 0) === 0) {
+      const current = await this.getRun(runId, accountId);
+      this.logService.info('Security', `completeRun no-op — run ${runId} already ${current.status}`);
+      return current;
+    }
+    const saved = await this.getRun(runId, accountId);
 
     // On a PASS, advance the profile's baseline so the next incremental run only
     // diffs from this run's scanned commit. Requires a reported scanned_commit;
