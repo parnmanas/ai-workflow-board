@@ -7113,5 +7113,6 @@
   "Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.": "Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.",
   "Business MCP clients": "Business MCP clients",
   "Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:": "Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:",
-  "Northwest client ID": "Northwest client ID"
+  "Northwest client ID": "Northwest client ID",
+  "Enter for a new line · Tap Send to send": "Enter for a new line · Tap Send to send"
 }

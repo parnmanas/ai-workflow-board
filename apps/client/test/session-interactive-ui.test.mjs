@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, mount, click, keydown, typeInto, React, act } from './helpers/jsdom.mjs';
 import SessionComposer from '../src/components/sessions/SessionComposer.tsx';
+import { MentionTextarea } from '../src/components/common/MentionTextarea.tsx';
 import SessionTranscript from '../src/components/sessions/SessionTranscript.tsx';
 import { buildTranscript } from '../src/components/sessions/sessionTranscript.logic.ts';
 
@@ -28,6 +29,60 @@ const commands = [
   { name: 'compact', description: 'Compact the context' },
   { name: 'review-branch', description: 'Review a branch' },
 ];
+
+for (const device of [{ name: 'phone', width: 390 }, { name: 'landscape/tablet', width: 1024, coarse: true }]) {
+  test(`${device.name}: Enter leaves session and chat drafts intact for native newline insertion`, async () => {
+    const dom = setupDom({ width: device.width });
+    if (device.coarse) {
+      const matchMedia = window.matchMedia;
+      window.matchMedia = (query) => ({ ...matchMedia(query), matches: query.includes('(pointer: coarse)') });
+    }
+    try {
+      const sent = [];
+      const view = mount(h(SessionComposer, {
+        disabled: false, busy: false, placeholder: 'Prompt…', commands,
+        onSend: (prompt) => sent.push(prompt), onCancel() {},
+      }));
+      const textarea = document.querySelector('textarea');
+      assert.equal(textarea.getAttribute('enterkeyhint'), 'enter');
+      for (const draft of ['first line', '/co', '/compact']) {
+        typeInto(textarea, draft);
+        const event = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+        act(() => textarea.dispatchEvent(event));
+        assert.equal(event.defaultPrevented, false, 'browser must be allowed to insert a newline, including with slash suggestions');
+        assert.equal(textarea.value, draft, 'Enter must not pick a suggestion or clear the draft');
+        assert.equal(sent.length, 0);
+      }
+      // jsdom does not perform the native textarea edit; simulate that input separately.
+      typeInto(textarea, 'first line\nsecond line');
+      click(document.querySelector('button.awb-composer-send'));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.deepEqual(sent, [{ text: 'first line\nsecond line', images: [] }]);
+      view.unmount();
+
+      let submitted = 0;
+      function ChatDraft() {
+        const [value, setValue] = React.useState('');
+        return h(MentionTextarea, {
+          value, onChange: setValue, onSubmit: () => submitted++,
+          candidates: [{ type: 'user', id: 'alice', name: 'Alice' }],
+        });
+      }
+      const chat = mount(h(ChatDraft));
+      const message = document.querySelector('textarea');
+      assert.equal(message.getAttribute('enterkeyhint'), 'enter');
+      for (const draft of ['hello', '@Al']) {
+        typeInto(message, draft);
+        const event = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+        act(() => message.dispatchEvent(event));
+        assert.equal(event.defaultPrevented, false);
+        assert.equal(message.value, draft);
+        assert.equal(submitted, 0);
+      }
+      chat.unmount();
+    } finally { dom.cleanup(); }
+  });
+}
 
 test('composer: slash popup lists matching commands; Enter picks instead of sending; arguments close it; Esc dismisses', async () => {
   const dom = setupDom();

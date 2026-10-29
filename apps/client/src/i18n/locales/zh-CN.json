@@ -7113,5 +7113,6 @@
   "Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.": "留空则使用自动获取的地址。如果服务器设置了 AWB_PUBLIC_URL 环境变量，则以它为准。",
   "Business MCP clients": "Business MCP 客户端",
   "Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:": "Northwest Registered Agent 的共用客户端只接受其指定应用的登录。如果 Northwest 为此 AWB 签发了 OAuth 客户端，请在此填写。需要登记的 Redirect URI：",
-  "Northwest client ID": "Northwest 客户端 ID"
+  "Northwest client ID": "Northwest 客户端 ID",
+  "Enter for a new line · Tap Send to send": "Enter 换行 · 点击发送按钮发送"
 }

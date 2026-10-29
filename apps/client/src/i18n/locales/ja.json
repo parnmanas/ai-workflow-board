@@ -7113,5 +7113,6 @@
   "Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.": "空のままにすると自動取得したアドレスを使います。サーバーに AWB_PUBLIC_URL 環境変数がある場合はそちらが優先されます。",
   "Business MCP clients": "Business MCP クライアント",
   "Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:": "Northwest Registered Agent は共用クライアントで自社が指定したアプリのログインのみ受け付けます。Northwest がこの AWB 用の OAuth クライアントを発行したら、ここに入力してください。登録する Redirect URI:",
-  "Northwest client ID": "Northwest クライアント ID"
+  "Northwest client ID": "Northwest クライアント ID",
+  "Enter for a new line · Tap Send to send": "Enterで改行 · 送信ボタンで送信"
 }

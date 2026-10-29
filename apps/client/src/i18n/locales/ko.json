@@ -7113,5 +7113,6 @@
   "Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.": "비워 두면 자동으로 알아낸 주소를 씁니다. 서버에 AWB_PUBLIC_URL 환경 변수가 있으면 그것이 우선합니다.",
   "Business MCP clients": "Business MCP 클라이언트",
   "Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:": "Northwest Registered Agent는 공용 클라이언트로 자기가 지정한 앱의 로그인만 받습니다. Northwest가 이 AWB용 OAuth 클라이언트를 발급하면 여기에 입력하세요. 등록할 Redirect URI:",
-  "Northwest client ID": "Northwest 클라이언트 ID"
+  "Northwest client ID": "Northwest 클라이언트 ID",
+  "Enter for a new line · Tap Send to send": "Enter로 줄바꿈 · 전송 버튼으로 보내기"
 }

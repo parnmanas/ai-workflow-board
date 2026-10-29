@@ -9,6 +9,7 @@ import { formatAgentDisplayName } from '../../utils/agentName';
 import { formatBytes, isImageMime, readFileAsBase64 } from './utils/attachments';
 import { completeComposerSend } from './utils/composerSend';
 import MediaLightbox from '../common/MediaLightbox';
+import { useMobileInput } from '../../hooks/useMobileInput';
 
 // ─── ChatMessageInput ─────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ function makeLocalId(): string {
 }
 
 export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
+  const mobileInput = useMobileInput();
   useLocale();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -479,7 +481,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
           </button>
         </div>
         <div className="awb-chat-composer-help" style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textMuted, marginTop: tokens.spacing.xs }}>
-          {translate('Enter to send · Shift+Enter for new line · @ to tag · Drop or paste files to attach')}</div>
+          {mobileInput ? translate('Enter for a new line · Tap Send to send') : translate('Enter to send · Shift+Enter for new line · @ to tag · Drop or paste files to attach')}</div>
       </div>
     </div>
   );
