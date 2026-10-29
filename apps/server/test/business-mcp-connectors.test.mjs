@@ -115,6 +115,25 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
     assert.equal((await call(`${base}/northwest/call`, { tool: 'v2_client__add_formation_to_cart_tool', arguments: { company_id: 'c1' }, confirm: true })).status, 201);
   });
 
+  await t.test('Northwest: a rejected shared redirect stops before the provider page; an issued client returns to AWB', async () => {
+    fake.state.allowedRedirects = ['https://claude.ai/api/mcp/auth_callback'];
+    const rejected = await call(`${base}/northwest/authorize`, {});
+    assert.equal(rejected.status, 409); assert.match(rejected.body.message || rejected.body.error, /NORTHWEST_MCP_CLIENT_ID/);
+    process.env.NORTHWEST_MCP_CLIENT_ID = 'awb-issued'; process.env.NORTHWEST_MCP_CLIENT_SECRET = 'issued-secret-private';
+    t.after(() => { delete process.env.NORTHWEST_MCP_CLIENT_ID; delete process.env.NORTHWEST_MCP_CLIENT_SECRET; fake.state.allowedRedirects = null; });
+    process.env.AWB_PUBLIC_URL = `http://localhost:${port}`;
+    const started = await call(`${base}/northwest/authorize`, {});
+    assert.equal(started.status, 201); assert.equal(started.body.mode, 'redirect');
+    const authorize = new URL(started.body.url);
+    assert.equal(authorize.searchParams.get('client_id'), 'awb-issued');
+    assert.equal(authorize.searchParams.get('redirect_uri'), `http://localhost:${port}/api/business-mcp/oauth/callback`);
+    const cookie = started.headers.get('set-cookie').split(';')[0];
+    const back = await nativeFetch(`http://127.0.0.1:${port}/api/business-mcp/oauth/callback?state=${authorize.searchParams.get('state')}&code=northwest-code`, { redirect: 'manual', headers: { Cookie: cookie } });
+    assert.equal(back.status, 303);
+    assert.equal(fake.state.tokenGrants.at(-1).authorization, `Basic ${Buffer.from('awb-issued:issued-secret-private').toString('base64')}`);
+    assert.doesNotMatch(JSON.stringify((await call(base)).body), /issued-secret-private/);
+  });
+
   await t.test('foreign accounts, unpinned endpoints and disconnect', async () => {
     assert.ok([403, 404].includes((await call(base, undefined, 'GET', other, theirs.id)).status));
     assert.ok([403, 404].includes((await call(`${base}/doola/call`, { tool: 'get_companies' }, 'POST', other, theirs.id)).status));

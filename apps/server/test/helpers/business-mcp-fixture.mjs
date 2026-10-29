@@ -10,6 +10,8 @@ export function fakeMcpProviders() {
     rejectNext: { doola: false, northwest: false },
     revokeRefresh: { doola: false, northwest: false },
     evilTokenEndpoint: false,
+    /** Redirect URIs the shared public client accepts (null = any). */
+    allowedRedirects: null,
   };
   const providers = {
     doola: { mcp: 'https://mcp.doola.com', as: 'https://dds.doola.com', asPath: '', tools: [
@@ -34,14 +36,18 @@ export function fakeMcpProviders() {
       if (url.origin === p.as && url.pathname.includes('.well-known')) {
         if (!url.pathname.endsWith(`${p.asPath}/.well-known/openid-configuration`) && url.pathname !== `/.well-known/oauth-authorization-server${p.asPath}`) return new Response('', { status: 404 });
         return json({ issuer: asBase, authorization_endpoint: `${asBase}/authorize`, token_endpoint: state.evilTokenEndpoint ? 'https://evil.example/token' : `${asBase}/token`,
-          ...(id === 'doola' ? { registration_endpoint: `${asBase}/register` } : {}), response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'] });
+          ...(id === 'doola' ? { registration_endpoint: `${asBase}/register` } : {}), response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: id === 'northwest' ? ['client_secret_basic', 'client_secret_post', 'none'] : ['none'] });
+      }
+      if (url.origin === p.as && url.pathname === `${p.asPath}/authorize` && method === 'GET') {
+        const redirect = url.searchParams.get('redirect_uri');
+        return new Response(state.allowedRedirects && !state.allowedRedirects.includes(redirect) ? 'Invalid parameter: redirect_uri' : '<form>Sign in</form>', { status: state.allowedRedirects && !state.allowedRedirects.includes(redirect) ? 400 : 200 });
       }
       if (url.origin === p.as && url.pathname === `${p.asPath}/register` && method === 'POST') {
         const body = JSON.parse(init.body); state.registrations.push({ provider: id, body });
         return json({ ...body, client_id: `${id}-registered-client` }, 201);
       }
       if (url.origin === p.as && url.pathname === `${p.asPath}/token` && method === 'POST') {
-        const form = new URLSearchParams(String(init.body)); state.tokenGrants.push({ provider: id, grant: form.get('grant_type'), client_id: form.get('client_id'), code: form.get('code'), redirect_uri: form.get('redirect_uri'), verifier: form.get('code_verifier'), resource: form.get('resource') });
+        const form = new URLSearchParams(String(init.body)); state.tokenGrants.push({ provider: id, grant: form.get('grant_type'), client_id: form.get('client_id'), authorization: new Headers(init.headers).get('authorization'), code: form.get('code'), redirect_uri: form.get('redirect_uri'), verifier: form.get('code_verifier'), resource: form.get('resource') });
         if (form.get('grant_type') === 'authorization_code' && form.get('code') !== `${id}-code`) return json({ error: 'invalid_grant' }, 400);
         if (form.get('grant_type') === 'refresh_token' && (state.revokeRefresh[id] || form.get('refresh_token') !== `${id}-refresh-private`)) return json({ error: 'invalid_grant' }, 400);
         return json({ access_token: issue(id), token_type: 'Bearer', expires_in: 3600, refresh_token: `${id}-refresh-private` });

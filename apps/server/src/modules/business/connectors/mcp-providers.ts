@@ -8,15 +8,17 @@ import type { ConnectorDescriptor } from '../business.types';
  * `client` follows what the provider's authorization server actually accepts (checked 2026-10-29):
  * - doola: open Dynamic Client Registration, so AWB registers its own public client.
  * - Northwest: Keycloak rejects anonymous registration ("Trusted Hosts"). Its documented public
- *   client `mcp-connector` only accepts claude.ai/chatgpt.com and `http://localhost:<port>/…`
- *   redirects, so the owner pastes the final localhost address back into AWB.
+ *   client `mcp-connector` accepted `http://localhost:<port>/…` on 2026-10-29 (owner pastes the final
+ *   address back), but by 2026-10-30 only claude.ai, chatgpt.com and Cursor's `cursor://` callback.
+ *   A client Northwest issues to this AWB deployment goes in `NORTHWEST_MCP_CLIENT_ID` (+ `_SECRET`);
+ *   then sign-in returns to AWB_PUBLIC_URL like any redirect client.
  */
 export interface McpProviderSpec {
   url: string;
   /** Every OAuth endpoint the discovery documents announce must live on one of these origins. */
   auth_origins: string[];
   scope: string;
-  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true };
+  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true; registered_env: string };
   /**
    * Tools that charge a saved payment method or enrol it in autopay. Never relayed; the owner finishes
    * them in the provider. Matched with or without a client prefix (`v2_client__checkout_cart_tool`).
@@ -46,11 +48,19 @@ export const MCP_CONNECTORS = [
     setup_note: 'Northwest 고객 계정으로 로그인하면 에이전트가 Northwest MCP로 회사·신고·서류·청구서를 조회하고 신청 장바구니를 준비합니다. 결제(체크아웃)는 Northwest 화면에서 소유자가 직접 진행합니다.',
     docs_url: 'https://www.northwestregisteredagent.com/ai/mcp', portal_url: 'https://www.northwestregisteredagent.com/login',
     mcp: { url: 'https://mcp.northwestregisteredagent.com/', auth_origins: ['https://mcp.northwestregisteredagent.com', 'https://id.northwestregisteredagent.com'], scope: 'openid profile email',
-      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true },
+      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP' },
       // Northwest checks out against a card already on file (tools catalogue, 2026-10-22).
       owner_only_tools: ['checkout_cart_tool', 'pay_invoice_tool', 'enable_autopay_tool', 'purchase_compliance_service_tool'] },
   }),
 ] as const;
+
+/** A client the provider issued to this deployment (`<ENV>_CLIENT_ID` / `<ENV>_CLIENT_SECRET`). */
+export function registeredMcpClient(spec: McpProviderSpec): { client_id: string; client_secret?: string } | null {
+  if (spec.client.kind !== 'public') return null;
+  const id = process.env[`${spec.client.registered_env}_CLIENT_ID`]?.trim();
+  const secret = process.env[`${spec.client.registered_env}_CLIENT_SECRET`]?.trim();
+  return id ? { client_id: id, ...(secret ? { client_secret: secret } : {}) } : null;
+}
 
 export const isOwnerOnlyTool = (spec: McpProviderSpec, name: string) => spec.owner_only_tools.some(t => name === t || name.endsWith(`__${t}`));
 

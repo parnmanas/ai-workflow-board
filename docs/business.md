@@ -139,13 +139,18 @@ doola Partner API(화이트라벨 Formation API)는 운영 사용에 파트너 �
 | 공급자 | MCP 서버 | 로그인 | 결제 |
 | --- | --- | --- | --- |
 | doola | `https://mcp.doola.com` (Streamable HTTP) | OAuth `dds.doola.com`, 동적 클라이언트 등록 + PKCE | 에이전트가 만든 Stripe 결제 링크에서 소유자가 결제 |
-| Northwest Registered Agent | `https://mcp.northwestregisteredagent.com/` | Keycloak `id.northwestregisteredagent.com`. 익명 등록은 거부(“Trusted Hosts”)되어 공개 클라이언트 `mcp-connector` 사용 | `checkout_cart_tool`·`pay_invoice_tool`이 **저장된 결제수단으로 청구** — AWB는 대신 실행하지 않는다 |
+| Northwest Registered Agent | `https://mcp.northwestregisteredagent.com/` | Keycloak `id.northwestregisteredagent.com`. 익명 등록은 거부(“Trusted Hosts”). Northwest가 발급한 클라이언트(`NORTHWEST_MCP_CLIENT_ID`/`_SECRET`) 또는 공개 클라이언트 `mcp-connector` | `checkout_cart_tool`·`pay_invoice_tool`이 **저장된 결제수단으로 청구** — AWB는 대신 실행하지 않는다 |
 
 로그인(`POST companies/:id/mcp/:provider/authorize`):
 
 - **redirect**: 동적 등록 공급자이고 `AWB_PUBLIC_URL`이 있으면 `/api/business-mcp/oauth/callback`으로 돌아온다.
   상표 OAuth와 같이 단일 사용 state와 같은 브라우저의 HttpOnly 쿠키로 묶는다.
-- **paste**: Northwest의 `mcp-connector`는 claude.ai·chatgpt.com·`http://localhost:<port>/…`만 redirect로 받는다(확인 2026-10-29).
+- **발급 클라이언트**: `NORTHWEST_MCP_CLIENT_ID`(+ `NORTHWEST_MCP_CLIENT_SECRET`)가 있으면 Northwest도 redirect 방식이다.
+  Northwest에 이 배포의 콜백 `<AWB_PUBLIC_URL>/api/business-mcp/oauth/callback`을 등록한 클라이언트를 요청한다.
+- **paste**: Northwest의 `mcp-connector`는 2026-10-29에 `http://localhost:<port>/…`도 받았으나 **2026-10-30부터 claude.ai·chatgpt.com·
+  `cursor://anysphere.cursor-mcp/oauth/callback`만** 받는다. 그래서 발급 클라이언트가 없으면 로그인 시작 시 서버가 authorize 주소를
+  먼저 조회해 400이면 409와 설정 안내를 돌려준다(공급자의 “Invalid parameter: redirect_uri” 화면 대신). 다른 앱의 redirect를 빌려 쓰지 않는다 —
+  인가 코드가 그 회사 서버로 간다. 허용이 다시 열리면 이 경로가 그대로 동작한다.
   AWB는 `http://localhost:47913/awb/oauth/callback`을 쓰고, 로그인 뒤 브라우저에 뜨는 “연결할 수 없음” 화면의 전체 주소를
   소유자가 붙여 넣는다(`…/complete`). 붙여 넣기는 로그인을 시작한 소유자·Account만 완료할 수 있다. `AWB_PUBLIC_URL`이
   없으면 doola도 같은 방식으로 진행한다.

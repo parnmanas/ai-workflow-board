@@ -11,7 +11,7 @@ test('doola and Northwest are provider-MCP connectors: no partner key, pinned HT
     assert.equal(descriptor.offering.api_access, 'mcp');
   }
   assert.ok(businessConnector('northwest').descriptor.mcp.owner_only_tools.includes('checkout_cart_tool'));
-  assert.deepEqual(businessConnector('northwest').descriptor.mcp.client, { kind: 'public', client_id: 'mcp-connector', loopback_only: true });
+  assert.deepEqual(businessConnector('northwest').descriptor.mcp.client, { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP' });
 });
 
 test('Mercury reports bounded signed USD transactions and does not fabricate absent amounts', async () => {
