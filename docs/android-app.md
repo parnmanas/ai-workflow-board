@@ -111,11 +111,42 @@ JAVA_HOME=<jdk 17+> ./gradlew assembleRelease      # local.properties 의 awb.ke
 JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # ServerUrls · VoiceRules · Vad 단위 테스트
 ```
 
-- `applicationId com.parnmanas.awb` 와 릴리즈 키가 Capacitor 껍데기와 같아 덮어 설치로 올라간다. `versionCode` 는 손으로
-  올린다(10 = 이 재작성, 11 = Qwen 스트리밍, 12 = 서버 목록과 서버별 로그인).
+- `applicationId com.parnmanas.awb` 와 릴리즈 키가 Capacitor 껍데기와 같아 덮어 설치로 올라간다. 자동 배포의 `versionCode`는
+  기존 릴리스·미완료 초안의 최댓값 다음 번호다. 소스 값은 최초 하한이며 손으로 올릴 필요가 없다.
 - 배포는 GitHub release 의 `awb-android.apk` 자산이다 — 설정 · 자료실의 "Android 앱 받기" 가 `releases/latest` 를 본다
   (`apps/client/src/githubRelease.ts`).
 - **서버를 먼저 배포한다.** 앱의 로그인 유지 · 구글 로그인은 서버의 `/api/auth/devices*` · `oauth/app/exchange` 가 있어야 한다.
+
+### 하루 한 번 변경 확인 · 자동 게시
+
+`.github/workflows/publish-android.yml`이 **매일 한국 시간 06:17** (`17 21 * * *` UTC)에 `main`을 확인한다.
+GitHub 예약 실행은 지연될 수 있다. Actions → **Publish Android APK** → Run workflow로 같은 검사를 수동 실행할 수 있다.
+
+- `scripts/android-release.mjs`가 마지막으로 게시된 APK와 현재 `apps/android/`의 Git 파일 내용·경로·모드를 비교한다.
+  Java, Manifest, 리소스, Gradle 설정·의존성·wrapper 변경은 빌드 대상이다. 웹·서버만 변경됐거나 Android 문서·테스트만
+  변경됐으면 빌드하지 않는다. 중간 변경이 원래 내용으로 되돌아왔어도 건너뛴다. 웹은 서버 배포로 즉시 반영되기 때문이다.
+- 변경이 있으면 웹/네이티브 계약 테스트, Android 단위 테스트와 린트를 통과한 **서명된 release APK**만 게시한다.
+  `versionName`은 소스 기본값에 `+versionCode`를 붙인다. 버전을 저장소에 다시 커밋하지 않는다.
+- 기존 설치본과 같은 인증서·패키지인지, APK 안의 버전이 계획과 맞는지 검사한다. 키가 없거나 다르면 실패한다.
+- `android-build-<versionCode>` 초안에 `awb-android.apk`와 `awb-android-release.json`을 올린 뒤 크기·SHA-256을 확인하고
+  공개/Latest로 바꾼다. AWB 설정·자료실의 기존 다운로드 버튼은 이 릴리스를 자동으로 가리키므로 서버 기능 추가가 필요 없다.
+- 동시에 두 번 게시하지 않도록 workflow concurrency로 직렬화한다. 업로드 실패는 초안으로 남아 같은 커밋 재실행 시
+  같은 버전으로 재시도한다. 게시 성공 뒤에는 동일 앱 내용의 재빌드를 건너뛴다. API 오류를 "기존 릴리스 없음"으로 처리하지 않는다.
+  예전 수동 릴리스에는 메타데이터가 없으므로 해당 태그의 Android 파일과 Gradle 버전을 기준으로 시작한다.
+
+GitHub 저장소 설정에 기존 설치본의 키를 등록한다(새 키를 만들면 덮어 설치할 수 없다):
+
+| 종류 | 이름 | 내용 |
+| --- | --- | --- |
+| Secret | `AWB_ANDROID_KEYSTORE_BASE64` | 기존 keystore의 base64 |
+| Secret | `AWB_ANDROID_STORE_PASSWORD` | keystore 암호 |
+| Secret | `AWB_ANDROID_KEY_PASSWORD` | `awb` alias의 키 암호 |
+| Variable | `AWB_ANDROID_CERT_SHA256` | 기존 배포 APK 서명 인증서의 SHA-256 |
+
+키와 암호는 runner 임시 파일(0600)로만 복원하고 종료 시 삭제한다. 실패는 Actions 실행 기록에 남고, 다운로드는 마지막
+성공 릴리스를 유지한다. 키 교체·버전 충돌을 해결한 뒤 수동 실행으로 재시도할 수 있다. `main` 이외의 ref에서는 게시하지 않는다.
+
+변경 판정·버전·서명 검증 회귀: `node --test scripts/test/android-release.test.mjs`.
 
 ## 에뮬레이터 E2E
 

@@ -1,0 +1,88 @@
+name: Publish Android APK
+
+on:
+  schedule:
+    # Once daily at 06:17 Asia/Seoul. GitHub schedules use UTC and may run late.
+    - cron: '17 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-android
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Test release decisions
+        run: node --test scripts/test/android-release.test.mjs
+      - name: Compare native inputs with last published APK
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/android-release.mjs plan "$RUNNER_TEMP/android-release"
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        if: steps.plan.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK and check web/native contracts
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+          npm ci --no-audit --no-fund
+          node --import tsx --test apps/client/test/android-bridge.test.mjs apps/client/test/android-voice-rules.test.mjs
+      - name: Prepare existing app signing key
+        if: steps.plan.outputs.build == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AWB_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.AWB_ANDROID_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.AWB_ANDROID_KEY_PASSWORD }}
+        run: |
+          node --input-type=module <<'JS'
+          import { writeFileSync, appendFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          for (const name of ['KEYSTORE_BASE64', 'STORE_PASSWORD', 'KEY_PASSWORD']) {
+            if (!process.env[name]) throw new Error(`Missing signing secret: ${name}`);
+          }
+          const files = {
+            AWB_KEYSTORE_PATH: ['awb-release.jks', Buffer.from(process.env.KEYSTORE_BASE64, 'base64')],
+            AWB_KEYSTORE_STOREPASS_FILE: ['awb-storepass', process.env.STORE_PASSWORD],
+            AWB_KEYSTORE_KEYPASS_FILE: ['awb-keypass', process.env.KEY_PASSWORD],
+          };
+          for (const [variable, [name, content]] of Object.entries(files)) {
+            const path = join(process.env.RUNNER_TEMP, name);
+            writeFileSync(path, content, { mode: 0o600 });
+            appendFileSync(process.env.GITHUB_ENV, `${variable}=${path}\n`);
+          }
+          JS
+      - name: Test and build signed APK
+        if: steps.plan.outputs.build == 'true'
+        working-directory: apps/android
+        env:
+          AWB_KEYSTORE_ALIAS: awb
+          VERSION_CODE: ${{ steps.plan.outputs.version_code }}
+          VERSION_NAME: ${{ steps.plan.outputs.version_name }}
+        run: ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease -PawbRequireSigning=true -PawbVersionCode="$VERSION_CODE" -PawbVersionName="$VERSION_NAME"
+      - name: Verify signature and publish complete release
+        if: steps.plan.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWB_ANDROID_CERT_SHA256: ${{ vars.AWB_ANDROID_CERT_SHA256 }}
+        run: node scripts/android-release.mjs publish "$RUNNER_TEMP/android-release"
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/awb-release.jks" "$RUNNER_TEMP/awb-storepass" "$RUNNER_TEMP/awb-keypass"

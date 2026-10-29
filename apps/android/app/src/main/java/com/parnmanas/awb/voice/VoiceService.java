@@ -605,6 +605,10 @@ public class VoiceService extends Service implements AppState.Listener {
   }
 
   private void listenLoop() {
+    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+      onMicFailed();
+      return;
+    }
     int minBuf = AudioRecord.getMinBufferSize(Vad.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
     AudioRecord r;
     try {

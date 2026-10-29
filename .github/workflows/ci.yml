@@ -124,6 +124,16 @@ permissions:
   contents: read
 
 jobs:
+  android-release-tests:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node --test scripts/test/android-release.test.mjs
+
   # 의존성 보안 게이트 (2026-08-18 감사).
   #
   # 이전까지 취약점 점검은 **수동**이었다 — 사람이 생각날 때 `npm audit` 을 돌리는

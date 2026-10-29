@@ -12,8 +12,9 @@ android {
         minSdk 26
         targetSdk 36
         // 11: Qwen PCM 스트리밍과 operator 호출 응답. 12: 서버 여러 개(목록 · 전환 · 서버마다 로그인).
-        versionCode 12
-        versionName '2.2.0'
+        // Source values are floors; automation supplies a monotonically increasing release version.
+        versionCode providers.gradleProperty('awbVersionCode').getOrElse('12').toInteger()
+        versionName providers.gradleProperty('awbVersionName').getOrElse('2.2.0')
         buildConfigField 'String', 'DEFAULT_SERVER_URL', '"https://awb.parnmanas.com"'
     }
 
@@ -55,6 +56,9 @@ android {
         }
         buildTypes.release.signingConfig signingConfigs.release
     } else {
+        if (providers.gradleProperty('awbRequireSigning').getOrElse('false') == 'true') {
+            throw new GradleException('AWB release signing is required but the keystore or password files are missing.')
+        }
         logger.warn('AWB release keystore not configured — assembleRelease will be unsigned. See local.properties (awb.keystore.*).')
     }
 }

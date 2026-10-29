@@ -391,6 +391,8 @@ public class MainActivity extends Activity {
 
   @Override
   @SuppressWarnings("deprecation")
+  // API 33+ gestures use registerBack(); this override is only the older Android fallback.
+  @android.annotation.SuppressLint("GestureBackNavigation")
   public void onBackPressed() {
     goBack();
   }
