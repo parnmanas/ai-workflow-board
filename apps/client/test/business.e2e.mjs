@@ -22,11 +22,12 @@ async function fixture(page) {
     localStorage.setItem('currentAccountId', accountId);
     window.EventSource = class extends EventTarget { readyState = 1; close() { this.readyState = 2; } };
   }, { accountId: account.id });
-  const detail = { company: { ...company, service_choices: {} }, formations: [], tasks: structuredClone(tasks), connections: [], campaigns: [{ id: 'campaign-1', name: 'Orbit 첫 고객 찾기', goal: '실제 고객의 피드백으로 제품의 다음 단계를 정합니다.', status: 'active', cycle_count: 4 }], events: [
+  const detail = { company: { ...company, service_choices: {} }, tasks: structuredClone(tasks), connections: [], campaigns: [{ id: 'campaign-1', name: 'Orbit 첫 고객 찾기', goal: '실제 고객의 피드백으로 제품의 다음 단계를 정합니다.', status: 'active', cycle_count: 4 }], events: [
     { id: 'event-1', message: 'EIN 발급과 법인 문서 보관 · 완료', kind: 'task', created_at: '2026-10-23T03:40:00Z' },
     { id: 'event-2', message: '설립 신청 · 서명 · 서류 확인 · 완료', kind: 'task', created_at: '2026-10-22T05:10:00Z' },
     { id: 'event-3', message: 'Orbit Labs LLC의 운영 워크플로를 만들었습니다.', kind: 'company', created_at: '2026-10-20T01:10:00Z' },
   ] };
+  const mcpState = { rows: ['doola', 'northwest'].map(provider => ({ provider, status: 'disconnected', connected_at: null, tools_synced_at: null, last_error: '', pending_mode: null, tools: [] })) };
   await page.route('**/api/**', async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/^\/api/, '');
@@ -67,7 +68,7 @@ async function fixture(page) {
         body = { month, currency: 'USD', company_revision: detail.company.revision, entries, period: cashbook.period, summary: { inflow_minor: total, outflow_minor: 0, net_minor: total, operating_in_minor: total, operating_out_minor: 0, active_count: active.length, unreconciled_count: active.filter(e => !e.reconciled).length } };
       }
     }
-    else if (path === '/business/credentials') body = [{ id: 'doola-fixture-key', provider: 'doola', name: 'doola Sandbox' }, { id: 'resend-fixture-key', provider: 'resend', name: 'Legal mail' }, { id: 'tsdr-fixture-key', provider: 'uspto_tsdr', name: 'TSDR read key' }];
+    else if (path === '/business/credentials') body = [{ id: 'resend-fixture-key', provider: 'resend', name: 'Legal mail' }, { id: 'tsdr-fixture-key', provider: 'uspto_tsdr', name: 'TSDR read key' }];
     else if (path.endsWith('/trademarks/trademark-fixture/integrations')) {
       if (request.method() === 'POST') {
         const input = request.postDataJSON(); body = { ...input, id: `${input.provider}-fixture`, status: 'configured', ready: true, revision: 0 };
@@ -107,19 +108,17 @@ async function fixture(page) {
       trademarkState.mail[0] = { ...trademarkState.mail[0], status: 'sent', provider_message_id: 'resend-browser-fixture', delivery_status: 'accepted', revision: 2 }; body = trademarkState.mail[0];
     }
     else if (path.endsWith('/mail/trademark-mail-fixture/delivery')) { trademarkState.mail[0].delivery_status = 'delivered'; body = trademarkState.mail[0]; }
-    else if (path.endsWith('/formation/doola/references')) body = { industries: ['Custom Computer Programming Services'], fees: [{ state: 'WY', price_in_cents: 10000 }, { state: 'DE', price_in_cents: 11000 }] };
-    else if (path.endsWith('/formation/doola/prepare')) {
-      const input = request.postDataJSON();
-      detail.formationRequest = { customer: { firstName: input.application.first_name, lastName: input.application.last_name, email: input.application.email }, company: { description: input.application.description, responsibleParty: { address: input.application.address } } };
-      body = { id: 'formation-fixture', company_id: company.id, provider: 'doola', credential_id: input.credential_id, environment: input.environment, payload_digest: 'reviewed-digest', revision: 1, status: 'draft', summary: { name: `${input.application.name} LLC`, state: input.application.state, entity_type: 'LLC', industry: input.application.industry }, state_fee_cents: 10000, quoted_at: '2026-10-23T05:00:00Z', attempted_at: null, external_company_id: '', provider_status: '', last_error: '' };
-      detail.formations = [body]; detail.company.revision++;
+    else if (path === `/business/companies/${company.id}/mcp`) body = mcpState.rows;
+    else if (path.endsWith('/mcp/northwest/authorize')) body = { url: 'https://id.northwestregisteredagent.com/auth?client_id=mcp-connector', mode: 'paste', redirect_uri: 'http://localhost:47913/awb/oauth/callback' };
+    else if (path.endsWith('/mcp/northwest/complete')) {
+      expect(request.postDataJSON().callback_url).toMatch(/^http:\/\/localhost:47913\/awb\/oauth\/callback\?/);
+      mcpState.rows[1] = { ...mcpState.rows[1], status: 'connected', connected_at: '2026-10-29T00:00:00Z', tools: [
+        { name: 'v2_client__get_companies_tool', title: '', description: 'List companies on the Northwest account', read_only: true, owner_only: false },
+        { name: 'v2_client__add_formation_to_cart_tool', title: '', description: 'Add a formation filing to the cart', read_only: false, owner_only: false },
+        { name: 'v2_client__checkout_cart_tool', title: '', description: 'Charge the saved payment method', read_only: false, owner_only: true }] };
+      body = { company_id: company.id, provider: 'northwest' };
     }
-    else if (path.endsWith('/formations/formation-fixture/review')) body = { formation: detail.formations[0], request: detail.formationRequest };
-    else if (path.endsWith('/formations/formation-fixture/submit')) {
-      expect(request.postDataJSON()).toEqual({ payload_digest: 'reviewed-digest', revision: 1, confirm: true });
-      detail.formations[0] = { ...detail.formations[0], status: 'submitted', revision: 3, external_company_id: 'doola-company-fixture', provider_status: 'PENDING' }; body = detail.formations[0];
-    }
-    else if (path.endsWith('/formations/formation-fixture/signature')) body = { url: 'https://sign.doola.com/browser-fixture', expires_at: '2026-10-23T06:00:00Z' };
+    else if (path.endsWith('/mcp/northwest/tools/refresh')) body = { count: 3 };
     else if (path === '/marketing/campaigns') body = detail.campaigns;
     else if (path === '/marketing/inbox') body = { total: 0, campaigns: [] };
     else if (path === '/accounts') body = [account];
@@ -127,7 +126,7 @@ async function fixture(page) {
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  return { errors, trademarkState, integrationState, cashbook };
+  return { errors, trademarkState, integrationState, cashbook, mcpState };
 }
 
 for (const width of [1440, 390, 320]) {
@@ -400,32 +399,19 @@ for (const viewport of [{ width: 1440, height: 1080 }, { width: 390, height: 844
     await fits();
     await page.getByRole('dialog').screenshot({ path: `/tmp/awb-business-comparison-${viewport.width}.png` });
     await page.getByRole('button', { name: '비교를 마치고 선택하기' }).click();
-    await page.getByRole('button', { name: '설립 신청 · 기록' }).click();
-    const formation = page.getByRole('dialog', { name: 'doola 설립 신청' });
-    await formation.getByLabel('설립 파트너 키', { exact: true }).selectOption('doola-fixture-key');
-    await formation.getByRole('button', { name: '업종 · 주정부 수수료 불러오기' }).click();
-    await formation.getByLabel('설립 업종', { exact: true }).fill('Custom Computer Programming Services');
-    await formation.getByLabel('설립 사업 설명', { exact: true }).fill('Software products');
-    await formation.getByLabel('소유자 이름', { exact: true }).fill('Min');
-    await formation.getByLabel('소유자 성', { exact: true }).fill('Kim');
-    await formation.getByLabel('소유자 이메일', { exact: true }).fill('founder@example.invalid');
-    await formation.getByLabel('전화번호 (국가번호 포함)', { exact: true }).fill('+821012345678');
-    await formation.getByLabel('영문 도로명 주소', { exact: true }).fill('123 Test Road');
-    await formation.getByLabel('도시', { exact: true }).fill('Seoul');
-    await formation.getByLabel('주 · 시도', { exact: true }).fill('Seoul');
-    await formation.getByLabel('우편번호', { exact: true }).fill('06134');
+    const northwest = page.locator('.business-connector-card').filter({ has: page.getByRole('heading', { name: 'Northwest Registered Agent' }) });
+    await northwest.getByRole('button', { name: '계정 연결 (MCP)' }).click();
+    const panel = page.getByRole('dialog', { name: 'Northwest Registered Agent 계정 연결 (MCP)' });
+    const popup = page.waitForEvent('popup');
+    await panel.getByRole('button', { name: 'Northwest Registered Agent 로그인' }).click();
+    await (await popup).close();
+    await expect(panel.getByRole('button', { name: '연결 완료' })).toBeDisabled();
+    await panel.getByLabel('로그인 후 주소', { exact: true }).fill('http://localhost:47913/awb/oauth/callback?state=s&session_state=x&code=c');
     await fits();
-    await formation.getByRole('button', { name: '신청서 · 비용 검토' }).click();
-    await expect(formation).toContainText('founder@example.invalid');
-    await expect(formation).toContainText('$100.00');
-    await expect(formation.getByRole('button', { name: '테스트 신청 제출' })).toBeDisabled();
-    await fits();
-    await formation.screenshot({ path: `/tmp/awb-business-formation-${viewport.width}.png` });
-    await formation.getByLabel('설립 제출 확인', { exact: true }).check();
-    await formation.getByRole('button', { name: '테스트 신청 제출' }).click();
-    await expect(formation).toContainText('doola-company-fixture');
-    await formation.getByRole('button', { name: 'SS-4 서명 링크 받기' }).click();
-    await expect(formation.getByRole('link', { name: 'doola 서명 화면 열기' })).toHaveAttribute('href', 'https://sign.doola.com/browser-fixture');
+    await panel.getByRole('button', { name: '연결 완료' }).click();
+    await expect(panel).toContainText('v2_client__checkout_cart_tool');
+    await expect(panel).toContainText('소유자 직접 · 결제');
+    await panel.screenshot({ path: `/tmp/awb-business-mcp-${viewport.width}.png` });
     await fits();
     expect(errors).toEqual([]);
   });

@@ -3,7 +3,7 @@ import { DataSource } from 'typeorm';
 import { decryptStrict, encrypt } from '../../services/encryption.service';
 
 /**
- * 행 단위로 암호화된 필드를 갖는 엔티티. Credential과 BusinessFormation,
+ * 행 단위로 암호화된 필드를 갖는 엔티티. Credential과 BusinessMcpConnection,
  * SystemSetting(is_secret=1인 행만 암호화, 예: embedding.api_key)은
  * "소스에서 복호화 → 전송(TLS) → 도착지에서 재암호화"가 필요한 같은 버그
  * 클래스(암호화 키가 이관되지 않으면 영구 복호화 불가)에 속한다.
@@ -13,7 +13,7 @@ const ENCRYPTED_FIELD_BY_ENTITY: Record<string, string> = {
   BusinessMailConnection: 'encrypted_data',
   BusinessMailMessage: 'encrypted_data',
   BusinessMailTask: 'encrypted_data',
-  BusinessFormation: 'encrypted_request',
+  BusinessMcpConnection: 'encrypted_data',
   BusinessTrademark: 'encrypted_details',
   BusinessTrademarkMail: 'encrypted_payload',
   BusinessTrademarkIntegration: 'encrypted_data',

@@ -9,7 +9,8 @@ import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { BusinessController } from './business.controller';
-import { BusinessFormationService } from './business-formation.service';
+import { BusinessMcpService } from './business-mcp.service';
+import { BusinessMcpCallbackController, BusinessMcpController } from './business-mcp.controller';
 import { BusinessService } from './business.service';
 import { BusinessCashbookService } from './business-cashbook.service';
 import { BusinessCashbookController } from './business-cashbook.controller';
@@ -19,5 +20,5 @@ import { BusinessTrademarkService } from './business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from './business-trademark-integrations.service';
 import { BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController } from './business-trademark-integrations.controller';
 
-@Module({ imports: [SharedServicesModule, AgentsModule, ChatRoomsModule], controllers: [BusinessMailController, BusinessController, BusinessCashbookController, BusinessTrademarkController, BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController], providers: [BusinessWorkflowService, BusinessMailWatchService, BusinessMailWorkflowService, BusinessMailService, AuthGuard, PermissionGuard, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService], exports: [BusinessWorkflowService, BusinessMailWorkflowService, BusinessMailService, BusinessService, BusinessCashbookService, BusinessFormationService, BusinessTrademarkService, BusinessTrademarkIntegrationsService] })
+@Module({ imports: [SharedServicesModule, AgentsModule, ChatRoomsModule], controllers: [BusinessMailController, BusinessController, BusinessCashbookController, BusinessTrademarkController, BusinessTrademarkIntegrationsController, BusinessTrademarkIntegrationCallbacksController, BusinessMcpController, BusinessMcpCallbackController], providers: [BusinessWorkflowService, BusinessMailWatchService, BusinessMailWorkflowService, BusinessMailService, AuthGuard, PermissionGuard, BusinessService, BusinessCashbookService, BusinessMcpService, BusinessTrademarkService, BusinessTrademarkIntegrationsService], exports: [BusinessWorkflowService, BusinessMailWorkflowService, BusinessMailService, BusinessService, BusinessCashbookService, BusinessMcpService, BusinessTrademarkService, BusinessTrademarkIntegrationsService] })
 export class BusinessModule {}

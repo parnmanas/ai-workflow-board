@@ -28,12 +28,13 @@ export const BUSINESS_GUIDES: Record<BusinessStage, BusinessGuide> = {
   },
   formation: {
     get prepare() { return [translate('회사 이름, 사업 내용, 소유자 정보를 정리합니다.'), translate('설립 주와 LLC / C-Corp 형태, 필요한 서비스를 확인합니다.')]; },
-    get execute() { return [translate('커넥터에서 설립 서비스를 비교합니다. doola 파트너 키가 있으면 AWB의 설립 신청에서 1인 LLC(WY·DE)를 입력·검토·제출할 수 있습니다.'), translate('직접 LLC 설립을 선택하면 WY·DE 주정부 접수와 조건별 EIN 경로를 안내합니다. 해외 거주자도 주내 대리인 등 조건을 충족하면 직접 진행할 수 있습니다. 다른 서비스는 외부 신청 화면으로 이어집니다.')]; },
-    get track() { return [translate('아래 업무에 담당자와 기한을 지정하고, 심사 중에는 외부 응답 대기로 기록합니다.'), translate('doola 조회를 연결하거나 서비스에서 확인한 결과를 업무 메모에 남깁니다.')]; },
+    get execute() { return [translate('커넥터에서 설립 서비스를 비교합니다. doola · Northwest는 소유자가 공급자 계정으로 로그인(MCP 연결)하면 회사 설립 업무의 에이전트가 설립 정보 입력·진행 확인을 맡고, 결제는 소유자가 공급자 화면에서 진행합니다.'), translate('직접 LLC 설립을 선택하면 WY·DE 주정부 접수와 조건별 EIN 경로를 안내합니다. 해외 거주자도 주내 대리인 등 조건을 충족하면 직접 진행할 수 있습니다. 다른 서비스는 외부 신청 화면으로 이어집니다.')]; },
+    get track() { return [translate('아래 업무에 담당자와 기한을 지정하고, 심사 중에는 외부 응답 대기로 기록합니다.'), translate('MCP로 연결한 공급자의 진행 상태를 에이전트가 확인하거나, 서비스에서 확인한 결과를 업무 메모에 남깁니다.')]; },
     get completed() { return translate('설립 신청 업무는 주정부 등록 문서와 서명 완료를, EIN 업무는 발급 확인서를 확인한 뒤 각각 완료로 표시하세요.'); },
-    get connectionNote() { return translate('doola는 내부 신청 또는 기존 회사 ID 연결을 지원합니다. 파트너 계약 비용은 일반 구독료와 별개이며, 제출 성공은 설립 완료를 뜻하지 않습니다. Atlas·Firstbase·Clemta·LegalZoom·ZenBusiness·CorpNet은 현재 외부 진행과 업무 기록을 지원합니다.'); },
+    get connectionNote() { return translate('doola · Northwest는 공급자가 제공하는 MCP에 고객 계정으로 로그인해 연결하며 파트너 계약·API 키가 필요 없습니다. 신청 접수는 설립 완료를 뜻하지 않습니다. Atlas·Firstbase·Clemta·LegalZoom·ZenBusiness·CorpNet은 현재 외부 진행과 업무 기록을 지원합니다.'); },
     sources: [
       { get label() { return translate('doola 설립 순서'); }, url: 'https://help.doola.com/what-is-the-overall-process-to-form-a-company-doola-help-center' },
+      { get label() { return translate('Northwest MCP 안내'); }, url: 'https://www.northwestregisteredagent.com/ai/mcp' },
       { get label() { return translate('Stripe Atlas 설립 안내'); }, url: 'https://docs.stripe.com/atlas' },
     ],
   },

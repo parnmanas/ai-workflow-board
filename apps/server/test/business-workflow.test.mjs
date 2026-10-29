@@ -100,15 +100,6 @@ test('Business work executes without tickets, persists outcomes and resumes the 
     assert.equal(journal.open_requests.length, 0);
     assert.equal(await ds.getRepository('Ticket').countBy({ account_id: account.id }), 0);
   });
-  await t.test('human-approved formation submission queues one continuation in the same work item', async () => {
-    const actionId = randomUUID();
-    const continuation = await workflow.formationSubmitted(company.id, account.id, actionId, actor);
-    assert.equal(continuation.task_id, taskId);
-    assert.equal((await workflow.formationSubmitted(company.id, account.id, actionId, actor)).id, continuation.id);
-    assert.equal(await repo.countBy({ id: actionId }), 1);
-    await workflow.tick();
-    await workflow.complete(account.id, continuation.id, { ...result, question: '등록 서류가 준비되면 다음 서명을 확인해 주세요.' }, caller);
-  });
   await t.test('a worker error preserves requests and cannot leave execution falsely running', async () => {
     const retry = await workflow.start(company.id, account.id, taskId, { request_id: randomUUID(), content: '수정 요청 처리' }, actor);
     const send = t.mock.method(app.get(RoomMessagingService), 'sendMessage', async () => { throw new Error('dispatch failed'); });

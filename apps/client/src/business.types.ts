@@ -32,12 +32,14 @@ export interface BusinessTaskEntryInput {
   request_id: string; kind: Exclude<BusinessTaskEntryKind, 'change'>; content: string; resolves_entry_id?: string | null;
 }
 export interface ServiceOffering {
-  best_for: string; features: string[]; api_access: 'public' | 'partner' | 'unverified' | 'not_applicable'; api_note: string; external_steps: string[];
+  best_for: string; features: string[]; api_access: 'public' | 'mcp' | 'partner' | 'unverified' | 'not_applicable'; api_note: string; external_steps: string[];
   pricing: { plans: Array<{ id: string; name: string; price: string; detail: string }>; extra: string; url: string; checked_at: string };
 }
 export interface BusinessConnector {
-  offering?: ServiceOffering; formation?: { states: string[]; entity_types: string[] };
-  id: string; name: string; stage: BusinessStage; color: string; monogram: string; mode: 'api' | 'handoff' | 'manual';
+  offering?: ServiceOffering;
+  /** Provider-hosted MCP server; the owner signs in with the provider account. */
+  mcp?: { url: string; client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true }; owner_only_tools: string[] };
+  id: string; name: string; stage: BusinessStage; color: string; monogram: string; mode: 'api' | 'mcp' | 'handoff' | 'manual';
   summary: string; capabilities: string[]; setup_note: string; docs_url: string; portal_url: string;
   credential_provider?: string; secret_fields: string[];
   fields: Array<{ key: string; label: string; placeholder: string }>; environments: Array<'live' | 'sandbox'>;
@@ -54,7 +56,7 @@ export interface BusinessConnection {
 }
 export interface BusinessDetail {
   formation_work?: BusinessTaskRun | null;
-  company: BusinessCompany; formations: BusinessFormation[]; tasks: BusinessTask[]; connections: BusinessConnection[];
+  company: BusinessCompany; tasks: BusinessTask[]; connections: BusinessConnection[];
   campaigns: Array<{ id: string; name: string; status: string; goal: string; cycle_count: number; next_cycle_at: string | null }>;
   events: Array<{ id: string; message: string; kind: string; created_at: string }>;
 }
@@ -79,22 +81,11 @@ export interface Cashbook {
   summary: { inflow_minor: number; outflow_minor: number; net_minor: number; operating_in_minor: number; operating_out_minor: number; active_count: number; unreconciled_count: number };
 }
 
-export interface BusinessFormation {
-  continuation_error?: string;
-  id: string; company_id: string; provider: string; credential_id: string; environment: 'sandbox' | 'live';
-  payload_digest: string; revision: number; status: 'draft' | 'submitting' | 'uncertain' | 'submitted';
-  summary: { name: string; state: string; entity_type: string; industry: string };
-  state_fee_cents: number; quoted_at: string; attempted_at: string | null;
-  external_company_id: string; provider_status: string; last_error: string;
-}
-export interface FormationAddress { line1: string; line2: string; city: string; state: string; postalCode: string; country: string; phone: string }
-export interface FormationApplication {
-  name: string; state: string; industry: string; description: string; first_name: string; last_name: string; email: string; address: FormationAddress;
-}
-export interface FormationReferences { industries: string[]; fees: Array<{ state: string; price_in_cents: number }> }
-export interface FormationReview {
-  formation: BusinessFormation;
-  request: { customer: { firstName: string; lastName: string; email: string; countryOfResidence: string }; company: { description: string; responsibleParty: { address: FormationAddress } } } | null;
+export interface BusinessMcpTool { name: string; title: string; description: string; read_only: boolean; owner_only: boolean }
+export interface BusinessMcpConnection {
+  provider: string; status: 'disconnected' | 'authorizing' | 'connected' | 'error';
+  connected_at: string | null; tools_synced_at: string | null; last_error: string; pending_mode: 'redirect' | 'paste' | null;
+  tools: BusinessMcpTool[];
 }
 
 export type TrademarkPhase = 'preparing' | 'counsel' | 'contract' | 'filing' | 'examination' | 'registered';

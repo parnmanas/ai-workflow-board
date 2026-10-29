@@ -3,7 +3,6 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
-import { BusinessFormationService } from './business-formation.service';
 import { BusinessService } from './business.service';
 import { BusinessWorkflowService } from './business-workflow.service';
 import { BUSINESS_CONNECTORS } from './connectors/registry';
@@ -14,7 +13,7 @@ import { BUSINESS_CONNECTORS } from './connectors/registry';
 @UseGuards(PermissionGuard)
 @RequirePermission(PERMISSIONS.MANAGE_BUSINESS)
 export class BusinessController {
-  constructor(private readonly business: BusinessService, private readonly formation: BusinessFormationService, private readonly workflow: BusinessWorkflowService) {}
+  constructor(private readonly business: BusinessService, private readonly workflow: BusinessWorkflowService) {}
   private marketing(req: any) {
     return [PERMISSIONS.MANAGE_MARKETING, PERMISSIONS.APPROVE_MARKETING_SPEND].some(p => hasPermission(req.currentUser.role, req.currentUser.permissions, p));
   }
@@ -66,31 +65,6 @@ export class BusinessController {
     // Keep the class-level business permission and require ticket creation as well.
     if (!hasPermission(req.currentUser.role, req.currentUser.permissions, PERMISSIONS.CREATE_TICKETS)) throw new ForbiddenException('티켓 생성 권한이 필요합니다.');
     return this.business.createTaskTicket(id, req.currentAccountId, taskId, body?.revision, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' });
-  }
-  @Post('companies/:id/formation/:provider/references') formationReferences(@Param('id') id: string, @Param('provider') provider: string, @Req() req: any, @Body() body: any) {
-    return this.formation.references(id, req.currentAccountId, provider, body);
-  }
-  @Post('companies/:id/formation/:provider/prepare') prepareFormation(@Param('id') id: string, @Param('provider') provider: string, @Req() req: any, @Body() body: any) {
-    return this.formation.prepare(id, req.currentAccountId, provider, body, req.currentUser.id);
-  }
-  @Header('Cache-Control', 'no-store')
-  @Get('companies/:id/formations/:actionId/review') reviewFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any) {
-    return this.formation.review(id, req.currentAccountId, actionId);
-  }
-  @Post('companies/:id/formations/:actionId/submit') async submitFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
-    const result = await this.formation.submit(id, req.currentAccountId, actionId, body, req.currentUser.id);
-    if (result.status === 'submitted') {
-      try { await this.workflow.formationSubmitted(id, req.currentAccountId, actionId, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' }); }
-      catch { return { ...result, continuation_error: '설립 신청은 제출되었습니다. 후속 에이전트 실행을 시작하지 못했으니 회사 설립 업무에서 이어서 요청하세요.' }; }
-    }
-    return result;
-  }
-  @Delete('companies/:id/formations/:actionId') discardFormation(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
-    return this.formation.discard(id, req.currentAccountId, actionId, body, req.currentUser.id);
-  }
-  @Header('Cache-Control', 'no-store')
-  @Post('companies/:id/formations/:actionId/signature') formationSignature(@Param('id') id: string, @Param('actionId') actionId: string, @Req() req: any, @Body() body: any) {
-    return this.formation.signature(id, req.currentAccountId, actionId, body);
   }
   @Post('companies/:id/connections/:provider') connect(@Param('id') id: string, @Param('provider') provider: string, @Req() req: any, @Body() body: any) {
     return this.business.connect(id, req.currentAccountId, provider, body, req.currentUser.id);

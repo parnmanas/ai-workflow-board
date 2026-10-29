@@ -9,7 +9,8 @@ import { encrypt, decryptStrict } from '../dist/services/encryption.service.js';
 import { LogService } from '../dist/services/log.service.js';
 import { BusinessWorkflowService } from '../dist/modules/business/business-workflow.service.js';
 import { InstanceRegistryService } from '../dist/modules/agent-manager/instance-registry.service.js';
-import { BusinessFormationService } from '../dist/modules/business/business-formation.service.js';
+import { BusinessMcpService } from '../dist/modules/business/business-mcp.service.js';
+import { fakeMcpProviders } from './helpers/business-mcp-fixture.mjs';
 import { TOOL_AUTHZ_TABLE } from '../dist/modules/mcp/shared/tool-authz-gate.js';
 import { mcpRequestPreview } from '../dist/modules/mcp/shared/request-preview.js';
 import { createStandaloneContext } from '../dist/modules/mcp/tools/context.js';
@@ -31,10 +32,11 @@ const REST_TO_MCP = {
     taskDetail: 'get_business_task', addTaskEntry: 'add_business_task_entry', startTask: 'start_business_work', startFormationWork: 'start_business_work',
     assessSelfService: 'assess_business_self_service',
     removeTask: 'delete_business_task', initializeTrademark: 'initialize_business_trademark_tasks', createTaskTicket: 'create_business_task_ticket',
-    formationReferences: 'get_business_formation_references', prepareFormation: 'prepare_business_formation',
-    reviewFormation: 'review_business_formation', submitFormation: 'submit_business_formation',
-    discardFormation: 'discard_business_formation', formationSignature: 'get_business_formation_signature',
     connect: 'configure_business_connector', disconnect: 'disconnect_business_connector', sync: 'sync_business_connector',
+  },
+  BusinessMcpController: {
+    list: 'list_business_mcp_connections', authorize: 'authorize_business_mcp_connector', tools: 'list_business_mcp_tools', refresh: 'list_business_mcp_tools',
+    call: 'call_business_mcp_tool', disconnect: 'disconnect_business_mcp_connector',
   },
   BusinessCashbookController: {
     read: 'get_business_cashbook', add: 'add_business_cashbook_entry', reconcile: 'reconcile_business_cashbook_entry',
@@ -53,7 +55,8 @@ const REST_TO_MCP = {
   },
 };
 // Review approval is intentionally human-only: MCP sessions cannot authenticate a human decision.
-const TRANSPORT_ONLY = ['BusinessMailController.decideReply', 'BusinessTrademarkIntegrationCallbacksController.callback', 'BusinessTrademarkIntegrationCallbacksController.webhook'];
+// Provider sign-in completion (redirect callback or pasted loopback address) is a browser OAuth step of the owner.
+const TRANSPORT_ONLY = ['BusinessMailController.decideReply', 'BusinessMcpController.complete', 'BusinessMcpCallbackController.callback', 'BusinessTrademarkIntegrationCallbacksController.callback', 'BusinessTrademarkIntegrationCallbacksController.webhook'];
 const approval = row => ({ payload_digest: row.payload_digest, revision: row.revision, confirm: true });
 
 test('Business MCP: full surface, real HTTP execution and live ownership', { timeout: 120000 }, async t => {
@@ -101,12 +104,12 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
     assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
-    assert.equal(tools.length, 65);
+    assert.equal(tools.length, 64);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
     assert.ok(tools.find(t => t.name === 'send_business_trademark_action').inputSchema.required.includes('confirm'));
-    assert.ok(tools.find(t => t.name === 'prepare_business_formation').inputSchema.properties.application.properties.address);
+    assert.ok(tools.find(t => t.name === 'call_business_mcp_tool').inputSchema.required.includes('tool'));
     const guide = await call('get_business_workflow_guide', {}, read); assert.ok(guide.stages.includes('trademark'));
-    const catalog = await call('list_business_connectors', {}, read); assert.equal(catalog.length, 26);
+    const catalog = await call('list_business_connectors', {}, read); assert.equal(catalog.length, 27);
     const compare = await call('compare_business_services', { providers: ['doola', 'atlas'] }, read); assert.equal(compare.services.length, 2);
     await denied('compare_business_services', { providers: ['doola', 'mercury'] });
   });
@@ -154,27 +157,20 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   t.after(() => { if (publicUrl === undefined) delete process.env.AWB_PUBLIC_URL; else process.env.AWB_PUBLIC_URL = publicUrl; });
   const credentials = {};
   for (const [provider, secrets] of [
-    ['doola', { api_key: 'dk_test_mcp_secret' }], ['mercury', { api_token: 'mercury_mcp_secret' }], ['resend', { api_key: 'resend_mcp_secret' }],
+    ['mercury', { api_token: 'mercury_mcp_secret' }], ['resend', { api_key: 'resend_mcp_secret' }],
     ['google_oauth', { client_id: 'test-gmail', client_secret: 'google_mcp_secret' }], ['docusign_oauth', { client_id: 'test-doc', client_secret: 'doc_mcp_secret' }],
   ]) credentials[provider] = await ds.getRepository('Credential').save({ provider, name: `Test ${provider}`, account_id: mine.id, agent_env: false, encrypted_data: encrypt(JSON.stringify(secrets)) });
-  const foreignCredential = await ds.getRepository('Credential').save({ provider: 'doola', name: 'Private credential', account_id: theirs.id, agent_env: false, encrypted_data: encrypt('{}') });
   const writes = []; const unexpected = []; const resend = new Map(); const envelopes = new Map();
   const docTemplate = randomUUID(); const docAccount = randomUUID(); const pdf = '%PDF-1.4\nPrivate engagement terms\n%%EOF';
   let loseMail = false; let loseContract = false;
   const json = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
-  const doola = payload => json({ payload, error: null });
+  const fake = fakeMcpProviders();
   globalThis.fetch = async (raw, init = {}) => {
     const url = new URL(String(raw)); if (url.hostname === '127.0.0.1') return nativeFetch(raw, init);
     assert.equal(init.redirect, 'error');
+    const provided = await fake.handle(url, init); if (provided) return provided;
     const method = init.method || 'GET'; const body = init.body ? JSON.parse(init.body) : null;
     if (method !== 'GET') writes.push({ host: url.hostname, path: url.pathname, body });
-    if (url.hostname === 'api.test.doola.com') {
-      if (url.pathname.endsWith('/naics-codes')) return doola([{ industry: 'Custom Computer Programming Services' }]);
-      if (url.pathname.endsWith('/state-fees')) return doola([{ state: 'WY', priceInCents: 10000 }]);
-      if (url.pathname.endsWith('/customers')) return doola({ doolaCustomerId: 'customer_mcp' });
-      if (url.pathname.endsWith('/companies')) return doola({ doolaCompanyId: 'company_mcp', formationSubmissionStatus: 'PENDING' });
-      if (url.pathname.endsWith('/signatures')) return doola({ url: 'https://sign.doola.com/test-mcp', expiresAt: '2026-11-01T00:00:00Z' });
-    }
     if (url.hostname === 'api-sandbox.mercury.com') return json(url.pathname.endsWith('/accounts') ? { accounts: [{ id: 'bank-1' }] } : { transactions: [{ id: 'txn-1', amount: 12.34, status: 'sent', counterpartyName: 'Test customer' }] });
     if (url.hostname === 'api.resend.com') {
       if (method === 'POST') { const id = `resend-${resend.size + 1}`; resend.set(id, { ...body, id, last_event: 'delivered' }); if (loseMail) throw new Error('private provider error'); return json({ id }); }
@@ -210,7 +206,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     await call('delete_business_task', { ...companyArgs, task_id: disposable.id, revision: await companyRevision() });
     assert.ok(await ds.getRepository('Ticket').existsBy({ id: ticket.id }));
     assert.equal((await call('initialize_business_trademark_tasks', { ...companyArgs, revision: await companyRevision() })).created, 0);
-    const metadata = await call('list_business_credentials', {}, read); assert.ok(metadata.some(c => c.id === credentials.doola.id));
+    const metadata = await call('list_business_credentials', {}, read); assert.ok(metadata.some(c => c.id === credentials.mercury.id));
     assert.doesNotMatch(JSON.stringify(metadata), /_secret|encrypted|Private credential/);
     const connection = { ...companyArgs, provider: 'mercury' };
     await call('configure_business_connector', { ...connection, revision: await companyRevision(), credential_id: credentials.mercury.id, environment: 'sandbox', config: {} });
@@ -219,23 +215,26 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     await call('disconnect_business_connector', { ...connection, revision: await companyRevision() });
   });
 
-  await t.test('formation prepare/review/submit/signature execute through the same durable service', async () => {
-    const input = { ...companyArgs, provider: 'doola', credential_id: credentials.doola.id, environment: 'sandbox' };
-    const references = await call('get_business_formation_references', input, read); assert.ok(references.industries.length);
-    const application = { name: 'Private Orbit', state: 'WY', industry: references.industries[0], description: 'Software tools', first_name: 'Private', last_name: 'Founder', email: 'private-founder@example.invalid', address: { line1: 'Private home address', city: 'Seoul', state: 'Seoul', postalCode: '06134', country: 'KOR', phone: '+821012345678' } };
-    // Use current revisions on every prepared request, never silently retry a stale draft.
-    const draft = await call('prepare_business_formation', { ...input, revision: await companyRevision(), application });
-    const args = { ...companyArgs, action_id: draft.id };
-    const review = await call('review_business_formation', args, read); assert.equal(review.request.customer.email, application.email);
-    await denied('submit_business_formation', { ...args, ...approval(draft), payload_digest: '0'.repeat(64) });
-    await denied('submit_business_formation', { ...args, ...approval(draft), confirm: false });
-    assert.equal(writes.filter(w => w.host === 'api.test.doola.com').length, 0);
-    await call('discard_business_formation', { ...args, payload_digest: draft.payload_digest, confirm: true });
-    const next = await call('prepare_business_formation', { ...input, revision: await companyRevision(), application });
-    const submitted = await call('submit_business_formation', { ...companyArgs, action_id: next.id, ...approval(next) }); assert.equal(submitted.status, 'submitted');
-    await call('get_business_formation_signature', { ...companyArgs, action_id: next.id, document_type: 'SS4', confirm: true });
-    assert.equal(writes.filter(w => w.host === 'api.test.doola.com').length, 3);
-    assert.doesNotMatch(JSON.stringify(await detail()), /Private home address|private-founder|_mcp_secret/);
+  await t.test('formation runs through the provider MCP as the signed-in owner', async () => {
+    const provider = { ...companyArgs, provider: 'doola' };
+    const link = await call('authorize_business_mcp_connector', provider, read);
+    assert.match(link.url, new RegExp(`/business/connectors\\?company=${company.id}&stage=formation&mcp=doola`));
+    await denied('list_business_mcp_tools', provider, read, /로그인/);
+    // The owner's browser sign-in: AWB starts it, the provider redirects back with code + state.
+    const service = app.get(BusinessMcpService);
+    const started = await service.authorize(company.id, mine.id, 'doola', owner.id);
+    await service.complete(new URL(started.url).searchParams.get('state'), 'doola-code', { cookie: started.cookie });
+    assert.equal((await call('list_business_mcp_connections', companyArgs, read)).find(row => row.provider === 'doola').status, 'connected');
+    const listed = await call('list_business_mcp_tools', { ...provider, query: 'formation' }, read);
+    assert.deepEqual(listed.tools.map(tool => tool.name), ['start_formation']);
+    await call('call_business_mcp_tool', { ...provider, tool: 'get_companies' });
+    await denied('call_business_mcp_tool', { ...provider, tool: 'start_formation', arguments: { name: 'Private Orbit' } }, full, /confirm/);
+    await denied('call_business_mcp_tool', { ...provider, tool: 'get_companies' }, read);
+    const result = await call('call_business_mcp_tool', { ...provider, tool: 'start_formation', arguments: { name: 'Private Orbit' }, confirm: true });
+    assert.equal(result.content_untrusted[0].text, 'ok start_formation');
+    assert.deepEqual(fake.state.calls.map(c => c.name), ['get_companies', 'start_formation']);
+    assert.doesNotMatch(JSON.stringify(await detail()) + JSON.stringify(listed), /access-private|refresh-private/);
+    await call('disconnect_business_mcp_connector', provider);
   });
 
   let trademark; let trademarkArgs; let mailRow; let actionRow; let integration;
@@ -311,7 +310,8 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
     }
     await denied('list_business_trademarks', companyArgs, foreign, /404/);
     await denied('review_business_trademark_action', { ...trademarkArgs, action_id: actionRow.id }, foreign, /404/);
-    await denied('get_business_formation_references', { ...companyArgs, provider: 'doola', credential_id: foreignCredential.id, environment: 'sandbox' });
+    await denied('call_business_mcp_tool', { company_id: privateCompany.id, provider: 'doola', tool: 'get_companies' }, full, /404/);
+    await denied('list_business_mcp_connections', { company_id: privateCompany.id }, full, /404/);
     const otherCase = await call('save_business_trademark', { ...companyArgs, details: { mark: 'Separate', owner_name: company.name } });
     await denied('review_business_trademark_action', { ...companyArgs, trademark_id: otherCase.id, action_id: actionRow.id }, full, /404/);
     const users = ds.getRepository('User');
@@ -414,16 +414,17 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
   await t.test('debug logs and internal failures do not expose applicant, mail or credential secrets', async () => {
     const preview = mcpRequestPreview([{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'save_business_trademark', arguments: { details: { notes: 'private-hidden-body' } } } }]);
     assert.doesNotMatch(preview, /private-hidden-body/); assert.match(preview, /save_business_trademark/);
-    const service = app.get(BusinessFormationService); const original = service.references;
-    service.references = async () => { throw new Error('SQL error private-credential-dump'); };
+    const service = app.get(BusinessMcpService); const original = service.list;
+    service.list = async () => { throw new Error('SQL error private-credential-dump'); };
     try {
-      const error = await denied('get_business_formation_references', { ...companyArgs, provider: 'doola', credential_id: credentials.doola.id, environment: 'sandbox' }); assert.doesNotMatch(JSON.stringify(error), /private-credential-dump|SQL error/);
-    } finally { service.references = original; }
+      const error = await denied('list_business_mcp_connections', companyArgs); assert.doesNotMatch(JSON.stringify(error), /private-credential-dump|SQL error/);
+    } finally { service.list = original; }
     const logs = JSON.stringify(app.get(LogService).query({ category: 'MCP' }));
-    assert.doesNotMatch(logs, /Private home address|private-founder@example|Private counsel notes|private-credential-dump|doc-access-private|_mcp_secret/);
+    assert.doesNotMatch(logs, /Private home address|private-founder@example|Private counsel notes|private-credential-dump|doc-access-private|access-private|_mcp_secret/);
     const events = await ds.getRepository('BusinessEvent').findBy({ company_id: company.id });
     assert.ok(events.some(event => event.actor_id === `mcp:${host.id}`));
-    assert.ok(events.every(event => event.actor_id !== owner.id), 'agent writes never impersonate a human owner');
+    // The provider sign-in in the formation test is the owner's own browser action, recorded as the owner.
+    assert.ok(events.filter(event => !/MCP (로그인을 시작|계정을 연결)/.test(event.message)).every(event => event.actor_id !== owner.id), 'agent writes never impersonate a human owner');
   });
   assert.deepEqual(unexpected, []);
   assert.deepEqual([...successful].sort(), tools.map(tool => tool.name).sort(), 'every registered Business tool has a successful real MCP call');

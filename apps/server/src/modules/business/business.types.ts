@@ -1,4 +1,3 @@
-import type { FormationConnector } from './connectors/formation-connector';
 export const BUSINESS_STAGES = ['formation', 'trademark', 'banking', 'payments', 'accounting', 'support', 'growth'] as const;
 export type BusinessStage = typeof BUSINESS_STAGES[number];
 export type TaskStatus = 'todo' | 'in_progress' | 'waiting' | 'done';
@@ -33,7 +32,7 @@ export interface ConnectorDescriptor {
   stage: BusinessStage;
   color: string;
   monogram: string;
-  mode: 'api' | 'handoff' | 'manual';
+  mode: 'api' | 'mcp' | 'handoff' | 'manual';
   summary: string;
   capabilities: string[];
   setup_note: string;
@@ -44,12 +43,13 @@ export interface ConnectorDescriptor {
   fields: ConnectorField[];
   environments: Array<'live' | 'sandbox'>;
   offering?: ServiceOffering;
-  formation?: { states: string[]; entity_types: string[] };
+  /** Provider-hosted MCP server signed in with the owner's provider account (mode 'mcp'). */
+  mcp?: import('./connectors/mcp-providers').McpProviderSpec;
 }
 export interface ServiceOffering {
   best_for: string;
   features: string[];
-  api_access: 'public' | 'partner' | 'unverified' | 'not_applicable';
+  api_access: 'public' | 'mcp' | 'partner' | 'unverified' | 'not_applicable';
   api_note: string;
   external_steps: string[];
   pricing: {
@@ -67,6 +67,5 @@ export interface ConnectorContext {
 }
 export interface BusinessConnector {
   descriptor: ConnectorDescriptor;
-  formation?: FormationConnector;
   sync?: (context: ConnectorContext) => Promise<ConnectorSnapshot>;
 }

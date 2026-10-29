@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, rawResourceUrl, type ApiError } from '../../api';
-import type { BusinessConnector, BusinessDetail, BusinessFormation, BusinessTaskEntry, BusinessTaskEntryInput, BusinessTaskJournal, BusinessRunInput } from '../../business.types';
+import type { BusinessDetail, BusinessTaskEntry, BusinessTaskEntryInput, BusinessTaskJournal, BusinessRunInput } from '../../business.types';
 import type { Comment } from '../../types';
 import { ticketStatusLabel } from '../../tickets/status';
 import { t } from '../../i18n/core';
@@ -11,7 +11,6 @@ import { Button, ErrorState, Textarea } from '../common';
 import Markdown from '../common/Markdown';
 import { BusinessExecutionStatus, BusinessWorkStartForm } from './BusinessWorkExecution';
 import { BusinessPageHeader } from './BusinessPageHeader';
-import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
 import { TaskForm } from './BusinessForms';
 import { dateTime, STAGES, TASK_STATUS } from './business.logic';
 
@@ -23,8 +22,8 @@ function RecordBody({ content, expanded = false }: { content: string; expanded?:
   return <div className="business-record-body"><Markdown text={content} /></div>;
 }
 
-export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onChanged, onOpenTask }: {
-  detail: BusinessDetail; taskId: string; connectors: BusinessConnector[]; onBack(): void; onChanged(): Promise<void>; onOpenTask(id: string): void;
+export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpenTask }: {
+  detail: BusinessDetail; taskId: string; onBack(): void; onChanged(): Promise<void>; onOpenTask(id: string): void;
 }) {
   useLocale();
   const { hasPermission } = useAuth();
@@ -39,7 +38,6 @@ export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onCh
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [formation, setFormation] = useState<BusinessFormation | null>(null);
   const [startForm, setStartForm] = useState(false);
   const [recordOnly, setRecordOnly] = useState(false);
   const pendingRun = useRef<BusinessRunInput | null>(null);
@@ -198,7 +196,6 @@ export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onCh
         <section className="business-panel" aria-label={t('최근 결정')}><h2>{t('최근 결정')}</h2>{journal?.decision ? <><RecordBody content={journal.decision.content} expanded /><small>{journal.decision.author} · {dateTime(journal.decision.created_at)}</small></> : <p className="business-muted">{t('업무를 진행하며 선택한 방향과 근거를 모아 보여줍니다.')}</p>}<details><summary>{t('직접 기록')}</summary><Button variant="ghost" disabled={busy} onClick={() => compose('decision')}>{t('결정과 근거 남기기')}</Button></details></section>
       </div>
       {task.notes && <details className="business-panel business-task-notes"><summary>{t('진행 메모 · 확인 근거')}</summary><RecordBody content={task.notes} expanded /></details>}
-      {task.stage === 'formation' && !!detail.formations?.length && <section className="business-panel"><h2>{t('이 회사의 설립 신청')}</h2><div className="business-formation-history">{detail.formations.map(item => <button key={item.id} onClick={() => setFormation(item)} disabled={!connectors.some(connector => connector.id === item.provider)}><span><strong>{item.summary.name}</strong><small>{item.environment === 'sandbox' ? t('테스트') : t('실제 신청')} · {FORMATION_STATUS[item.status]} · {item.provider_status || item.summary.state}</small></span><span>→</span></button>)}</div></section>}
       <section className="business-panel" aria-label={t('남은 추가·수정 요청')}>
         <div className="business-section-heading"><h2>{t('남은 추가·수정 요청')} <span className="business-count">{openRequests.length}</span></h2></div>
         {openRequests.length ? openRequests.map(request => <div key={request.id} className="business-open-request"><div><RecordBody content={request.content} /><small>{request.author} · {dateTime(request.created_at)}</small></div><details><summary>{t('직접 처리한 경우')}</summary><Button variant="secondary" disabled={busy} onClick={() => compose('resolution', '', request)}>{t('처리 결과 남기기')}</Button></details></div>) : <p className="business-muted">{t('처리를 기다리는 업무 요청이 없습니다.')}</p>}
@@ -243,6 +240,5 @@ export function BusinessTaskWorkspace({ detail, taskId, connectors, onBack, onCh
     </>}
     {startForm && <BusinessWorkStartForm company={company} taskId={taskId} initialContent={content.trim() || undefined} onClose={() => setStartForm(false)} onStarted={async () => { setContent(''); await load(); await onChanged(); setStartForm(false); }} />}
     {editing && journal && <TaskForm company={{ ...company, revision: journal.company_revision }} task={journal.task} tasks={detail.tasks} stage={journal.task.stage} onClose={() => setEditing(false)} onSaved={async deleted => { setEditing(false); if (deleted) { await onChanged(); onBack(); } else { await load(); await onChanged(); } }} />}
-    {formation && <BusinessFormationForm key={formation.id} company={{ ...company, revision: journal?.company_revision ?? company.revision }} connector={connectors.find(connector => connector.id === formation.provider)!} formations={[formation]} onClose={() => setFormation(null)} onChanged={async () => { await onChanged(); await load(); }} />}
   </div>;
 }

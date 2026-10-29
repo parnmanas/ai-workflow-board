@@ -40,7 +40,7 @@ export function CompanyForm({ company, onClose, onSaved }: { company?: BusinessC
   return <Modal isOpen onClose={() => { if (!busy) onClose(); }} title={company ? translate('회사 정보 · 캠페인 연결') : translate('새 비즈니스 시작')} maxWidth={600}
     footer={<><Button variant="secondary" disabled={busy} onClick={onClose}>{translate('취소')}</Button><Button disabled={!input.name.trim()} loading={busy} onClick={() => void save()}>{company ? translate('저장') : translate('워크플로 만들기')}</Button></>}>
     <div className="business-form">
-      {!company && <div className="business-form-intro"><BusinessIcon name="formation" size={30} /><p>{translate('AWB에 관리할 회사를 등록하고 6개 영역의 운영 워크플로를 만듭니다. 이미 설립한 회사도 추가할 수 있습니다.')}<br /><strong>{translate('커넥터에서 가격·기능을 비교하고 doola 내부 신청 또는 외부 설립 서비스를 선택하세요.')}</strong></p></div>}
+      {!company && <div className="business-form-intro"><BusinessIcon name="formation" size={30} /><p>{translate('AWB에 관리할 회사를 등록하고 6개 영역의 운영 워크플로를 만듭니다. 이미 설립한 회사도 추가할 수 있습니다.')}<br /><strong>{translate('커넥터에서 가격·기능을 비교하고 MCP로 연결하는 doola · Northwest 또는 외부 설립 서비스를 선택하세요.')}</strong></p></div>}
       <Input label={translate('회사 이름')} aria-label={translate('회사 이름')} value={input.name} maxLength={120} placeholder={translate('예: Acme Labs LLC')} onChange={e => setInput({ ...input, name: e.target.value })} />
       <div className="business-form-grid">
         <Select label={translate('회사 형태')} aria-label={translate('회사 형태')} value={input.entity_type} options={[{ value: 'LLC', label: translate('LLC') }, { value: 'CCorp', label: 'C-Corp' }, { value: 'other', label: translate('기타 / 미정') }]} onChange={e => setInput({ ...input, entity_type: e.target.value as BusinessCompanyInput['entity_type'] })} />

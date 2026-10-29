@@ -17,7 +17,6 @@ export const NON_CLI_CREDENTIAL_PROVIDERS: Readonly<Record<string, CredentialPro
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
   cloudflare: { label: 'Cloudflare', fields: ['api_token'] },
-  doola: { label: 'doola Partner', fields: ['api_key'] },
   mercury: { label: 'Mercury', fields: ['api_token'] },
   stripe: { label: 'Stripe', fields: ['secret_key'] },
   xero: { label: 'Xero', fields: ['access_token'] },

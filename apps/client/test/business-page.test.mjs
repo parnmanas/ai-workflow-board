@@ -37,7 +37,7 @@ async function render(t, { entry = '/business', permissions = ['business.manage'
     listBusinessCompanies: async () => [{ ...company }], listBusinessConnectors: async () => [connector], getBusinessCompany: async () => detail(),
     getBusinessCashbook: async (_id, month) => ({ month, company_revision: 0, currency: 'USD', entries: [], period: null, summary: { active_count: 0, unreconciled_count: 0, inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0 } }),
     listTrademarkIntegrations: async () => ({ connectors: TRADEMARK_CONNECTORS.map(c => c.descriptor), connections: [], records: [], actions: [] }),
-    listBusinessCredentials: async () => [{ id: 'cred-1', name: 'Stripe read key', provider: 'stripe' }], ...stubs,
+    listBusinessCredentials: async () => [{ id: 'cred-1', name: 'Stripe read key', provider: 'stripe' }], listBusinessMcp: async () => [], ...stubs,
   })) {
     original[key] = api[key]; api[key] = async (...args) => { calls.push([key, ...args]); return fn(...args); };
   }
@@ -187,7 +187,8 @@ test('next work excludes blocked/completed tasks and money respects zero-decimal
 });
 
 const offering = (price = '$297 / 년') => ({ best_for: '설립과 운영', features: ['LLC 설립', '등록 대리인'], api_access: 'partner', api_note: '파트너 키 필요', external_steps: ['본인 서명'], pricing: { plans: [{ id: 'starter', name: 'Starter', price, detail: '기본 설립' }], extra: '주정부 수수료 별도', url: 'https://example.invalid/pricing', checked_at: '2026-10-23' } });
-const doola = { ...connector, id: 'doola', name: 'doola', stage: 'formation', credential_provider: 'doola', secret_fields: ['api_key'], formation: { states: ['WY', 'DE'], entity_types: ['LLC'] }, offering: offering() };
+const doola = { ...connector, id: 'doola', name: 'doola', stage: 'formation', mode: 'mcp', credential_provider: undefined, secret_fields: [], environments: [], mcp: { url: 'https://mcp.doola.com', client: { kind: 'dynamic' }, owner_only_tools: [] }, offering: { ...offering(), api_access: 'mcp' } };
+const northwest = { ...doola, id: 'northwest', name: 'Northwest Registered Agent', mcp: { url: 'https://mcp.northwestregisteredagent.com/', client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true }, owner_only_tools: ['checkout_cart_tool'] }, offering: { ...offering('$39 + 주정부 수수료'), api_access: 'mcp' } };
 const atlas = { ...connector, id: 'atlas', name: 'Stripe Atlas', stage: 'formation', mode: 'handoff', offering: offering('$500 / 1회') };
 
 test('service comparison separates prices and API availability; choosing persists a plan without connecting or submitting', async t => {
@@ -205,32 +206,38 @@ test('service comparison separates prices and API availability; choosing persist
   const card = field(container, 'doola 서비스'); click(button(card, ui("이 서비스 선택")));
   await flush(); await flush();
   assert.deepEqual(calls.find(([name]) => name === 'chooseBusinessService').slice(1), ['company-1', 'formation', { provider: 'doola', plan: 'starter', revision: 0 }]);
-  assert.equal(calls.some(([name]) => ['connectBusiness', 'prepareBusinessFormation', 'submitBusinessFormation'].includes(name)), false);
+  assert.equal(calls.some(([name]) => ['connectBusiness', 'authorizeBusinessMcp', 'completeBusinessMcp'].includes(name)), false);
   assert.match(field(container, 'doola 서비스').textContent, uiPattern("우리 회사 선택"));
   click(field(container, 'Stripe 비교')); assert.match(container.textContent, uiPattern("같은 업무 영역의 서비스를 비교하세요. 비교 목록을 비우면 다른 영역을 선택할 수 있습니다."));
 });
 
-test('formation review requires explicit consent; an ambiguous result stays visible without automatic resubmission', async t => {
-  const action = { id: 'action-1', company_id: company.id, provider: 'doola', credential_id: 'credential-1', environment: 'live', payload_digest: 'reviewed-hash', revision: 1, status: 'draft', summary: { name: 'Native LLC', state: 'WY', entity_type: 'LLC', industry: 'Software' }, state_fee_cents: 10000, quoted_at: new Date().toISOString(), attempted_at: null, external_company_id: '', provider_status: '', last_error: '' };
-  const review = { formation: action, request: { customer: { firstName: 'Min', lastName: 'Kim', email: 'founder@example.invalid', countryOfResidence: 'KOR' }, company: { description: 'Software tools', responsibleParty: { address: { line1: '123 Test Road', city: 'Seoul', state: 'Seoul', country: 'KOR', postalCode: '06134', phone: '+821012345678' } } } } };
-  let current = detail({ formations: [action] }); let resolveSubmit;
-  const { container, calls } = await render(t, { entry: '/business/connectors', stubs: {
-    listBusinessConnectors: async () => [doola], getBusinessCompany: async () => structuredClone(current),
-    reviewBusinessFormation: async () => structuredClone(review),
-    submitBusinessFormation: () => new Promise(resolve => { resolveSubmit = resolve; }),
+test('MCP sign-in: paste-back completes only with the loopback address; payment tools are marked owner-only', async t => {
+  const loopback = 'http://localhost:47913/awb/oauth/callback';
+  let rows = [{ provider: 'doola', status: 'disconnected', connected_at: null, tools_synced_at: null, last_error: '', pending_mode: null, tools: [] },
+    { provider: 'northwest', status: 'disconnected', connected_at: null, tools_synced_at: null, last_error: '', pending_mode: null, tools: [] }];
+  const { container, calls } = await render(t, { entry: '/business/connectors?company=company-1&mcp=northwest', stubs: {
+    listBusinessConnectors: async () => [doola, northwest], listBusinessMcp: async () => structuredClone(rows),
+    authorizeBusinessMcp: async () => ({ url: 'https://id.northwestregisteredagent.com/auth?client_id=mcp-connector', mode: 'paste', redirect_uri: loopback }),
+    completeBusinessMcp: async () => { rows[1] = { ...rows[1], status: 'connected', connected_at: '2026-10-29T00:00:00Z', tools: [
+      { name: 'v2_client__get_companies_tool', title: '', description: 'Companies', read_only: true, owner_only: false },
+      { name: 'v2_client__add_formation_to_cart_tool', title: '', description: 'Cart', read_only: false, owner_only: false },
+      { name: 'v2_client__checkout_cart_tool', title: '', description: 'Checkout', read_only: false, owner_only: true }] }; return { company_id: 'company-1', provider: 'northwest' }; },
+    refreshBusinessMcpTools: async () => ({ count: 3 }),
   } });
-  click(button(container, ui("설립 신청 · 기록"))); await flush(); await flush();
-  const dialog = document.querySelector('[role="dialog"]'); assert.ok(dialog);
-  assert.match(dialog.textContent, /founder@example.invalid/); assert.match(dialog.textContent, /123 Test Road/);
-  assert.equal(button(dialog, ui("실제 설립 신청 제출")).disabled, true);
-  click(field(dialog, ui("설립 제출 확인"))); click(button(dialog, ui("실제 설립 신청 제출")));
-  assert.equal(calls.filter(([name]) => name === 'submitBusinessFormation').length, 1);
-  assert.equal(button(dialog, ui("닫기")).disabled, true);
-  review.formation = { ...action, status: 'uncertain', revision: 3, last_error: '제출 결과를 확정하지 못했습니다.' }; current.formations = [review.formation];
-  await act(async () => resolveSubmit(review.formation)); await flush();
-  assert.match(dialog.textContent, uiPattern("동일 요청으로 결과 재확인")); assert.equal(button(dialog, ui("동일 요청으로 결과 재확인")).disabled, true);
-  assert.equal(field(dialog, ui("설립 제출 확인")).checked, false);
-  assert.equal(calls.filter(([name]) => name === 'submitBusinessFormation').length, 1);
+  const opened = []; window.open = (...args) => { opened.push(args); return null; };
+  await flush();
+  const dialog = document.querySelector('[role="dialog"]'); assert.ok(dialog, 'the ?mcp= link opens the provider panel');
+  click(button(dialog, ui('{0} 로그인', { 0: 'Northwest Registered Agent' }))); await flush();
+  assert.equal(opened[0][0], 'https://id.northwestregisteredagent.com/auth?client_id=mcp-connector');
+  const input = field(dialog, '로그인 후 주소');
+  typeInto(input, 'https://evil.example/?code=x&state=y');
+  assert.equal(button(dialog, ui('연결 완료')).disabled, true, 'only the loopback address can be submitted');
+  typeInto(input, `${loopback}?state=s&code=c`);
+  click(button(dialog, ui('연결 완료'))); await flush(); await flush();
+  assert.deepEqual(calls.find(([name]) => name === 'completeBusinessMcp').slice(1), ['company-1', 'northwest', `${loopback}?state=s&code=c`]);
+  assert.match(dialog.textContent, uiPattern('소유자 직접 · 결제'));
+  assert.match(dialog.textContent, /v2_client__checkout_cart_tool/);
+  assert.match(field(container, 'Northwest Registered Agent 서비스').textContent, uiPattern('계정 연결 관리'));
 });
 
 const trademark = { ...emptyTrademark(company.name), id: 'mark-1', company_id: company.id, account_id: company.account_id, revision: 0, mark: 'Orbit', domicile_country: 'KR', classes: [9, 42], attorney_email: 'lawyer@example.invalid', attorney_name: 'Counsel', created_at: '2026-10-23T00:00:00Z' };

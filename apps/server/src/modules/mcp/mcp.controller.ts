@@ -40,7 +40,7 @@ import { BusinessWorkflowService } from '../business/business-workflow.service';
 import { BusinessMailWorkflowService } from '../business/business-mail-workflow.service';
 import { BusinessService } from '../business/business.service';
 import { BusinessCashbookService } from '../business/business-cashbook.service';
-import { BusinessFormationService } from '../business/business-formation.service';
+import { BusinessMcpService } from '../business/business-mcp.service';
 import { BusinessTrademarkService } from '../business/business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from '../business/business-trademark-integrations.service';
 import { MarketingAgentService } from '../marketing/marketing-agent.service';
@@ -195,7 +195,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly businessMailWorkflowService: BusinessMailWorkflowService,
     private readonly businessService: BusinessService,
     private readonly businessCashbookService: BusinessCashbookService,
-    private readonly businessFormationService: BusinessFormationService,
+    private readonly businessMcpService: BusinessMcpService,
     private readonly businessTrademarkService: BusinessTrademarkService,
     private readonly businessTrademarkIntegrationsService: BusinessTrademarkIntegrationsService,
     // Marketing(docs/marketing.md) — marketing-tools.ts 의 캠페인 에이전트 표면.
@@ -311,7 +311,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       businessMailWorkflowService: this.businessMailWorkflowService,
       businessService: this.businessService,
       businessCashbookService: this.businessCashbookService,
-      businessFormationService: this.businessFormationService,
+      businessMcpService: this.businessMcpService,
       businessTrademarkService: this.businessTrademarkService,
       businessTrademarkIntegrationsService: this.businessTrademarkIntegrationsService,
       marketingAgentService: this.marketingAgentService,

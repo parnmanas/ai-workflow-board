@@ -3,7 +3,6 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In } from 'typeorm';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { BusinessFormation } from '../../entities/BusinessFormation';
 import { BusinessCompany } from '../../entities/BusinessCompany';
 import { BusinessTask } from '../../entities/BusinessTask';
 import { BusinessTaskEntry } from '../../entities/BusinessTaskEntry';
@@ -89,8 +88,7 @@ export class BusinessService {
 
   async detail(id: string, accountId: string, canViewMarketing = false) {
     const company = await this.company(id, accountId);
-    const [formations, tasks, connections, events, campaigns, formationWork] = await Promise.all([
-      this.ds.getRepository(BusinessFormation).find({ where: { company_id: id, account_id: accountId }, order: { created_at: 'DESC' } }),
+    const [tasks, connections, events, campaigns, formationWork] = await Promise.all([
       this.ds.getRepository(BusinessTask).find({ where: { company_id: id, account_id: accountId }, order: { position: 'ASC', created_at: 'ASC' } }),
       this.ds.getRepository(BusinessConnection).find({ where: { company_id: id, account_id: accountId }, order: { created_at: 'ASC' } }),
       this.ds.getRepository(BusinessEvent).find({ where: { company_id: id, account_id: accountId }, order: { created_at: 'DESC', id: 'DESC' }, take: 40 }),
@@ -101,7 +99,7 @@ export class BusinessService {
     ]);
     const ids = tasks.map(t => t.ticket_id).filter((v): v is string => !!v);
     const tickets = ids.length ? await this.ds.getRepository(Ticket).find({ where: { id: In(ids), account_id: accountId }, select: ['id', 'title', 'status'] }) : [];
-    return { company, formation_work: formationWork, formations: formations.map(({ customer_id, encrypted_request, credential_digest, ...safe }) => safe), tasks: tasks.map(task => ({ ...task,
+    return { company, formation_work: formationWork, tasks: tasks.map(task => ({ ...task,
       blocked_by: task.depends_on.filter(id => tasks.find(t => t.id === id)?.status !== 'done'),
       ticket: tickets.find(t => t.id === task.ticket_id) || null,
     })), connections, events, campaigns };

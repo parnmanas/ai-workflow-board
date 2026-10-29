@@ -3,7 +3,7 @@ import type { BusinessStage } from './business.types';
 // These are operating tasks, not legal determinations. Completion is explicitly recorded by a person.
 export const BUSINESS_TEMPLATE: Array<{ key: string; stage: BusinessStage; title: string; description: string; requires: string[] }> = [
   { key: 'formation_plan', stage: 'formation', title: '회사 이름과 설립 계획 정하기', description: '사업 목적, 설립 주, LLC / C-Corp 형태, 소유 구조를 정리하세요.', requires: [] },
-  { key: 'formation_file', stage: 'formation', title: '설립 신청 · 서명 · 서류 확인', description: 'doola 또는 Atlas에서 신청하고 주정부 등록 서류를 확인하세요.', requires: ['formation_plan'] },
+  { key: 'formation_file', stage: 'formation', title: '설립 신청 · 서명 · 서류 확인', description: 'doola · Northwest(MCP 연결) 또는 Atlas 등에서 신청하고 주정부 등록 서류를 확인하세요.', requires: ['formation_plan'] },
   { key: 'formation_ein', stage: 'formation', title: 'EIN 발급과 법인 문서 보관', description: 'EIN 발급 확인서와 운영 계약서를 보관하고 필요한 후속 서명을 마치세요.', requires: ['formation_file'] },
   { key: 'trademark_scope', stage: 'trademark', title: '상표와 실제 권리자 · 상품 범위 정리', description: '문자/로고, 실제 소유자와 본점 소재지, 상품·서비스, 사용 여부와 증빙을 정리하세요. 미국 LLC 설립만으로 상표권이 생기지는 않습니다.', requires: [] },
   { key: 'trademark_search', stage: 'trademark', title: '선행 상표 조사와 충돌 검토', description: 'USPTO 검색과 시장의 실제 사용을 조사하고 변호사에게 등록 가능성과 지정상품 검토를 요청하세요.', requires: ['trademark_scope'] },

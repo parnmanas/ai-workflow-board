@@ -62,7 +62,8 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
     }
     else if (path === `/business/companies/${company.id}/tasks/task-header`) body = journal;
     else if (path === '/tickets/ticket-header/comments') body = [{ id: 'comment-header', content: 'Agent research and supporting evidence', author: 'Agent', author_type: 'agent', created_at: '2026-10-25T01:30:00Z', attachments: [] }];
-    else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company: currentCompany, tasks: [task], formation_work: journal.runs[0] || null, connections: [], campaigns: [], events: [], formations: [] };
+    else if (path.endsWith('/mcp')) body = [];
+    else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company: currentCompany, tasks: [task], formation_work: journal.runs[0] || null, connections: [], campaigns: [], events: [] };
     else if (path.includes('/cashbook/')) body = { month: '2026-10', currency: 'USD', company_revision: 0, entries: [], period: null, summary: { inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0, active_count: 0, unreconciled_count: 0 } };
     else if (path === '/business/mail/connections') body = { connections: [{ id: 'mail-header', name: longName, config: { addresses: ['ops@example.test'] }, enabled: true, purpose: 'operations' }], connectors: [], credentials: [] };
     else if (path === '/business/mail/messages') body = { messages: [], total: 0, offset: 0, limit: 50 };
@@ -319,7 +320,7 @@ for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, {
 test(`first-time Business agent setup uses the shared folder browser at ${size.width}×${size.height}`, async ({ page }, testInfo) => {
   activeLocale = 'ko'; await page.setViewportSize(size);
   const f = await fixture(page);
-  await page.route('**/api/business/companies/company-header', route => route.fulfill({ json: { company, tasks: [], formations: [], connections: [], events: [], campaigns: [] } }));
+  await page.route('**/api/business/companies/company-header', route => route.fulfill({ json: { company, tasks: [], connections: [], events: [], campaigns: [] } }));
   await page.route('**/api/agent-templates', route => route.fulfill({ json: [{ id: 'business-template', name: 'Business assistant', host_id: runtime.manager_agent_id, cli: runtime.cli, model: null, effort: null, runtime_config: runtime.runtime_config }] }));
   await page.goto('/business?company=company-header');
   await page.getByRole('button', { name: ui('회사 설립 맡기기'), exact: true }).click();

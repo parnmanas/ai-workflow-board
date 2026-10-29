@@ -32,8 +32,8 @@ Business 대메뉴는 회사 설립, 상표·브랜드 보호, 은행, 결제, �
   회사 등록 화면에도 관리용 등록과 실제 법인 설립 신청을 구분해 안내한다.
 - 사용자 정의 업무, 선행 조건, 담당자 이름, 기한, 진행 메모, 기존 AWB 티켓 연결 및 새 티켓 생성.
   티켓의 실행 상태를 함께 보여 주되 회사 업무를 자동 완료하지 않는다.
-- 26개 서비스·직접 처리 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
-- doola Partner API로 1인 LLC(WY·DE) 신청서 작성 → 비용 검토 → 명시적 제출 → 서명 링크 → 상태 조회.
+- 27개 서비스·직접 처리 카탈로그, 같은 영역 최대 3개 비교, 플랜별 가격·과금 단위·추가 비용·출처·확인일, 회사별 서비스/플랜 선택 저장. 선택만으로 구매하거나 연결을 바꾸지 않는다.
+- doola · Northwest Registered Agent의 **공급자 MCP**에 소유자가 고객 계정으로 로그인하고, 회사 설립 업무의 에이전트가 그 연결로 설립 정보 입력·진행 확인을 맡는다. 결제는 소유자가 공급자 화면에서 한다.
 - 커넥터별 키 등록/선택, 테스트·운영 환경, 연결 설정, 명시적인 조회, 연결 해제.
 - 마케팅의 캠페인 실행·승인함·예산·고객 피드백은 기존 마케팅 구현을 사용한다.
 - 상표별 출원 준비·변호사·회신·기한 기록, 영문 메일 초안과 Resend·Gmail·Microsoft 365 검토 후 발송, 회신 자동 수집.
@@ -41,8 +41,8 @@ Business 대메뉴는 회사 설립, 상표·브랜드 보호, 은행, 결제, �
 - 위 비즈니스 기능 전체를 MCP 도구로 제공한다. REST와 같은 서비스·소유권·revision·검토 원문 검사를 거쳐 실행한다. 사용 순서는 `get_business_workflow_guide`에서 조회한다.
 
 회사를 AWB에 등록하거나 체크리스트를 완료하는 것은 법인 설립·계좌 개설·신고 완료를 뜻하지 않는다.
-doola는 파트너 계약과 키를 갖춘 사용자의 내부 설립 신청을 지원한다. 다른 설립 서비스는 외부에서
-신청하고 AWB에서 업무를 기록한다. 운영 API 조회 어댑터는 9개이며 나머지 15개는 비교·선택·외부
+doola · Northwest는 공급자 MCP 연결로 설립을 진행한다(파트너 계약·API 키 불필요). 다른 설립 서비스는 외부에서
+신청하고 AWB에서 업무를 기록한다. 공급자 MCP 커넥터 2개, 운영 API 조회 어댑터 8개, 나머지 15개는 비교·선택·외부
 진행용이다. 여기에 키가 필요 없는 직접 설립·직접 회계 옵션 2개를 제공한다. 공급자 자체의 API 제공 여부와 AWB가 구현한 기능을 별도로 표시한다.
 상표의 기존 Resend 발송(`BusinessEmailConnector`)과 새 연동 6개(`TrademarkConnector`)는 별도 레지스트리이며 위 운영 조회 어댑터 수에 포함하지 않는다.
 KYB, 송금, 결제 생성·환불, 공급자 장부 쓰기·세무 신고, 고객 응답은 해당 서비스에서 처리한다. 직접 회계는 아래 범위의 AWB 입출금 보조 장부에 기록한다.
@@ -53,7 +53,6 @@ KYB, 송금, 결제 생성·환불, 공급자 장부 쓰기·세무 신고, 고�
 
 | 커넥터 | 이번 구현 | 인증 / 환경 | 공식 문서 |
 | --- | --- | --- | --- |
-| doola | 1인 LLC 신청·서명 링크, 기존/신규 회사의 설립 상태, EIN 발급 여부, 연차 보고 기한 | Partner API 키, 회사 ID. sandbox/live | [Partner API](https://docs.doola.com/api/introduction), [Get company](https://docs.doola.com/api/api-reference/companies/get-a-company), [Compliance calendar](https://docs.doola.com/api/api-reference/compliance/get-a-companys-compliance-calendar) |
 | Mercury | 계좌 수, 최근 입출금 최대 40건 | 읽기 전용 API 토큰. sandbox/live | [Accounts](https://docs.mercury.com/reference/getaccounts), [Transactions](https://docs.mercury.com/reference/listtransactions) |
 | Stripe | 통화별 사용 가능·대기 잔액, 최근 순액 정산 거래 25건 | 조회 권한을 가진 secret/restricted key. sandbox/live | [Balance](https://docs.stripe.com/api/balance), [Balance transactions](https://docs.stripe.com/api/balance_transactions/list) |
 | Xero | 조직 정보, 승인된 매출 청구서 첫 페이지(최대 50건) | OAuth access token + tenant ID. live | [Accounting API](https://developer.xero.com/documentation/api/accounting/overview/) |
@@ -131,38 +130,58 @@ MCP에서도 `assess_business_self_service`로 조건을 조회·미리 평가�
 `close_business_cashbook_month`, `reopen_business_cashbook_month`가 화면과 같은 서비스를 호출한다. 미확인 사실에 대한 답을 에이전트가 추측해서 채우면 안 된다.
 조회/조건 평가는 읽기 키로, 변경은 full 키로 가능하다. 장부 변경 자체가 외부 송금·세금 신고를 실행하지 않는다.
 
-## 내부 설립 신청
+## 공급자 MCP로 설립하기 (doola · Northwest)
 
-공식 계약: [Company formation](https://docs.doola.com/api/formation),
-[인증·중복 방지](https://docs.doola.com/api/authentication),
-[SS-4·8821 서명](https://docs.doola.com/api/non-us-formation).
+doola Partner API(화이트라벨 Formation API)는 운영 사용에 파트너 계약이 필요한 도매 기능이라 제거했다
+(2026-10-29, 운영 DB의 신청·연결·credential 0건 확인). 대신 두 공급자가 일반 고객에게 공개한 원격 MCP 서버를
+소유자의 고객 계정으로 연결한다. 정의는 `connectors/mcp-providers.ts`, 실행은 `BusinessMcpService`.
 
-1. 회사 정보를 미국 LLC로 등록하고 doola 카드의 **설립 신청 · 기록**을 연다.
-2. 파트너 키와 sandbox/live 환경을 고르고 공식 reference API에서 업종과 주정부 수수료를 가져온다.
-3. 1인 자연인 소유(100%)·책임자의 영문 이름·주소·이메일·전화, WY/DE와 사업 내용을 입력한다.
-   회사 우편 수취 주소는 소유자 주소, 사업장 주소는 등록 대리인 주소다. 다인 소유·C-Corp·다른 주는
-   외부 신청을 이용한다. SSN은 수집하지 않으므로 SS-4 서명 단계가 남는다.
-4. 서버에서 다시 확인한 주정부 수수료와 정규화된 신청 내용 전체를 검토한다. 파트너 계약 비용은
-   별도이며 일반 doola 구독 가격을 합산해 API 청구 총액으로 표시하지 않는다. 검토는 30분 유효하다.
-5. 확인 체크 후 **실제/테스트 신청 제출**. 서버는 원래 키 지문·payload digest·수수료를 대조하고
-   DB claim 후 고객 생성 → 회사 생성을 호출한다. 네트워크 I/O는 DB 트랜잭션 밖에서 수행한다.
-6. 접수 후 기존 doola 연결이 없을 때 조회 연결을 만든다. 기존 연결은 덮어쓰지 않는다. SS-4 또는
-   공급자가 추가 요청한 Form 8821 서명 링크를 발급받아 본인이 서명한다. 접수는 설립 완료가 아니다.
-   상태는 조회 버튼으로 확인하며 업무 완료는 증빙을 확인한 사람이 기록한다.
+| 공급자 | MCP 서버 | 로그인 | 결제 |
+| --- | --- | --- | --- |
+| doola | `https://mcp.doola.com` (Streamable HTTP) | OAuth `dds.doola.com`, 동적 클라이언트 등록 + PKCE | 에이전트가 만든 Stripe 결제 링크에서 소유자가 결제 |
+| Northwest Registered Agent | `https://mcp.northwestregisteredagent.com/` | Keycloak `id.northwestregisteredagent.com`. 익명 등록은 거부(“Trusted Hosts”)되어 공개 클라이언트 `mcp-connector` 사용 | `checkout_cart_tool`·`pay_invoice_tool`이 **저장된 결제수단으로 청구** — AWB는 대신 실행하지 않는다 |
 
-`draft → submitting → submitted | uncertain`. 회사·공급자·환경별 기록은 하나이며 제출을 시도한
-신청은 수정/삭제하거나 새로 만들 수 없다. 제출 전 초안만 삭제·재작성할 수 있다. 모호한 결과는
-실패로 단정하지 않고 사용자가 원래 신청서·고정 Idempotency-Key로 재확인한다. 자동 재전송하지
-않으며 동시 제출은 CAS로 차단한다. 프로세스 중단 후 `submitting`은 2분 뒤 같은 요청으로 재확인한다.
-수수료나 원래 키가 달라진 제출 시도는 재확인도 막고 공급자 확인을 안내한다.
+로그인(`POST companies/:id/mcp/:provider/authorize`):
 
-고객 정보는 `BusinessFormation.encrypted_request`에 암호화해 저장하고 성공 확정 후 지운다.
-일반 회사 상세에는 요약만 반환한다. 본인 Account의 검토 REST와 MCP 도구에서 원문을 복호화하며 REST는 `no-store`다.
-SSN·EIN 원문·고객 메시지·서명 URL은 조회 스냅샷이나 활동 기록에 넣지 않는다. HTTP body logging을
-켜도 설립 경로와 credential 쓰기의 본문은 기록하지 않는다. 서명 URL은 요청한 사용자 화면 또는 권한을 확인한 MCP 호출에만 반환한다. 에이전트는 이 단기 링크를 실제 서명자에게 비공개로 전달한다.
-인스턴스 이관 시 원문은 기존 credential과 같은 TLS 복호화/재암호화 경로를 사용한다. 키 지문과
-신청 digest는 공급자 키에서 안정적으로 계산해 AWB 암호화 키가 달라져도 재시도 정체성을 보존한다.
-설립 커넥터의 웹훅 수신·자동 주기 동기화·파트너 비용 결제 화면은 아직 제공하지 않는다. 상표 연동의 주기 수집·웹훅과는 별개다.
+- **redirect**: 동적 등록 공급자이고 `AWB_PUBLIC_URL`이 있으면 `/api/business-mcp/oauth/callback`으로 돌아온다.
+  상표 OAuth와 같이 단일 사용 state와 같은 브라우저의 HttpOnly 쿠키로 묶는다.
+- **paste**: Northwest의 `mcp-connector`는 claude.ai·chatgpt.com·`http://localhost:<port>/…`만 redirect로 받는다(확인 2026-10-29).
+  AWB는 `http://localhost:47913/awb/oauth/callback`을 쓰고, 로그인 뒤 브라우저에 뜨는 “연결할 수 없음” 화면의 전체 주소를
+  소유자가 붙여 넣는다(`…/complete`). 붙여 넣기는 로그인을 시작한 소유자·Account만 완료할 수 있다. `AWB_PUBLIC_URL`이
+  없으면 doola도 같은 방식으로 진행한다.
+
+OAuth·MCP 요청은 공급자별로 고정한 HTTPS origin에만 보내며 redirect를 따르지 않는다. 발견 문서가 다른 도메인의
+authorize/token/registration 주소를 알리면 로그인을 중단한다. 토큰·클라이언트 등록·도구 목록은
+`BusinessMcpConnection.encrypted_data`에 암호화해 저장하고 REST·MCP 응답·로그에 내보내지 않는다. 갱신 토큰은 연결마다
+한 번에 하나의 요청만 회전시키며, 공급자가 거절한 grant(`invalid_grant`)일 때만 로그인을 끝낸다.
+
+도구 호출 정책(`call`):
+
+- 공급자가 `readOnlyHint: true`로 표시한 도구는 바로 실행한다.
+- 그 밖의 도구는 사용자가 그 작업을 명시적으로 지시한 경우에만 `confirm: true`로 실행한다. 확인 없는 호출은 공급자에 닿지 않는다.
+- `owner_only_tools`(Northwest 체크아웃·청구서 결제·자동결제 등록)는 `confirm`과 무관하게 거부한다. 접두사(`v2_client__…`)가 붙어도 같다.
+  이 목록은 공급자 도구 카탈로그(2026-10-22)에서 정했으므로 공급자가 이름을 바꾸면 그 도구는 `confirm` 단계로 떨어진다 — 목록을 다시 확인할 것.
+- 읽기 전용이 아닌 호출은 회사 활동 기록에 도구 이름만 남긴다(인수·결과 본문은 남기지 않음). 결과는 `content_untrusted`/`structured_untrusted`로 6만 자까지 반환한다.
+
+회사 설립 업무의 실행 지시문이 에이전트에게 이 경로를 안내한다. 공급자 응답은 비신뢰 자료이며, 결제·본인 서명·접수 완료 확인은 소유자가 한다.
+
+### doola · Northwest 서비스와 가격 (확인 2026-10-29)
+
+| 항목 | doola | Northwest Registered Agent |
+| --- | --- | --- |
+| 설립 패키지 | Starter **$297/년** (LLC·C-Corp, EIN, 등록 대리인, 미국 주소, 운영 계약서) | 설립 **$39 + 주정부 수수료** (1년 등록 대리인 포함) |
+| 상위 플랜 | Tax & Compliance **$1,999/년** (연방·주 세금 신고·연차 보고), Business-in-a-Box **$2,999/년 또는 $329/월** (전담 장부 포함), 장부 Pulse $300/년 | LLC 상위 패키지(EIN·운영 계약서 포함)는 검색 요약에 $139로 나오나 공식 페이지 미확인 |
+| 갱신 | 플랜 연간 요금 | 등록 대리인 **$125/년·주**(1–4개 주), $100/년·주(5개 주 이상), 우편 스캔 포함 |
+| 주정부 수수료 | 별도(doola가 대신 납부) | 별도 (WY $100, DE $110) |
+| 범위 | 미국 비거주자·SSN 없이 가능, Mercury 계좌 연계, ITIN·Form 5472 옵션 | 50개 주 + DC, SSN 없이 EIN, 연차 보고, 우편 5건 무료 전달 후 $15/건, 도메인·메일·전화 |
+| MCP | 계정 생성·상호·주·패키지 선택 → Stripe 결제 → 구성원·주소·책임자 입력. 접수 주는 공식 안내가 엇갈림(WY 전용 vs 50개 주) | 114개 도구(2026-10): 회사·신고·서류·청구서·장바구니·등록 대리인·도메인·메일·전화. 장바구니 담기는 무료, 체크아웃은 저장된 결제수단 청구 |
+| 계약 | 없음(고객 계정). 화이트라벨 API는 파트너 계약 필요 | 없음(고객 계정) |
+
+출처: [doola 가격](https://www.doola.com/pricing/), [doola MCP](https://www.doola.com/blog/doola-mcp-form-your-llc-inside-ai-chat/),
+[doola Formation API](https://www.doola.com/blog/introducing-doola-formation-api-for-b2b/),
+[Northwest MCP](https://www.northwestregisteredagent.com/ai/mcp), [Northwest MCP 도구](https://www.northwestregisteredagent.com/ai/mcp/tools),
+[Northwest 등록 대리인](https://www.northwestregisteredagent.com/registered-agent). Northwest 사이트는 자동 조회를 막아 2026-10의 웹 보관본으로 확인했다.
+카드에 표시하는 가격은 `service-offerings.ts`가 단일 원천이다.
 
 ## 메일 자동화 커넥터
 
@@ -249,14 +268,14 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 | 회사·캠페인 연결 | `list_business_companies`, `get_business_company`, `create_business_company`, `update_business_company` |
 | 서비스·업무 | `choose_business_service`, `save_business_task`, `delete_business_task`, `initialize_business_trademark_tasks`, `create_business_task_ticket` |
 | 운영 커넥터 | `configure_business_connector`, `sync_business_connector`, `disconnect_business_connector` |
-| 설립 | `get_business_formation_references`, `prepare_business_formation`, `review_business_formation`, `discard_business_formation`, `submit_business_formation`, `get_business_formation_signature` |
+| 설립 (공급자 MCP) | `list_business_mcp_connections`, `authorize_business_mcp_connector`, `list_business_mcp_tools`, `call_business_mcp_tool`, `disconnect_business_mcp_connector` |
 | 상표·변호사 메일 | `list_business_trademarks`, `save_business_trademark`, `draft_business_trademark_mail`, `prepare_business_trademark_mail`, `review_business_trademark_mail`, `discard_business_trademark_mail`, `send_business_trademark_mail`, `refresh_business_trademark_mail_delivery`, `reconcile_business_trademark_mail` |
 | 상표 연동 | `list_business_trademark_integrations`, `configure_business_trademark_integration`, `disconnect_business_trademark_integration`, `authorize_business_trademark_integration`, `sync_business_trademark_integration`, `get_business_trademark_integration_options` |
 | 메일 계정·계약 실행 | `prepare_business_trademark_action`, `review_business_trademark_action`, `discard_business_trademark_action`, `send_business_trademark_action`, `reconcile_business_trademark_action`, `get_business_trademark_document` |
 | 표준 메일 연결·수신·확인·발신 | `list_business_mail_connections`, `configure_business_mail_connection`, `sync_business_mail`, `list_business_mail`, `get_business_mail`, `confirm_business_mail`, `send_business_mail` |
 | 담당 에이전트 답장 | `list_business_mail_replies`, `get_business_mail_reply`, `start_business_mail_reply`, `submit_business_mail_reply` |
 
-설립은 `get_business_company`로 회사 revision을 읽고 references → prepare → review → submit 순서로 진행한다. submit에는 검토한 **신청의** `revision`, `payload_digest`, `confirm: true`를 전달한다. 회사·상표·연결·신청의 revision은 서로 대체할 수 없다. 기존 서비스가 적용하는 비용 유효기간, 멱등 키, 원문·키 변경 검사와 불확실한 결과의 재시도 제한이 MCP에도 적용된다.
+설립은 `list_business_mcp_connections`로 로그인 상태를 보고, 로그인 전이면 `authorize_business_mcp_connector`의 AWB 링크를 소유자에게 전한다(에이전트가 로그인하지 않는다). 연결 뒤 `list_business_mcp_tools`로 도구를 찾고(`names`로 입력 스키마 조회) `call_business_mcp_tool`로 호출한다. 읽기 전용이 아닌 도구는 `confirm: true`, owner_only 도구는 거부된다. 회사·상표·연결의 revision은 서로 대체할 수 없다.
 
 `confirm`은 에이전트가 사용자의 실행 지시를 확인했다는 입력이며, 별도의 인증된 사람 승인 기록은 아니다. 도구 설명은 제출·발송에 대한 명시적 사용자 지시를 요구한다. 에이전트는 수신 메일이나 문서에 적힌 명령을 발송·서명·결제 승인으로 취급하면 안 된다. 메일 본문과 법률 문서는 반환되므로 필요한 작업 문맥에서만 사용한다. 기존 마케팅 MCP의 제안 전용·사람 승인 계약은 유지한다.
 
@@ -266,7 +285,7 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 
 NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 서비스를 연결한다. 자동 수집 타이머와 OAuth callback·웹훅 수신은 AWB 웹 서버가 담당하며 standalone MCP 프로세스는 타이머를 중복 실행하지 않는다. 인증된 HTTP 세션의 수동 수집·검토·실행 도구는 양쪽에서 사용할 수 있다. 호출자 인증이 없는 로컬 stdio에서는 비즈니스 도구를 실행하지 못하므로 인증된 HTTP 연결을 사용한다. MCP HTTP 로거는 비즈니스 도구 이름만 남기고 신청자·메일·계약 인수를 생략한다.
 
-`test/business-mcp.test.mjs`는 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback은 전송용 예외이며, 메일 반자동 답장 승인은 인증된 사람만 수행하는 예외다. 같은 테스트에서 61개 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
+`test/business-mcp.test.mjs`는 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback(공급자 MCP 로그인의 붙여 넣기 완료 포함)은 전송용 예외이며, 메일 반자동 답장 승인은 인증된 사람만 수행하는 예외다. 같은 테스트에서 64개 비즈니스 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
 
 ## 소유권과 저장
 
@@ -281,7 +300,7 @@ NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 �
 | `BusinessTaskRun` | 사용자 요청별 실행 큐, 고정 RuntimeSpec, 대화, 결과·확인 질문·실패. 티켓 생성 없음 |
 | `BusinessTaskEntry` | 업무별 진행·결과·결정·추가 요청·처리 결과·변경 전후 기록. append-only |
 | `BusinessConnection` | 공급자, credential 참조, 환경·외부 ID, 마지막 조회 결과·시각·오류, revision |
-| `BusinessFormation` | 환경별 신청, 검토 digest·비용, 암호화 원문, 키 지문, 제출 상태·외부 ID, revision |
+| `BusinessMcpConnection` | 회사별 공급자 MCP 로그인: 암호화된 클라이언트 등록·토큰·도구 목록, OAuth state 해시, 상태·오류, revision |
 | `BusinessTrademark` | 암호화된 상표·권리자·변호사·계약 링크·출원번호·기한·회신 기록, revision |
 | `BusinessTrademarkMail` | 암호화된 검토 원문, 키 지문·검토 digest, 발송 시도·결과·전달 상태, revision |
 | `BusinessTrademarkIntegration` | 상표별 커넥터·키 참조, 암호화 설정·OAuth 토큰·커서, 자동 수집 일정·lease |
@@ -383,7 +402,7 @@ credential을 삭제하지 않는다. 조회 시에도 유효 소유권·provide
   60초 후 사용자가 다시 조회할 수 있다. 외부 변경을 실행하지 않으므로 조회 재시도는 지출을 발생시키지 않는다.
 - 조회 실패 시 이전 성공 스냅샷과 기준 시각을 유지하고 오래된 데이터라는 표시를 붙인다.
   공급자 오류 본문·헤더·키를 응답이나 활동 이력에 복사하지 않는다.
-- 일반 운영 조회는 GET 전용이며, 설립은 `FormationConnector`, 변호사 메일은 `BusinessEmailConnector`의 별도 POST를 사용한다. 공급자가 정한 HTTPS 주소만 사용하며 redirect 거부, 요청 제한 시간 15초, 응답 최대 2 MB를 적용한다.
+- 일반 운영 조회는 GET 전용이며, 공급자 MCP 설립은 `BusinessMcpService`, 변호사 메일은 `BusinessEmailConnector`의 별도 POST를 사용한다. 공급자가 정한 HTTPS 주소만 사용하며 redirect 거부, 요청 제한 시간 15초, 응답 최대 2 MB를 적용한다.
 
 ## 커넥터 추가
 
@@ -396,7 +415,7 @@ credential을 삭제하지 않는다. 조회 시에도 유효 소유권·provide
 5. 인증·환경·응답 매핑 테스트를 추가한다. 사용자 지정 URL이 필요해지면 기존 SSRF 가드와
    DNS/redirect 방어를 함께 도입한다. 현재는 임의 origin·헤더를 입력받지 않는다. CS subdomain은 공급자의 고정 도메인 안에서만 선택한다.
 
-설립 어댑터는 `FormationConnector`와 `BusinessFormationService`, 변호사 메일은 `BusinessEmailConnector`와 `BusinessTrademarkService`의 검토/실행 경로를 사용한다. 쓰기 커넥터를 확장할 때는 조회 함수에 POST를 끼워 넣지 않는다. 승인 대상 payload 고정,
+공급자가 고객용 원격 MCP를 제공하면 `connectors/mcp-providers.ts`에 URL·고정 인증 origin·클라이언트 방식·owner_only 도구를 선언한다(어댑터 코드 없음, 회귀 `test/business-mcp-connectors.test.mjs`). 변호사 메일은 `BusinessEmailConnector`와 `BusinessTrademarkService`의 검토/실행 경로를 사용한다. 쓰기 커넥터를 확장할 때는 조회 함수에 POST를 끼워 넣지 않는다. 승인 대상 payload 고정,
 idempotency, 실행 claim, 모호한 결과 대조 및 감사 기록을 별도 계약으로 먼저 설계해야 한다.
 상표 확장은 `TrademarkConnector`와 `trademark-registry.ts`, `BusinessTrademarkIntegrationsService`를 사용한다. OAuth·수집·발송·웹훅·문서 메서드는 기능별로 선언하며 카드·설정 폼은 공통으로 렌더한다. 상세 계약과 설정은 [상표 연동 문서](trademarks.md#연동-저장소와-확장-계약)를 따른다.
 기존 마케팅 결제/외부 발신의 승인 경로도 유지한다.
@@ -404,7 +423,7 @@ idempotency, 실행 claim, 모호한 결과 대조 및 감사 기록을 별도 �
 ## 검증
 
 - `npm run build`
-- 서버: `node --test --test-force-exit test/business-http.test.mjs test/business-connectors.test.mjs test/business-formation.test.mjs test/business-trademark.test.mjs test/business-trademark-integrations.test.mjs`
+- 서버: `node --test --test-force-exit test/business-http.test.mjs test/business-connectors.test.mjs test/business-mcp-connectors.test.mjs test/business-trademark.test.mjs test/business-trademark-integrations.test.mjs`
 - 클라이언트: `node --import tsx --test --test-force-exit test/business-page.test.mjs`
 - 브라우저: 루트에서 `npm run test:e2e:business -w client` (서버 dist가 먼저 필요)
 

@@ -29,7 +29,7 @@ const REDACTED_BODY_KEYS = new Set([
 const MAX_PAYLOAD_BYTES = 10_000;
 const CREDENTIAL_REVEAL_PATH = /^\/api\/credentials\/[^/]+\/reveal\/?$/;
 // Company details include financial audit events; legal, cashbook and DIY bodies are private.
-const BUSINESS_PRIVATE_PATH = /^\/api\/business\/companies\/[^/]+(?:\/?$|\/(?:tasks(?:\/|$)|formation-work(?:\/|$)|formations?\/|trademarks(?:\/|$)|cashbook\/|self-service\/|services\/))/;
+const BUSINESS_PRIVATE_PATH = /^\/api\/business\/companies\/[^/]+(?:\/?$|\/(?:tasks(?:\/|$)|formation-work(?:\/|$)|mcp(?:\/|$)|trademarks(?:\/|$)|cashbook\/|self-service\/|services\/))/;
 
 // Body capture is the dominant CPU cost in this interceptor: capPayload
 // runs `JSON.stringify(responseBody)` on EVERY HTTP response that lands

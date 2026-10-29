@@ -54,7 +54,6 @@ const OLD_PROVIDER_FIELDS = {
   github: { label: 'GitHub', fields: ['token'] },
   gitlab: { label: 'GitLab', fields: ['token'] },
   cloudflare: { label: 'Cloudflare', fields: ['api_token'] },
-  doola: { label: 'doola Partner', fields: ['api_key'] },
   mercury: { label: 'Mercury', fields: ['api_token'] },
   stripe: { label: 'Stripe', fields: ['secret_key'] },
   xero: { label: 'Xero', fields: ['access_token'] },
@@ -240,7 +239,7 @@ test('derived constants equal the old hand-written literals', () => {
   }
   assert.deepEqual(
     Object.keys(NON_CLI_CREDENTIAL_PROVIDERS),
-    ['github', 'gitlab', 'cloudflare', 'doola', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'mail', 'resend', 'resend_inbound', 'microsoft_oauth', 'docusign_oauth', 'clio_oauth', 'uspto_tsdr', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
+    ['github', 'gitlab', 'cloudflare', 'mercury', 'stripe', 'xero', 'chatwoot', 'quickbooks', 'intercom', 'zendesk', 'freshdesk', 'mail', 'resend', 'resend_inbound', 'microsoft_oauth', 'docusign_oauth', 'clio_oauth', 'uspto_tsdr', 'openai', 'google_oauth', 'git_http', 'npm', 'custom'],
   );
   assert.deepEqual(plain(REVEALABLE_OAUTH_FIELDS), OLD_REVEALABLE_OAUTH_FIELDS);
 

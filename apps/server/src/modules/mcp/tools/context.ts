@@ -59,7 +59,7 @@ import { BusinessWorkflowService } from '../../business/business-workflow.servic
 import { BusinessMailWorkflowService } from '../../business/business-mail-workflow.service';
 import { BusinessService } from '../../business/business.service';
 import { BusinessCashbookService } from '../../business/business-cashbook.service';
-import { BusinessFormationService } from '../../business/business-formation.service';
+import { BusinessMcpService } from '../../business/business-mcp.service';
 import { BusinessTrademarkService } from '../../business/business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from '../../business/business-trademark-integrations.service';
 import type { MarketingAgentService } from '../../marketing/marketing-agent.service';
@@ -251,7 +251,7 @@ export interface ToolContext {
   businessMailWorkflowService?: BusinessMailWorkflowService;
   businessService?: BusinessService;
   businessCashbookService?: BusinessCashbookService;
-  businessFormationService?: BusinessFormationService;
+  businessMcpService?: BusinessMcpService;
   businessTrademarkService?: BusinessTrademarkService;
   businessTrademarkIntegrationsService?: BusinessTrademarkIntegrationsService;
   marketingAgentService?: MarketingAgentService;
@@ -361,12 +361,12 @@ export function createStandaloneContext(dataSource: DataSource): ToolContext {
   const businessService = new BusinessService(dataSource, ticketService);
   const businessWorkflowService = new BusinessWorkflowService(dataSource, businessService, roomMessagingService);
   const businessCashbookService = new BusinessCashbookService(dataSource, businessService);
-  const businessFormationService = new BusinessFormationService(dataSource, businessService);
+  const businessMcpService = new BusinessMcpService(dataSource, businessService);
   const businessTrademarkService = new BusinessTrademarkService(dataSource, businessService);
   const businessTrademarkIntegrationsService = new BusinessTrademarkIntegrationsService(dataSource, businessService);
 
   return {
-    businessWorkflowService, businessMailWorkflowService, businessMailService, businessService, businessCashbookService, businessFormationService, businessTrademarkService, businessTrademarkIntegrationsService,
+    businessWorkflowService, businessMailWorkflowService, businessMailService, businessService, businessCashbookService, businessMcpService, businessTrademarkService, businessTrademarkIntegrationsService,
     dataSource,
     activityService,
     apiKeyService,

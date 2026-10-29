@@ -142,7 +142,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'MarketingLink', 'MarketingMetric', 'MarketingFeedback', 'MarketingContact', 'MarketingBrand', 'MarketingContactConsent', 'MarketingEmailSend',
   'MarketingCycle', 'MarketingApprovalNotice', 'MarketingListHold', 'MarketingConsentNotice',
   'MarketingConsentNoticeSetting', 'MarketingContactReply',
-  'BusinessCompany', 'BusinessTask', 'BusinessTaskEntry', 'BusinessTaskRun', 'BusinessConnection', 'BusinessEvent', 'BusinessFormation',
+  'BusinessCompany', 'BusinessTask', 'BusinessTaskEntry', 'BusinessTaskRun', 'BusinessConnection', 'BusinessEvent', 'BusinessMcpConnection',
   'BusinessMailConnection', 'BusinessMailMessage', 'BusinessMailTask',
   'BusinessCashEntry', 'BusinessCashMonth',
   'BusinessTrademark', 'BusinessTrademarkMail',

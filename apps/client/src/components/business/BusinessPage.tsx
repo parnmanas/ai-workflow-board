@@ -3,7 +3,7 @@ import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../api';
-import type { BusinessCompany, BusinessConnection, BusinessConnector, BusinessDetail, BusinessStage, BusinessTask } from '../../business.types';
+import type { BusinessCompany, BusinessConnection, BusinessConnector, BusinessDetail, BusinessMcpConnection, BusinessStage, BusinessTask } from '../../business.types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
 import { Button, ErrorState, PermissionNotice } from '../common';
@@ -14,7 +14,7 @@ import { BusinessHowItWorks, BusinessStageGuide } from './BusinessGuide';
 import { BusinessSelfServiceForm, BusinessSelfServiceSummary } from './BusinessSelfService';
 import { BusinessCashbook } from './BusinessCashbook';
 import { BusinessCatalog, BusinessConnectorCard } from './BusinessCatalog';
-import { BusinessFormationForm, FORMATION_STATUS } from './BusinessFormationForm';
+import { BusinessMcpConnectForm } from './BusinessMcpConnectForm';
 import { BusinessTrademarks } from './BusinessTrademarks';
 import { BusinessPageHeader } from './BusinessPageHeader';
 import { BusinessExecutionStatus, BusinessWorkStartForm } from './BusinessWorkExecution';
@@ -86,7 +86,8 @@ export default function BusinessPage({ view }: { view: View }) {
   const [startWork, setStartWork] = useState(false);
   const [busy, setBusy] = useState('');
   const [filter, setFilter] = useState('all');
-  const [formationModal, setFormationModal] = useState<BusinessConnector | null>(null);
+  const [mcpModal, setMcpModal] = useState<BusinessConnector | null>(null);
+  const [mcp, setMcp] = useState<BusinessMcpConnection[]>([]);
   const [selfModal, setSelfModal] = useState<{ connector: BusinessConnector; plan: string } | null>(null);
   const rememberedId = rememberedCompany(user?.id || '');
   const selectedId = params.get('company') || companies?.find(c => c.id === rememberedId)?.id || companies?.[0]?.id || '';
@@ -128,13 +129,13 @@ export default function BusinessPage({ view }: { view: View }) {
     const request = ++generation.current;
     setLoading(true);
     try {
-      const data = await api.getBusinessCompany(selectedId);
-      if (request === generation.current && selectedRef.current === selectedId) { setDetail(data); setError(''); }
+      const [data, mcpRows] = await Promise.all([api.getBusinessCompany(selectedId), api.listBusinessMcp(selectedId)]);
+      if (request === generation.current && selectedRef.current === selectedId) { setDetail(data); setMcp(mcpRows); setError(''); }
     } catch (e) { if (request === generation.current) setError((e as Error).message); }
     finally { if (request === generation.current) setLoading(false); }
   }, [selectedId, canUse]);
   useEffect(() => {
-    setDetail(null); setStartWork(false); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setFormationModal(null); setSelfModal(null);
+    setDetail(null); setStartWork(false); setTaskModal(null); setConnectorModal(null); setCompanyModal(null); setMcpModal(null); setMcp([]); setSelfModal(null);
     void loadDetail();
     return () => { generation.current++; };
   }, [loadDetail]);
@@ -143,6 +144,13 @@ export default function BusinessPage({ view }: { view: View }) {
     const timer = window.setInterval(() => { if (!document.hidden) void loadDetail(); }, 10000);
     return () => window.clearInterval(timer);
   }, [view, !!detail?.formation_work, startWork, companyModal, loadDetail]);
+  // The provider callback and an agent's sign-in link land with ?mcp=<provider>; open that panel once.
+  useEffect(() => {
+    const provider = params.get('mcp'); const connector = provider && connectors.find(c => c.id === provider && c.mode === 'mcp');
+    if (!connector || !detail || detail.company.id !== selectedId) return;
+    setMcpModal(connector);
+    const next = new URLSearchParams(params); next.delete('mcp'); setParams(next, { replace: true });
+  }, [params, connectors, detail, selectedId, setParams]);
   const reload = async () => {
     await loadDetail();
     setCompanies(await api.listBusinessCompanies());
@@ -187,9 +195,9 @@ export default function BusinessPage({ view }: { view: View }) {
     catch (e) { showToast((e as Error).message, 'error'); await loadDetail(); }
     finally { setBusy(''); }
   };
-  const renderConnector = (connector: BusinessConnector, comparing?: boolean, onCompare?: () => void) => company && <BusinessConnectorCard key={connector.id} connector={connector} company={company} connection={detail?.connections.find(c => c.provider === connector.id)} busy={!!busy || loading} onSetup={() => setConnectorModal(connector)} onSync={() => void sync(connector.id)} onChoose={plan => void chooseService(connector, plan)} onFormation={() => setFormationModal(connector)} comparing={comparing} onCompare={onCompare} onOpenData={view === 'connectors' ? () => chooseStage(connector.stage) : undefined} />;
+  const renderConnector = (connector: BusinessConnector, comparing?: boolean, onCompare?: () => void) => company && <BusinessConnectorCard key={connector.id} connector={connector} company={company} connection={detail?.connections.find(c => c.provider === connector.id)} mcpConnection={mcp.find(row => row.provider === connector.id)} busy={!!busy || loading} onSetup={() => setConnectorModal(connector)} onSync={() => void sync(connector.id)} onChoose={plan => void chooseService(connector, plan)} onMcp={() => setMcpModal(connector)} comparing={comparing} onCompare={onCompare} onOpenData={view === 'connectors' ? () => chooseStage(connector.stage) : undefined} />;
 
-  if (company && detail && params.get('task')) return <BusinessTaskWorkspace key={`${company.id}-${params.get('task')}`} detail={detail} taskId={params.get('task')!} connectors={connectors} onBack={() => navigate(path('operations', stage.id))} onChanged={reload} onOpenTask={openTask} />;
+  if (company && detail && params.get('task')) return <BusinessTaskWorkspace key={`${company.id}-${params.get('task')}`} detail={detail} taskId={params.get('task')!} onBack={() => navigate(path('operations', stage.id))} onChanged={reload} onOpenTask={openTask} />;
 
   return <div className="business-page" aria-busy={loading}>
     <BusinessPageHeader
@@ -244,7 +252,6 @@ export default function BusinessPage({ view }: { view: View }) {
       {view === 'operations' && <>
         <div ref={stageTabsRef} className="business-stage-tabs" role="group" aria-label={translate('운영 영역')}>{STAGES.map(s => <button key={s.id} aria-pressed={stage.id === s.id} onClick={() => chooseStage(s.id)} style={{ '--stage-color': s.color } as React.CSSProperties}><BusinessIcon name={s.id} size={19} /><span>{s.label}</span><small>{tasks.filter(t => t.stage === s.id && t.status !== 'done').length}</small></button>)}</div>
         <div className="business-operations-heading"><div><span className="business-eyebrow" style={{ color: stage.color }}>{stage.eyebrow}</span><h2>{stage.label}</h2><p>{stage.description}</p></div><Button onClick={() => setTaskModal('new')}><BusinessIcon name="plus" size={16} />{translate('업무 추가')}</Button></div>
-        {stage.id === 'formation' && (detail.formations || []).length > 0 && <div className="business-formation-history">{detail.formations.map(f => <button key={f.id} onClick={() => setFormationModal(connectors.find(c => c.id === f.provider) || null)}><BusinessIcon name="formation" size={20} /><span><strong>{f.summary.name}</strong><small>{f.environment === 'sandbox' ? translate('테스트') : translate('실제 신청')} · {FORMATION_STATUS[f.status]}</small></span><BusinessIcon name="arrow" size={16} /></button>)}</div>}
         <BusinessStageGuide stage={stage.id} connectors={connectors} connectorsPath={path('connectors')} canMarketing={canMarketing} />
         {stage.id === 'formation' && company.service_choices?.formation?.provider === 'self_formation' && <BusinessSelfServiceSummary key={company.id} company={company} provider="self_formation" plan={company.service_choices.formation.plan} onReview={() => { const connector = connectors.find(c => c.id === 'self_formation'); if (connector) setSelfModal({ connector, plan: company.service_choices!.formation!.plan }); }} />}
         {stage.id === 'accounting' && <BusinessCashbook key={company.id} company={company} onChanged={reload} onSetup={() => { const connector = connectors.find(c => c.id === 'self_bookkeeping'); if (connector) setSelfModal({ connector, plan: 'cashbook' }); }} />}
@@ -266,7 +273,7 @@ export default function BusinessPage({ view }: { view: View }) {
     </>}
     {companyModal && <CompanyForm key={`${companyModal}-${selectedId}`} company={companyModal === 'edit' ? company : undefined} onClose={() => setCompanyModal(null)} onSaved={async id => { setCompanyModal(null); setCompanies(await api.listBusinessCompanies()); if (id !== selectedId) setParams({ company: id }); else await loadDetail(); showToast(translate('회사의 워크플로를 저장했습니다.'), 'success'); }} />}
     {company && taskModal && <TaskForm key={typeof taskModal === 'string' ? 'new' : taskModal.id} company={company} task={taskModal === 'new' ? undefined : taskModal} tasks={tasks} stage={stage.id} onClose={() => setTaskModal(null)} onSaved={async () => { setTaskModal(null); await reload(); }} />}
-    {company && formationModal && <BusinessFormationForm key={`${company.id}-${formationModal.id}`} company={company} connector={formationModal} formations={(detail?.formations || []).filter(f => f.provider === formationModal.id)} onClose={() => setFormationModal(null)} onChanged={reload} />}
+    {company && mcpModal && <BusinessMcpConnectForm key={`${company.id}-${mcpModal.id}`} company={company} connector={mcpModal} connection={mcp.find(row => row.provider === mcpModal.id)} onClose={() => setMcpModal(null)} onChanged={reload} />}
     {company && selfModal && <BusinessSelfServiceForm key={`${company.id}-${selfModal.connector.id}-${selfModal.plan}`} company={company} connector={selfModal.connector} plan={selfModal.plan} onClose={() => setSelfModal(null)} onSaved={async () => { const stageId = selfModal.connector.stage; setSelfModal(null); await reload(); chooseStage(stageId); }} />}
     {company && connectorModal && <ConnectorForm key={connectorModal.id} company={company} connector={connectorModal} connection={detail?.connections.find(c => c.provider === connectorModal.id)} onClose={() => setConnectorModal(null)} onSaved={async () => { setConnectorModal(null); await reload(); }} />}
   </div>;

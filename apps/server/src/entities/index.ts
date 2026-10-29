@@ -170,7 +170,7 @@ export { BusinessTaskRun } from './BusinessTaskRun';
 export { BusinessConnection } from './BusinessConnection';
 export { BusinessEvent } from './BusinessEvent';
 
-export { BusinessFormation } from './BusinessFormation';
+export { BusinessMcpConnection } from './BusinessMcpConnection';
 export { BusinessTrademark } from './BusinessTrademark';
 export { BusinessTrademarkMail } from './BusinessTrademarkMail';
 export { BusinessTrademarkIntegration } from './BusinessTrademarkIntegration';

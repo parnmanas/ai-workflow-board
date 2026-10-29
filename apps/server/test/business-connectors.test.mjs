@@ -2,18 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { businessConnector, BUSINESS_CONNECTORS } from '../dist/modules/business/connectors/registry.js';
 
-test('doola reads the partner envelope, raw-key auth and compliance dates without retaining personal fields', async () => {
-  const calls = [];
-  const snapshot = await businessConnector('doola').sync({ environment: 'sandbox', config: { company_id: 'company_123' }, secrets: { api_key: 'dk_test_example' }, get: async (url, headers) => {
-    calls.push({ url, headers });
-    return url.endsWith('/calendar') ? { payload: { events: [{ type: 'ANNUAL_REPORT', status: 'UPCOMING', nextDueDate: '2027-04-15' }] }, error: null }
-      : { payload: { formationSubmissionStatus: 'COMPLETED', ein: '99-0000000', members: [{ ssn: 'private' }] }, error: null };
-  } });
-  assert.equal(calls[0].url, 'https://api.test.doola.com/v1/partner/companies/company_123');
-  assert.equal(calls[0].headers.Authorization, 'dk_test_example');
-  assert.equal(snapshot.records[0].date, '2027-04-15');
-  assert.doesNotMatch(JSON.stringify(snapshot), /99-0000000|ssn|private/);
-  await assert.rejects(() => businessConnector('doola').sync({ environment: 'live', config: {}, secrets: { api_key: 'dk_test_example' }, get: async () => assert.fail('wrong environment must not send a key') }), /환경/);
+test('doola and Northwest are provider-MCP connectors: no partner key, pinned HTTPS origins, owner-only payment tools', () => {
+  for (const id of ['doola', 'northwest']) {
+    const { descriptor } = businessConnector(id);
+    assert.equal(descriptor.mode, 'mcp'); assert.equal(descriptor.credential_provider, undefined); assert.deepEqual(descriptor.secret_fields, []);
+    assert.equal(new URL(descriptor.mcp.url).protocol, 'https:');
+    for (const origin of descriptor.mcp.auth_origins) assert.equal(new URL(origin).protocol, 'https:');
+    assert.equal(descriptor.offering.api_access, 'mcp');
+  }
+  assert.ok(businessConnector('northwest').descriptor.mcp.owner_only_tools.includes('checkout_cart_tool'));
+  assert.deepEqual(businessConnector('northwest').descriptor.mcp.client, { kind: 'public', client_id: 'mcp-connector', loopback_only: true });
 });
 
 test('Mercury reports bounded signed USD transactions and does not fabricate absent amounts', async () => {

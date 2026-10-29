@@ -1,8 +1,9 @@
 import type { BusinessStage, ConnectorDescriptor, ServiceOffering } from '../business.types';
 
 // Retail list prices, not a quote for partner API usage. Keep price units and exclusions explicit.
+// doola · Northwest were re-checked on 2026-10-29 (Northwest via archived pages; its site blocks automated reads).
 const checked = '2026-10-23';
-const price = (url: string, extra: string, plans: ServiceOffering['pricing']['plans']): ServiceOffering['pricing'] => ({ url, extra, plans, checked_at: checked });
+const price = (url: string, extra: string, plans: ServiceOffering['pricing']['plans'], checkedAt = checked): ServiceOffering['pricing'] => ({ url, extra, plans, checked_at: checkedAt });
 const plan = (id: string, name: string, price: string, detail: string) => ({ id, name, price, detail });
 export const SERVICE_OFFERINGS: Record<string, ServiceOffering> = {
   uspto: {
@@ -26,9 +27,16 @@ export const SERVICE_OFFERINGS: Record<string, ServiceOffering> = {
     pricing: price('https://www.trademarkengine.com/trademark-registration/', '공식 페이지의 applicable fees에는 $350/류 관납료 외 $100 서비스·플랫폼 비용이 포함됩니다. 기본 표시가만으로 총액을 판단하지 마세요.', [plan('basic', 'Basic', '$49 + 적용 수수료', '표시 시작가 · 추가 비용 별도'), plan('standard', 'Standard', '$299 + 적용 수수료', '전담 변호사 · 15분 상담')]),
   },
   doola: {
-    best_for: '설립부터 미국 세금 신고까지 한 서비스로 운영', features: ['LLC · C-Corp 설립', 'EIN · 등록 대리인', '세금 신고 · 장부 옵션'],
-    api_access: 'partner', api_note: '파트너 승인·계약과 API 키 필요. 일반 구독 가격과 API 계약 가격은 다릅니다.', external_steps: ['본인 서명', '추가 서류 · 주정부 심사', '세금 신고 서비스 계약'],
-    pricing: price('https://www.doola.com/pricing/', '주정부 수수료 별도. 아래는 일반 고객용 연간 요금이며 API 견적이 아닙니다.', [plan('starter', 'Starter', '$297 / 년', '설립 · EIN · 등록 대리인'), plan('tax', 'Tax & Compliance', '$1,999 / 년', '설립과 연간 세무 · 컴플라이언스'), plan('box', 'Business-in-a-Box', '$2,999 / 년', '세무 · 장부 관리 포함 상품')]),
+    best_for: '설립부터 미국 세금 신고까지 한 서비스로 운영', features: ['LLC · C-Corp 설립 (1–2 영업일 접수)', 'EIN · 등록 대리인 · 미국 주소 · 운영 계약서', '세무 · 장부 · 연차 보고 옵션'],
+    api_access: 'mcp', api_note: 'doola MCP(mcp.doola.com)를 doola 고객 계정 OAuth로 사용합니다. 별도 계약·API 키·MCP 이용료는 안내되지 않았습니다. 화이트라벨 Formation API는 운영 사용에 파트너 계약이 필요해 AWB는 사용하지 않습니다. MCP 접수 주는 공식 안내가 엇갈려(WY 전용 vs 50개 주) 진행 시 확인하세요.',
+    external_steps: ['Stripe 결제 링크에서 소유자가 결제', '본인 서명 · 추가 서류', '대시보드에서 서류 · EIN · 계좌 후속 확인'],
+    pricing: price('https://www.doola.com/pricing/', '모든 플랜 연간 청구, 주정부 수수료 별도(doola가 대신 납부). Starter에는 연차 보고 대행이 없습니다. 장부 Pulse $300/년 별도. ITIN·등록 대리인 단독 갱신가는 공개 가격표에서 확인하지 못했습니다.', [plan('starter', 'Starter', '$297 / 년', '설립 · EIN · 등록 대리인 · 미국 주소 · 운영 계약서'), plan('tax', 'Tax & Compliance', '$1,999 / 년', '연방·주 세금 신고 · 연차 보고 · 세무 상담'), plan('box', 'Business-in-a-Box', '$2,999 / 년', '월 $329 선택 가능 · 전담 장부 · 분기 예상세 포함')], '2026-10-29'),
+  },
+  northwest: {
+    best_for: '저렴한 설립과 장기 등록 대리인 · 개인정보 보호', features: ['50개 주 + DC 설립', '등록 대리인 · 우편 스캔 · Northwest 주소로 개인정보 보호', 'EIN(SSN 없이 가능) · 연차 보고 · 도메인/메일/전화 옵션'],
+    api_access: 'mcp', api_note: 'Northwest MCP(mcp.northwestregisteredagent.com)를 Northwest 고객 계정 로그인으로 사용합니다. 별도 계약·MCP 이용료는 안내되지 않았습니다. 체크아웃·청구서 결제는 계정에 저장된 결제수단으로 청구되므로 AWB는 대신 실행하지 않습니다.',
+    external_steps: ['Northwest 화면에서 장바구니 결제 · 결제수단 관리', '본인 서명', '연차 보고 · 갱신 확인'],
+    pricing: price('https://www.northwestregisteredagent.com/registered-agent', '주정부 수수료 별도(WY $100, DE $110 기준). 등록 대리인 갱신은 1–4개 주 $125/년·주, 5개 주 이상 $100/년·주. 일반 우편 5건 무료 전달 후 $15/건. EIN·운영 계약서·급행·가상 사무실은 별도이며 LLC 상위 패키지 가격은 공식 페이지에서 직접 확인하세요(웹 보관본 2026-10 기준 확인).', [plan('formation', '설립', '$39 + 주정부 수수료', 'LLC · Corporation 신고 + 1년 등록 대리인 포함'), plan('agent', 'Registered Agent', '$125 / 년·주', '등록 대리인 갱신 · 우편 스캔 포함')], '2026-10-29'),
   },
   atlas: {
     best_for: 'Delaware 창업과 Stripe 결제 생태계', features: ['Delaware LLC · C-Corp', 'EIN', '설립 문서 · 등록 대리인'],
