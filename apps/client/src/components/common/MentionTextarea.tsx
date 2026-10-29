@@ -3,7 +3,6 @@ import { useLocale } from '../../i18n/react';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { tokens } from '../../tokens';
-import { useMobileInput } from '../../hooks/useMobileInput';
 
 export interface MentionCandidate {
   type: 'user' | 'agent' | 'role';
@@ -62,7 +61,7 @@ interface MentionTextareaProps {
   onChange: (text: string) => void;
   candidates: MentionCandidate[];
   onSubmit?: () => void;           // called on Enter when no dropdown is open
-  submitOnEnter?: boolean;         // default true on desktop; mobile Enter always inserts a newline
+  submitOnEnter?: boolean;         // default true — Enter submits (shift+Enter newline)
   placeholder?: string;
   rows?: number;
   disabled?: boolean;
@@ -101,7 +100,6 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
   style,
 }: MentionTextareaProps, ref) {
   useLocale();
-  const mobileInput = useMobileInput();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Expose focus() to the parent (see MentionTextareaHandle). preventScroll
   // defaults to true so focusing the composer never yanks the message list.
@@ -204,8 +202,6 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
-    if (e.key === 'Enter' && (mobileInput || e.shiftKey)) return;
     if (open && filtered.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -301,7 +297,6 @@ export const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextarea
   return (
     <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
       <textarea
-        enterKeyHint={mobileInput ? 'enter' : undefined}
         ref={inputRef}
         rows={rows}
         value={displayValue}

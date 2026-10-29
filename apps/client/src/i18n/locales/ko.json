@@ -7070,7 +7070,6 @@
   "LLC · Corporation 신고 + 1년 등록 대리인 포함": "LLC · Corporation 신고 + 1년 등록 대리인 포함",
   "$125 / 년·주": "$125 / 년·주",
   "등록 대리인 갱신 · 우편 스캔 포함": "등록 대리인 갱신 · 우편 스캔 포함",
-  "Enter for a new line · Tap Send to send": "Enter로 줄바꿈 · 전송 버튼으로 보내기",
   "Server address": "서버 주소",
   "Used for links in notifications and mail and for sign-in callbacks. AWB learns it from the address an admin opens it with; set it here only to override.": "알림·메일의 링크와 로그인 콜백에 쓰는 주소입니다. 관리자가 AWB를 연 주소에서 자동으로 알아내며, 바꿔야 할 때만 여기에 입력하세요.",
   "Address in use": "현재 사용 주소",

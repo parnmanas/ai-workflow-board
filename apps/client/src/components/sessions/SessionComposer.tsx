@@ -8,12 +8,11 @@ import { readFileAsBase64 } from '../chat/utils/attachments';
 import { useHandsFreeConversation, type ConversationPhase } from '../../voice/useVoice';
 import { WAKE_IDLE_SLEEP_MS } from '../../voice/wake.logic';
 import MediaLightbox from '../common/MediaLightbox';
-import { useMobileInput } from '../../hooks/useMobileInput';
 
 /**
  * Agent Session 프롬프트 입력. Chat 의 ChatMessageInput 과 달리 방/멘션에
  * 묶이지 않는다 — 텍스트 + 이미지 첨부를 그대로 CLI 세션에 보낸다. Enter 전송,
- * Shift+Enter 줄바꿈(모바일은 Enter 줄바꿈), 한글 IME 조합 중 Enter 는 무시한다.
+ * Shift+Enter 줄바꿈, 한글 IME 조합 중 Enter 는 무시한다.
  * `/` 로 시작하면 어댑터가 알려 준 slash command 목록으로 자동완성한다
  * (↑/↓ 이동, Enter/Tab 선택, Esc 닫기). 완성된 명령은 Enter 로 바로 전송한다.
  *
@@ -112,7 +111,6 @@ const CONVERSATION_PHASE_LABEL: Record<ConversationPhase, string> = {
 
 export default function SessionComposer({ disabled, busy, placeholder, hint, commands, onSend, onCancel, voiceInput }: SessionComposerProps) {
   useLocale();
-  const mobileInput = useMobileInput();
   const [text, setText] = useState('');
   const [images, setImages] = useState<SessionPromptImage[]>([]);
   // 보내기 전에 첨부한 그림을 크게 확인한다(대화 속 첨부와 같은 라이트박스).
@@ -307,7 +305,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.nativeEvent as any).isComposing) return; // IME 조합 중
-    if (e.key === 'Enter' && (e.shiftKey || mobileInput)) return;
+    if (e.key === 'Enter' && e.shiftKey) return;
     if (popupOpen) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelected((i) => (i + 1) % slash.matches.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSelected((i) => (i - 1 + slash.matches.length) % slash.matches.length); return; }
@@ -511,7 +509,6 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
           </button>
         )}
         <textarea
-          enterKeyHint={mobileInput ? 'enter' : undefined}
           className="awb-composer-input"
           ref={ref}
           value={text}
@@ -582,7 +579,7 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
         </button>
       </div>
       <div className="awb-composer-help" style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
-        {mobileInput ? translate('Enter for a new line · Tap Send to send') : <>{busy ? translate('Enter sends into the running turn — the agent reads it mid-task') : translate('Enter to send')} {translate('· Shift+Enter for a new line · 📎 or paste images to attach')}</>}{showMic ? translate(' · 🎙 conversation mode: just talk, pause to send') : ''}{commands && commands.length ? translate(' · type / for {0} commands', { 0: commands.length }) : translate(' · slash commands go straight to the CLI')}
+        {busy ? translate('Enter sends into the running turn — the agent reads it mid-task') : translate('Enter to send')} {translate('· Shift+Enter for a new line · 📎 or paste images to attach')}{showMic ? translate(' · 🎙 conversation mode: just talk, pause to send') : ''}{commands && commands.length ? translate(' · type / for {0} commands', { 0: commands.length }) : translate(' · slash commands go straight to the CLI')}
       </div>
     </div>
   );
