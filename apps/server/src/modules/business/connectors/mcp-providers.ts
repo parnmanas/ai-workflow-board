@@ -18,7 +18,7 @@ export interface McpProviderSpec {
   /** Every OAuth endpoint the discovery documents announce must live on one of these origins. */
   auth_origins: string[];
   scope: string;
-  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true; registered_env: string; registered_setting: string };
+  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true; registered_env: string; registered_setting: string; loopback_redirect: string };
   /**
    * Tools that charge a saved payment method or enrol it in autopay. Never relayed; the owner finishes
    * them in the provider. Matched with or without a client prefix (`v2_client__checkout_cart_tool`).
@@ -28,7 +28,7 @@ export interface McpProviderSpec {
 }
 export interface McpBusinessConnectorDescriptor extends ConnectorDescriptor { mode: 'mcp'; mcp: McpProviderSpec }
 
-/** Paste-back address for providers whose public client only allows loopback redirects. */
+/** Paste-back address when a provider lets AWB pick its own loopback redirect (dynamic registration without HTTPS). */
 export const MCP_LOOPBACK_REDIRECT = 'http://localhost:47913/awb/oauth/callback';
 
 const mcp = (descriptor: Omit<McpBusinessConnectorDescriptor, 'mode' | 'fields' | 'secret_fields' | 'environments' | 'monogram'> & { monogram: string }): { descriptor: McpBusinessConnectorDescriptor } =>
@@ -48,7 +48,10 @@ export const MCP_CONNECTORS = [
     setup_note: 'Northwest 고객 계정으로 로그인하면 에이전트가 Northwest MCP로 회사·신고·서류·청구서를 조회하고 신청 장바구니를 준비합니다. 결제(체크아웃)는 Northwest 화면에서 소유자가 직접 진행합니다.',
     docs_url: 'https://www.northwestregisteredagent.com/ai/mcp', portal_url: 'https://www.northwestregisteredagent.com/login',
     mcp: { url: 'https://mcp.northwestregisteredagent.com/', auth_origins: ['https://mcp.northwestregisteredagent.com', 'https://id.northwestregisteredagent.com'], scope: 'openid profile email',
-      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP', registered_setting: 'business.mcp.northwest' },
+      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP', registered_setting: 'business.mcp.northwest',
+        // 2026-10-30: the only loopback address mcp-connector still accepts (MCP Inspector's). It stays on
+        // the owner's machine; the owner pastes it back. The login pre-check reports it if this changes again.
+        loopback_redirect: 'http://localhost:6274/oauth/callback' },
       // Northwest checks out against a card already on file (tools catalogue, 2026-10-22).
       owner_only_tools: ['checkout_cart_tool', 'pay_invoice_tool', 'enable_autopay_tool', 'purchase_compliance_service_tool'] },
   }),
@@ -61,6 +64,9 @@ export function registeredMcpClient(spec: McpProviderSpec): { client_id: string;
   const secret = process.env[`${spec.client.registered_env}_CLIENT_SECRET`]?.trim();
   return id ? { client_id: id, ...(secret ? { client_secret: secret } : {}) } : null;
 }
+
+/** The loopback address the owner pastes back for this provider. */
+export const loopbackRedirect = (spec: McpProviderSpec) => spec.client.kind === 'public' ? spec.client.loopback_redirect : MCP_LOOPBACK_REDIRECT;
 
 export const isOwnerOnlyTool = (spec: McpProviderSpec, name: string) => spec.owner_only_tools.some(t => name === t || name.endsWith(`__${t}`));
 

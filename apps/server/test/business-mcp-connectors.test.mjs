@@ -4,7 +4,7 @@ import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createAccount, createUser } from './helpers/fixtures.mjs';
 import { fakeMcpProviders } from './helpers/business-mcp-fixture.mjs';
 import { BusinessMcpService } from '../dist/modules/business/business-mcp.service.js';
-import { MCP_LOOPBACK_REDIRECT } from '../dist/modules/business/connectors/mcp-providers.js';
+const NORTHWEST_LOOPBACK = 'http://localhost:6274/oauth/callback';
 
 test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and owner-only payment tools', { timeout: 120000 }, async t => {
   const { app, port, modules } = await bootApp();
@@ -94,15 +94,15 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
 
   await t.test('Northwest: public client, loopback paste-back bound to the owner, owner-only checkout', async () => {
     const started = await call(`${base}/northwest/authorize`, {});
-    assert.equal(started.body.mode, 'paste'); assert.equal(started.body.redirect_uri, MCP_LOOPBACK_REDIRECT);
+    assert.equal(started.body.mode, 'paste'); assert.equal(started.body.redirect_uri, NORTHWEST_LOOPBACK);
     assert.equal(started.headers.get('set-cookie'), null);
     const authorize = new URL(started.body.url);
     assert.equal(authorize.origin, 'https://id.northwestregisteredagent.com');
     assert.equal(authorize.searchParams.get('client_id'), 'mcp-connector');
     assert.equal(authorize.searchParams.get('scope'), 'openid profile email');
     assert.equal(fake.state.registrations.filter(r => r.provider === 'northwest').length, 0, 'Keycloak refuses anonymous registration; the public client is used');
-    const pasted = `${MCP_LOOPBACK_REDIRECT}?state=${authorize.searchParams.get('state')}&session_state=x&code=northwest-code`;
-    assert.equal((await call(`${base}/northwest/complete`, { callback_url: pasted.replace('/awb/oauth/callback', '/other') })).status, 400);
+    const pasted = `${NORTHWEST_LOOPBACK}?state=${authorize.searchParams.get('state')}&session_state=x&code=northwest-code`;
+    assert.equal((await call(`${base}/northwest/complete`, { callback_url: pasted.replace('/oauth/callback', '/other') })).status, 400);
     assert.ok([403, 404].includes((await call(`${base}/northwest/complete`, { callback_url: pasted }, 'POST', other, theirs.id)).status), 'another account cannot finish the sign-in');
     const done = await call(`${base}/northwest/complete`, { callback_url: pasted });
     assert.equal(done.status, 201); assert.equal(done.body.provider, 'northwest');

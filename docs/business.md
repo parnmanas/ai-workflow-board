@@ -147,12 +147,13 @@ doola Partner API(화이트라벨 Formation API)는 운영 사용에 파트너 �
   상표 OAuth와 같이 단일 사용 state와 같은 브라우저의 HttpOnly 쿠키로 묶는다.
 - **발급 클라이언트**: 관리자 설정 → Business MCP 클라이언트에 Northwest가 발급한 client ID(+ secret)를 넣으면 Northwest도 redirect 방식이다
   (env `NORTHWEST_MCP_CLIENT_ID`/`_SECRET`가 있으면 그것이 우선). 설정 화면이 등록할 Redirect URI를 보여 준다.
-- **paste**: Northwest의 `mcp-connector`는 2026-10-29에 `http://localhost:<port>/…`도 받았으나 **2026-10-30부터 claude.ai·chatgpt.com·
-  `cursor://anysphere.cursor-mcp/oauth/callback`만** 받는다. 그래서 발급 클라이언트가 없으면 로그인 시작 시 서버가 authorize 주소를
-  먼저 조회해 400이면 409와 설정 안내를 돌려준다(공급자의 “Invalid parameter: redirect_uri” 화면 대신). 다른 앱의 redirect를 빌려 쓰지 않는다 —
-  인가 코드가 그 회사 서버로 간다. 허용이 다시 열리면 이 경로가 그대로 동작한다.
-  AWB는 `http://localhost:47913/awb/oauth/callback`을 쓰고, 로그인 뒤 브라우저에 뜨는 “연결할 수 없음” 화면의 전체 주소를
-  소유자가 붙여 넣는다(`…/complete`). 붙여 넣기는 로그인을 시작한 소유자·Account만 완료할 수 있다. HTTPS가 아닌 주소(LAN의
+- **paste**: Northwest의 `mcp-connector`가 받는 redirect는 공급자가 바꾼다 — 2026-10-29엔 `http://localhost:<아무 포트>/…`,
+  2026-10-30엔 claude.ai·chatgpt.com·`cursor://…`와 loopback 중 **`http://localhost:6274/oauth/callback`(MCP Inspector 주소)만**.
+  AWB는 그 loopback 주소를 쓴다(`McpProviderSpec.client.loopback_redirect`). 소유자 컴퓨터 안의 주소라 인가 코드가 밖으로 나가지 않는다.
+  로그인 뒤 브라우저에 뜨는 “연결할 수 없음” 화면의 전체 주소를 소유자가 붙여 넣는다(`…/complete`). 다른 회사 서버의 redirect
+  (claude.ai·chatgpt.com)는 빌려 쓰지 않는다 — 인가 코드가 그 회사로 간다. 로그인 시작 시 서버가 authorize 주소를 먼저 조회해
+  400이면 409와 안내를 돌려준다(공급자의 “Invalid parameter: redirect_uri” 화면 대신) — 주소가 또 바뀌면 여기서 드러난다.
+  붙여 넣기는 로그인을 시작한 소유자·Account만 완료할 수 있다. HTTPS가 아닌 주소(LAN의
   `http://…`)로 접속했으면 doola도 같은 방식으로 진행한다.
 
 OAuth·MCP 요청은 공급자별로 고정한 HTTPS origin에만 보내며 redirect를 따르지 않는다. 발견 문서가 다른 도메인의

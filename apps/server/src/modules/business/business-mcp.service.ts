@@ -13,7 +13,7 @@ import { SystemSetting } from '../../entities/SystemSetting';
 import { BusinessMcpConnection } from '../../entities/BusinessMcpConnection';
 import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { BusinessService } from './business.service';
-import { MCP_CONNECTORS, MCP_LOOPBACK_REDIRECT, mcpConnector, isOwnerOnlyTool, registeredMcpClient, type McpProviderSpec } from './connectors/mcp-providers';
+import { MCP_CONNECTORS, loopbackRedirect, mcpConnector, isOwnerOnlyTool, registeredMcpClient, type McpProviderSpec } from './connectors/mcp-providers';
 import { oauthCallbackBase } from '../../common/public-url';
 
 export const BUSINESS_MCP_CALLBACK_PATH = '/api/business-mcp/oauth/callback';
@@ -114,10 +114,10 @@ export class BusinessMcpService {
   }
   private redirectFor(spec: McpProviderSpec, origin: string | undefined, issued: boolean): { uri: string; mode: 'redirect' | 'paste' } {
     if (issued) return { uri: `${oauthCallbackBase(origin)}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' };
-    if (spec.client.kind === 'public') return { uri: MCP_LOOPBACK_REDIRECT, mode: 'paste' };
+    if (spec.client.kind === 'public') return { uri: loopbackRedirect(spec), mode: 'paste' };
     try { return { uri: `${oauthCallbackBase(origin)}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' }; }
     // Not on HTTPS (e.g. a LAN http:// address): the provider cannot return to AWB; the owner pastes the loopback address instead.
-    catch { return { uri: MCP_LOOPBACK_REDIRECT, mode: 'paste' }; }
+    catch { return { uri: loopbackRedirect(spec), mode: 'paste' }; }
   }
   private async clientFor(provider: string, spec: McpProviderSpec, found: Discovery, data: McpData, redirectUri: string): Promise<OAuthClientInformationFull> {
     const issued = await this.issuedClient(spec);
@@ -145,7 +145,7 @@ export class BusinessMcpService {
     try { const res = await pinnedFetch(spec, 15_000)(url, { method: 'GET' }); status = res.status; await res.body?.cancel(); }
     catch { return; /* Unreachable or redirected: let the browser show the provider's own page. */ }
     if (status === 400) {
-      throw new ConflictException(`${name}가 공용 로그인 클라이언트로 외부 앱의 로그인을 더 이상 받지 않습니다(Claude·ChatGPT·Cursor만 허용). ${name}에서 이 AWB용 OAuth 클라이언트를 발급받으면 관리자 설정 → Business MCP 클라이언트에 넣으세요.`);
+      throw new ConflictException(`${name}가 AWB가 쓰는 로그인 복귀 주소(${url.searchParams.get('redirect_uri')})를 더 이상 허용하지 않습니다. ${name}에서 이 AWB용 OAuth 클라이언트를 발급받으면 관리자 설정 → Business MCP 클라이언트에 넣으세요.`);
     }
   }
 
@@ -245,7 +245,7 @@ export class BusinessMcpService {
       throw new ConflictException('공급자 로그인이 만료되었습니다. 소유자가 연결 화면에서 다시 로그인해야 합니다.');
     }
     const spec = mcpConnector(row.provider).mcp; const found = await this.discover(row.provider, spec);
-    const clientInformation = await this.clientFor(row.provider, spec, found, data, data.client?.redirect_uri || MCP_LOOPBACK_REDIRECT);
+    const clientInformation = await this.clientFor(row.provider, spec, found, data, data.client?.redirect_uri || loopbackRedirect(spec));
     try {
       const next = await refreshAuthorization(found.url, { metadata: found.metadata, clientInformation, refreshToken: tokens.refresh_token, ...(found.resource ? { resource: found.resource } : {}), fetchFn: pinnedFetch(spec, 15_000) });
       data.tokens = { access_token: next.access_token, refresh_token: next.refresh_token || tokens.refresh_token, ...(next.expires_in ? { expires_at: Date.now() + next.expires_in * 1000 } : {}) };
