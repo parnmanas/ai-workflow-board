@@ -507,11 +507,16 @@ export function listCliBinCandidates(cliType: string): string[] {
  *  후보 목록을 비교하는 호출자(listCliBinCandidates 주석의 ragnar 사례)가 같은
  *  설치본을 "다른 경로" 로 오인하지 않게 한다. */
 export function canonicalPathKey(p: string): string {
+  let resolved = p;
   try {
-    return realpathSync(p);
+    resolved = isWindows ? realpathSync.native(p) : realpathSync(p);
   } catch {
-    return p;
+    // 못 푸는 경로는 그대로 비교한다.
   }
+  // Windows 파일 시스템은 대소문자를 구분하지 않는다 — PATH 항목과 PATHEXT 철자가
+  // 달라 `C:\Users\X\npm\Claude.cmd` 와 `...\claude.CMD` 가 같은 설치본인데도
+  // 둘로 열거되던 것을 접는다.
+  return isWindows ? resolved.toLowerCase() : resolved;
 }
 
 // ct 만으로 키잉하면, 오퍼레이터가 reload_config/SIGHUP으로 delegation.*Bin을
