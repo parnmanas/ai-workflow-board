@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException } from '@nestjs/common';
 import { simpleParser } from 'mailparser';
 import { mailEvents, mailJson, mailUrl } from './mail-network';
+import { mailReferenceChain } from './mail-headers';
 import type { MailConnector, MailContext, MailContent } from './mail.types';
 
 const CORE = 'urn:ietf:params:jmap:core';
@@ -46,7 +47,7 @@ export const jmapConnector: MailConnector = {
     if (!Array.isArray(ids) || ids.length > 100 || typeof state !== 'string') throw new BadGatewayException('JMAP 수집 상태를 확인하지 못했습니다.');
     const messages: MailContent[] = [];
     if (ids.length) {
-      const result = await call('Email/get', { ids, properties: ['id', 'messageId', 'from', 'to', 'replyTo', 'subject', 'receivedAt', 'textBody', 'htmlBody', 'bodyValues', 'attachments', 'mailboxIds', 'inReplyTo', 'header:Auto-Submitted:asText', 'header:Precedence:asText', 'header:List-Id:asText', 'header:Return-Path:asText', 'header:X-Auto-Response-Suppress:asText'], fetchTextBodyValues: true, fetchHTMLBodyValues: true, maxBodyValueBytes: 100000 });
+      const result = await call('Email/get', { ids, properties: ['id', 'messageId', 'from', 'to', 'replyTo', 'subject', 'receivedAt', 'textBody', 'htmlBody', 'bodyValues', 'attachments', 'mailboxIds', 'inReplyTo', 'references', 'header:Auto-Submitted:asText', 'header:Precedence:asText', 'header:List-Id:asText', 'header:Return-Path:asText', 'header:X-Auto-Response-Suppress:asText'], fetchTextBodyValues: true, fetchHTMLBodyValues: true, maxBodyValueBytes: 100000 });
       if (!Array.isArray(result.list)) throw new BadGatewayException('JMAP 메일 목록을 확인하지 못했습니다.');
       for (const email of result.list) {
         if (typeof email.id !== 'string' || !ids.includes(email.id)) throw new BadGatewayException('JMAP 메일 식별자가 요청과 다릅니다.');
@@ -59,7 +60,7 @@ export const jmapConnector: MailConnector = {
         messages.push({ source_id: clean(email.id), message_id: email.messageId?.[0] ? `<${clean(email.messageId[0])}>` : '',
           from: clean(email.from?.[0]?.email), to: (email.to || []).slice(0, 100).map((a: any) => clean(a.email)), reply_to: clean(email.replyTo?.[0]?.email),
           subject: clean(email.subject), date: clean(email.receivedAt), text: body.slice(0, 100000), truncated,
-          in_reply_to: email.inReplyTo?.[0] ? `<${clean(email.inReplyTo[0])}>` : '',
+          in_reply_to: email.inReplyTo?.[0] ? `<${clean(email.inReplyTo[0])}>` : '', references: mailReferenceChain(email.references),
           auto_submitted: clean(email['header:Auto-Submitted:asText']), precedence: clean(email['header:Precedence:asText']),
           list_id: clean(email['header:List-Id:asText']), return_path: clean(email['header:Return-Path:asText']), auto_response_suppress: clean(email['header:X-Auto-Response-Suppress:asText']),
           attachments: (email.attachments || []).slice(0, 100).map((a: any) => ({ name: clean(a.name), type: clean(a.type), size: Number(a.size) || 0 })),
@@ -82,6 +83,7 @@ export const jmapConnector: MailConnector = {
       messageId: [content.message_id.replace(/^<|>$/g, '')],
       ...(content.auto_submitted ? { 'header:Auto-Submitted:asText': content.auto_submitted, 'header:X-Auto-Response-Suppress:asText': 'All' } : {}),
       ...(content.in_reply_to ? { inReplyTo: [content.in_reply_to.replace(/^<|>$/g, '')] } : {}),
+      ...(content.references?.length ? { references: content.references.map(id => id.replace(/^<|>$/g, '')) } : {}),
       textBody: [{ partId: 'body', type: 'text/plain' }], bodyValues: { body: { value: content.text } },
     } } });
     const emailId = created.created?.message?.id;

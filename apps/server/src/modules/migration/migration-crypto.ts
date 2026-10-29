@@ -22,6 +22,14 @@ const ENCRYPTED_FIELD_BY_ENTITY: Record<string, string> = {
   SystemSetting: 'value',
 };
 
+/**
+ * 이 서버의 암호화 키로 만든 지문(keyedDigest) 칼럼. 도착지 키로는 맞지 않으므로 import 때 비우고,
+ * 도착지 서비스가 다시 계산한다(BusinessMailService.backfillThreads).
+ */
+const KEYED_DIGEST_FIELDS_BY_ENTITY: Record<string, string[]> = {
+  BusinessMailMessage: ['message_key', 'thread_key', 'subject_key'],
+};
+
 function isSecretSettingRow(entityName: string, row: Record<string, any>): boolean {
   if (entityName !== 'SystemSetting') return true;
   return row?.is_secret === 1 || row?.is_secret === true;
@@ -47,6 +55,8 @@ export function decryptRowForExport(entityName: string, row: Record<string, any>
  * 이 기능이 pg_dump 대비 주는 핵심 이득(암호화 키 이관 자체가 설계상 사라짐).
  */
 export function reencryptRowForImport(entityName: string, row: Record<string, any>): Record<string, any> {
+  const digests = KEYED_DIGEST_FIELDS_BY_ENTITY[entityName];
+  if (digests) row = { ...row, ...Object.fromEntries(digests.map(name => [name, ''])) };
   const field = ENCRYPTED_FIELD_BY_ENTITY[entityName];
   if (!field || !row[field] || !isSecretSettingRow(entityName, row)) return row;
   return { ...row, [field]: encrypt(row[field]) };

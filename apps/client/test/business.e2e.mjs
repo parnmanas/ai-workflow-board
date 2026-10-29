@@ -135,14 +135,20 @@ for (const width of [1440, 390, 320]) {
     const { errors } = await fixture(page);
     const connection = { id: 'mail-1', account_id: account.id, company_id: company.id, name: '운영 메일 · NAS', provider: 'smtp_imap', purpose: 'operations', credential_id: 'mail-key', enabled: true, revision: 0, interval_minutes: 5, status: 'connected', synced_at: '2026-10-24T01:00:00Z', busy: false, last_error: '', config: { addresses: ['ops@example.com', 'support@example.com'], imap: { host: 'mail.example.com', port: 993, username: 'ops@example.com', tls: 'implicit', folder: 'INBOX' }, smtp: { host: 'mail.example.com', port: 587, username: 'ops@example.com', tls: 'starttls' } } };
     const message = { id: 'mail-message-1', connection_id: connection.id, direction: 'inbound', status: 'received', from: 'vendor@example.com', to: ['ops@example.com'], subject: '10월 운영 정산 확인 요청', text: '정산 내역 확인을 요청드립니다.\n<img src="https://tracker.example.com/private">', date: '2026-10-24T00:00:00Z', confirmed: false, revision: 0, note: '', attachments: [{ name: 'invoice.pdf', size: 1200 }], last_error: '' };
-    const filters = [];
+    const filters = []; const sends = [];
+    const thread = () => ({ id: 'thread-1', latest_id: message.id, subject: message.subject, preview: '정산 내역 확인을 요청드립니다.', last_at: message.date, count: 1, inbound: 1, outbound: 0,
+      unconfirmed: message.confirmed ? 0 : 1, attachments: 1, senders: [message.from], connection_ids: [connection.id], statuses: [], replies: [] });
     await page.route('**/api/business/mail/**', async route => {
-      const path = new URL(route.request().url()).pathname; let body;
+      const url = new URL(route.request().url()); const path = url.pathname; let body;
       if (path.endsWith('/connections')) body = { connections: [connection], connectors: [{ id: 'smtp_imap', name: 'SMTP · IMAP', note: '메일 서버의 비밀번호 또는 앱 비밀번호로 연결합니다.' }, { id: 'jmap', name: 'JMAP' }], credentials: [{ id: 'mail-key', name: 'NAS Mail', account_id: account.id }] };
       else if (path.endsWith('/confirm')) { Object.assign(message, route.request().postDataJSON(), { revision: 1, confirmed_at: new Date().toISOString() }); body = message; }
-      else if (path.endsWith('/messages')) { filters.push(new URL(route.request().url()).search); body = { messages: [message], total: 1, offset: 0, limit: 50 }; }
+      else if (path.endsWith('/messages')) {
+        filters.push(url.search);
+        body = url.searchParams.get('view') === 'threads' ? { view: 'threads', threads: [thread()], total: 1, offset: 0, limit: 50 } : { messages: [message], total: 1, offset: 0, limit: 50 };
+      }
       else if (path.endsWith('/reply')) body = null;
-      else body = message;
+      else if (path.endsWith('/send')) { sends.push(route.request().postDataJSON()); body = { ...message, id: 'mail-sent', direction: 'outbound', status: 'accepted' }; }
+      else body = url.searchParams.get('thread') === '1' ? { ...message, thread: { id: 'thread-1', total: 1, messages: [message] } } : message;
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     });
     await page.goto('/business/mail');
@@ -150,14 +156,34 @@ for (const width of [1440, 390, 320]) {
     await page.getByRole('button', { name: '필터', exact: true }).click();
     await page.getByLabel('모든 업무 용도', { exact: true }).selectOption('operations');
     await expect.poll(() => filters.at(-1)).toContain('purpose=operations');
+    await expect.poll(() => filters.at(-1)).toContain('view=threads');
+    await expect(page.locator('.business-mail-thread-row')).toContainText('vendor@example.com');
+    await page.screenshot({ path: `/tmp/awb-mail-threads-${width}.png`, fullPage: true });
     await page.locator('.business-mail-row').click();
-    await expect(page.locator('.business-mail-detail > .business-mail-body')).toContainText('<img');
+    const narrow = width < 800;
+    // Narrow screens swap the list for the open conversation and offer a way back.
+    await expect(page.getByRole('region', { name: '통합 메일 목록' })).toBeVisible({ visible: !narrow });
+    await expect(page.getByRole('button', { name: '← 목록으로', exact: true })).toBeVisible({ visible: narrow });
+    await expect(page.locator('.business-mail-message .business-mail-body')).toContainText('<img');
     await expect(page.locator('.business-mail-body img')).toHaveCount(0);
     await page.getByLabel('처리 메모', { exact: true }).fill('회계 기록과 대조 완료');
     await page.getByRole('button', { name: '확인 완료', exact: true }).click();
     await expect(page.getByRole('button', { name: '미확인으로 되돌리기' })).toBeVisible();
+    await page.getByRole('button', { name: '답장', exact: true }).click();
+    const composer = page.getByRole('region', { name: '답장', exact: true });
+    await expect(composer.getByLabel('받는 사람', { exact: true })).toHaveValue('vendor@example.com');
+    await composer.getByLabel('메일 본문', { exact: true }).fill('확인했습니다. 이번 주 안에 정산하겠습니다.');
+    await expect(composer.getByRole('button', { name: '보내기', exact: true })).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: `/tmp/awb-mail-${width}.png`, fullPage: true });
+    await composer.getByRole('button', { name: '보내기', exact: true }).click();
+    await expect.poll(() => sends.length).toBe(1);
+    expect(sends[0]).toMatchObject({ from: 'ops@example.com', to: ['vendor@example.com'], subject: 'Re: 10월 운영 정산 확인 요청', reply_to_message_id: message.id, confirm: true });
+    await expect(composer).toHaveCount(0);
+    if (narrow) {
+      await page.getByRole('button', { name: '← 목록으로', exact: true }).click();
+      await expect(page.getByRole('region', { name: '통합 메일 목록' })).toBeVisible();
+    }
     await page.getByRole('button', { name: '메일 연결 추가', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await expect.poll(() => page.getByRole('dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);

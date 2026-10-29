@@ -25,7 +25,9 @@ export class BusinessMailController {
   list(@Req() req: any, @Query() query: any) { return this.mail.list(req.accessibleAccountIds || [], query); }
   @Get('messages/:id')
   @Header('Cache-Control', 'no-store')
-  detail(@Req() req: any, @Param('id') id: string) { return this.mail.detail(req.accessibleAccountIds || [], id); }
+  detail(@Req() req: any, @Param('id') id: string, @Query('thread') thread?: string) {
+    return thread === '1' ? this.mail.detailWithThread(req.accessibleAccountIds || [], id) : this.mail.detail(req.accessibleAccountIds || [], id);
+  }
   @Post('messages/:id/confirm')
   confirm(@Req() req: any, @Param('id') id: string, @Body() body: any) { return this.mail.confirm(req.accessibleAccountIds || [], id, body, req.currentUser.id); }
   @Post('connections/:id/send')

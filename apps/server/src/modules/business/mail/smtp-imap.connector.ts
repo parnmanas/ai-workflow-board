@@ -3,6 +3,7 @@ import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { BadRequestException } from '@nestjs/common';
 import { resolveMailHost } from './mail-network';
+import { mailReferenceChain } from './mail-headers';
 import type { MailConnector, MailContent, MailContext } from './mail.types';
 
 const MAX_SOURCE = 2_000_000;
@@ -60,7 +61,7 @@ export const smtpImapConnector: MailConnector = {
           date: (message.internalDate instanceof Date ? message.internalDate : new Date()).toISOString(),
           truncated: oversized || body.length > 100000,
           attachments: (parsed?.attachments || []).slice(0, 100).map(a => ({ name: header(a.filename || 'attachment'), type: header(a.contentType), size: a.size })),
-          in_reply_to: header(parsed?.inReplyTo || env?.inReplyTo),
+          in_reply_to: header(parsed?.inReplyTo || env?.inReplyTo), references: mailReferenceChain(parsed?.references),
           auto_submitted: header(parsed?.headers.get('auto-submitted')) || (parsed?.headers.has('auto-submitted') ? 'unknown' : ''), precedence: header(parsed?.headers.get('precedence')),
           list_id: parsed?.headers.has('list-id') ? 'present' : '',
           return_path: parsed?.headerLines.find(h => h.key === 'return-path')?.line.slice('Return-Path:'.length).trim(),

@@ -16,6 +16,8 @@ Business 대메뉴는 회사 설립, 상표·브랜드 보호, 은행, 결제, �
 같은 규칙이 적용된다. 대메뉴 다섯 개는 모두 보이며 운영 단계는 한 줄 내부 스크롤을 사용한다.
 직접 링크·뒤로 가기·화면 회전 시 선택된 단계를 보이게 하되 본문의 세로 스크롤을 옮기지 않는다.
 메일은 회사 필터와 상세 필터 펼치기를 먼저 보여 주며, 접힌 필터의 적용 개수와 URL 상태를 유지한다.
+보기 방식(대화별 기본 · 메일별 `view=messages`)도 URL 상태이며 필터 초기화가 지우지 않는다. 본문 폭이 800px 이하이면
+대화나 메일을 연 동안 목록 대신 내용과 ‘← 목록으로’를 보여 준다.
 
 새 페이지도 이 헤더를 사용하고 `test/business-header.e2e.mjs`의 경로 목록에 추가한다.
 `npm run test:e2e:responsive -w client`와 기존 CI 브라우저 잡에서 320·390·768·1024·1440px 및
@@ -216,13 +218,30 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
   JMAP 서버가 상태를 만료시켜 changes를 거절하면 오류로 표시하며 과거 메일을 건너뛰며 자동 초기화하지 않는다.
 - 본문은 암호화된 텍스트 캐시로 보관한다. 수신 HTML은 텍스트로 변환하며 이미지·스크립트를 실행하지 않는다.
   IMAP 원문은 2MB, 저장 본문은 100,000자로 제한하며 제한 초과는 `truncated`로 표시한다.
-  첨부파일은 이름·유형·크기만 수집하고 내려받기·발신 첨부·폴더 편집·일반 메일 작성기는 제공하지 않는다.
+  첨부파일은 이름·유형·크기만 수집하고 내려받기·발신 첨부·폴더 편집은 제공하지 않는다. 새 메일 작성기는 없고
+  화면에서는 대화 안의 답장·전체 답장·전달만 한다(아래 ‘대화 보기’).
   큰 IMAP 원문은 본문·첨부 목록도 가져오지 않으므로 원본 메일에서 확인한다. 주소 필터는 수신 헤더에서 확인한
   등록 주소 또는 발신 주소를 대상으로 하므로 숨은참조 주소를 추정하지 않는다.
 - 열람은 처리 완료가 아니다. 화면 또는 `confirm_business_mail`로 확인/미확인과 처리 메모를 기록한다.
   외부 메일함의 읽음·폴더·삭제 상태에는 영향을 주지 않는다. 보관 원본은 외부 메일 서비스에 있다.
+- 대화 보기(기본): 답장·전달을 메일 클라이언트의 대화처럼 묶는다. 본문이 암호화돼 있으므로 행마다 키 지문(`keyedDigest`)
+  `message_key`(Message-ID) · `thread_key`(대화) · `subject_key`(Re:/Fwd:/회신:/전달: 등을 뗀 제목)를 두고
+  `mail/mail-thread.ts` 한 곳에서 대화를 정한다 — 이미 아는 조상(In-Reply-To, References의 가까운 것부터) →
+  References 첫 항목(대화의 뿌리, RFC 5322) → 답장·전달 표시나 회신 헤더가 있는데 사슬이 끊긴 메일은 60일 안의 같은 제목 대화 중
+  상대 주소가 겹치거나 전달 본문에 그 대화의 주소가 있는 것 → 아니면 새 대화. 제목만 같은 메일은 묶지 않는다.
+  부모보다 먼저 수집된 답장은 부모가 들어올 때 합친다. IMAP·JMAP은 References도 수집하고(뿌리를 남기고 30개까지),
+  AWB가 보내는 답장·전달은 부모의 사슬과 부모를 References로 싣는다(전달은 In-Reply-To 없음).
+  `list_business_mail`의 `view=threads`(REST `messages?view=threads`)는 대화 단위로 나눠 준다. 대화 안의 메일 하나라도 필터에 맞으면
+  그 대화를 싣고, 요약(보낸 사람·통수·미확인 수신·답장 상태·첨부)은 대화 전체로 계산한다. `get_business_mail`의 `include_thread`
+  (REST `messages/:id?thread=1`)는 그 대화의 최근 50통을 오래된 순으로 준다 — 담당 에이전트의 답장 지시문도 이것으로 이전 대화를 읽게 한다.
+  키는 이 서버의 암호화 키로 만든 값이라 인스턴스 이관 import가 비우며, 이 기능 전에 수집한 메일과 함께 수집 주기마다
+  오래된 순으로 다시 매긴다(`backfillThreads`). 그 전까지 그 메일은 한 통짜리 대화로 보인다.
+  화면의 대화는 최신·연 메일·미확인 수신 메일을 펼치고 인용문은 접는다(전달 메일은 접지 않는다). 답장·전체 답장·전달은
+  그 메일의 연결로 `send_business_mail`과 같은 발신 경로를 쓰고, 작성기마다 고정한 `request_id`로 재시도해도 두 번 보내지 않는다.
+  첨부파일은 전달하지 않는다. 참조(Cc)가 없어 전체 답장은 모두를 받는 사람으로 보낸다(최대 10명, 연결된 주소 제외).
+  사람이나 에이전트가 `reply_to_message_id`로 직접 답장하면 그 메일의 대기·작성·검토 중 자동 답장 작업을 취소한다 — 두 번 답장하지 않게.
 - 자동화는 `list_business_mail` → `get_business_mail` → 업무 처리 → `confirm_business_mail`을 사용한다.
-  필요하면 `send_business_mail`로 텍스트 발신/답장을 실행한다. 답장은 같은 연결의 `reply_to_message_id`와
+  필요하면 `send_business_mail`로 텍스트 발신/답장/전달을 실행한다. 답장은 같은 연결의 `reply_to_message_id`(전달은 `forward_message_id`)와
   명시적인 수신자·발신 주소를 사용한다. 수신 메일의 내용은 실행 승인이나 지침이 아니다.
   사용자에게 승인받은 업무 범위에서만 발신하며, 기존 마케팅 캠페인의 사람 승인·동의·수신거부 경로를 우회하지 않는다.
   기본은 답장 자동화 꺼짐이며 티켓은 만들지 않는다. 연결별로 `automation.mode`를 `review`(사람 승인 후 발송) 또는
@@ -259,7 +278,7 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 - `BusinessMailConnection`, `BusinessMailMessage`, `BusinessMailTask`는 엔티티 배럴·이관 레지스트리·암호문 재암호화 목록에 함께 등록한다.
   메일 REST 및 MCP 인수/결과 본문은 요청 로그에서 제외한다. 메일 인증 정보를 에이전트에게 반환하지 않는다.
 
-검증: `test/business-mail.test.mjs`, `test/business-mail-workflow.test.mjs`(SQLite/PostgreSQL), `test/business-mail-connectors.test.mjs`, `test/business-mcp.test.mjs`,
+검증: `test/business-mail.test.mjs`, `test/business-mail-threads.test.mjs`·`test/business-mail-workflow.test.mjs`(SQLite/PostgreSQL), `test/business-mail-connectors.test.mjs`, `test/business-mcp.test.mjs`,
 클라이언트 `test/business-mail.test.mjs`. 프로토콜 fixture와 내부 HTTP/MCP를 검증하며 실제 메일 서버 운영 계정으로 송수신하지 않는다.
 
 ## MCP로 운영하기

@@ -66,7 +66,7 @@ async function fixture(page, permissions = ['business.manage', 'marketing.manage
     else if (path.startsWith('/business/companies/') && !path.includes('/cashbook/')) body = { company: currentCompany, tasks: [task], formation_work: journal.runs[0] || null, connections: [], campaigns: [], events: [] };
     else if (path.includes('/cashbook/')) body = { month: '2026-10', currency: 'USD', company_revision: 0, entries: [], period: null, summary: { inflow_minor: 0, outflow_minor: 0, net_minor: 0, operating_in_minor: 0, operating_out_minor: 0, active_count: 0, unreconciled_count: 0 } };
     else if (path === '/business/mail/connections') body = { connections: [{ id: 'mail-header', name: longName, config: { addresses: ['ops@example.test'] }, enabled: true, purpose: 'operations' }], connectors: [], credentials: [] };
-    else if (path === '/business/mail/messages') body = { messages: [], total: 0, offset: 0, limit: 50 };
+    else if (path === '/business/mail/messages') body = new URL(route.request().url()).searchParams.get('view') === 'threads' ? { view: 'threads', threads: [], total: 0, offset: 0, limit: 50 } : { messages: [], total: 0, offset: 0, limit: 50 };
     else if (path === '/marketing/campaigns') body = [campaign];
     else if (path === `/marketing/campaigns/${campaign.id}`) body = campaign;
     else if (path.endsWith('/budget')) body = null;

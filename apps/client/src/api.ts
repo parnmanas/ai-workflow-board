@@ -1,5 +1,5 @@
 import { t as translate } from './i18n/core';
-import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage } from './business-mail.types';
+import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage, MailThreadList, BusinessMailWithThread, MailSendInput } from './business-mail.types';
 import { localizeBusinessConnector, localizeMailConnector, localizeSelfServiceAssessment, localizeTrademarkConnector } from './i18n/catalog';
 import type { AgentTemplate } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
@@ -2644,6 +2644,9 @@ export const api = {
   syncBusinessMail: (id: string) => request<{ collected: number; has_more: boolean }>(`/business/mail/connections/${encodeURIComponent(id)}/sync`, { method: 'POST' }),
   listBusinessMail: (filters: Record<string, string> = {}) => request<MailList>(`/business/mail/messages?${new URLSearchParams(filters)}`),
   getBusinessMail: (id: string) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}`),
+  listBusinessMailThreads: (filters: Record<string, string> = {}) => request<MailThreadList>(`/business/mail/messages?${new URLSearchParams({ ...filters, view: 'threads' })}`),
+  getBusinessMailThread: (id: string) => request<BusinessMailWithThread>(`/business/mail/messages/${encodeURIComponent(id)}?thread=1`),
+  sendBusinessMail: (connectionId: string, input: MailSendInput) => request<BusinessMailMessage>(`/business/mail/connections/${encodeURIComponent(connectionId)}/send`, { method: 'POST', body: JSON.stringify(input) }),
   confirmBusinessMail: (id: string, input: { revision: number; confirmed: boolean; note: string }) => request<BusinessMailMessage>(`/business/mail/messages/${encodeURIComponent(id)}/confirm`, { method: 'POST', body: JSON.stringify(input) }),
   getBusinessMailReply: (id: string) => request<MailReply | null>(`/business/mail/messages/${encodeURIComponent(id)}/reply`),
   startBusinessMailReply: (id: string) => request<MailReply>(`/business/mail/messages/${encodeURIComponent(id)}/reply`, { method: 'POST' }),

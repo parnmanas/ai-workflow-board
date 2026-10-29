@@ -7,16 +7,25 @@ import { api } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
 import type { BusinessCompany } from '../../business.types';
-import type { BusinessMailMessage, MailConnection, MailConnections, MailList } from '../../business-mail.types';
+import type { BusinessMailMessage, BusinessMailWithThread, MailConnection, MailConnections, MailList, MailThread, MailThreadList } from '../../business-mail.types';
 import { Button, Textarea } from '../common';
 import { BusinessIcon } from './BusinessIcon';
 import { BusinessMailConnectionForm, MAIL_PURPOSES } from './BusinessMailConnectionForm';
 import BusinessMailReplyPanel, { MAIL_REPLY_STATUS } from './BusinessMailReplyPanel';
+import BusinessMailConversation, { MAIL_STATUS as STATUS, mailWhen as when } from './BusinessMailConversation';
+import { ownMailAddresses } from './business-mail.logic';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { BusinessPageHeader } from './BusinessPageHeader';
 
-const STATUS = { get received() { return translate('수신'); }, get sending() { return translate('발신 중'); }, get accepted() { return translate('서버 접수'); }, get uncertain() { return translate('발신 확인 필요'); } };
-const when = (value: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(getLocaleTag()) : '—';
+/** Short list date like a mail client: time today, day this year, full date before. */
+const shortWhen = (value: string) => {
+  const date = new Date(value); if (!value || !Number.isFinite(date.getTime())) return '—';
+  const now = new Date(); const locale = getLocaleTag();
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' });
+  return date.toLocaleDateString(locale, date.getFullYear() === now.getFullYear() ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
+};
+// Reply states that still need someone (finished and skipped ones are history).
+const OPEN_REPLY_STATES = ['review', 'uncertain', 'failed', 'drafting', 'queued'] as const;
 
 export default function BusinessMailPage() {
   useLocale();
@@ -25,8 +34,11 @@ export default function BusinessMailPage() {
   const [params, setParams] = useSearchParams();
   const [catalog, setCatalog] = useState<MailConnections>({ connectors: [], connections: [], credentials: [] });
   const [companies, setCompanies] = useState<BusinessCompany[]>([]);
+  const view = params.get('view') === 'messages' ? 'messages' : 'threads';
   const [list, setList] = useState<MailList>({ messages: [], total: 0, offset: 0, limit: 50 });
+  const [threadList, setThreadList] = useState<MailThreadList>({ view: 'threads', threads: [], total: 0, offset: 0, limit: 50 });
   const [detail, setDetail] = useState<BusinessMailMessage | null>(null);
+  const [conversation, setConversation] = useState<BusinessMailWithThread | null>(null);
   const [selected, setSelected] = useState(params.get('message') || ''); const [note, setNote] = useState('');
   const [editor, setEditor] = useState<MailConnection | 'new' | null>(null);
   const [error, setError] = useState(''); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState('');
@@ -41,22 +53,45 @@ export default function BusinessMailPage() {
   useEffect(() => {
     if (!allowed) return;
     let active = true; setLoading(true);
-    void Promise.all([api.listBusinessMailConnections(), api.listBusinessCompanies(), api.listBusinessMail(JSON.parse(filterKey))])
-      .then(([connections, companyRows, messages]) => { if (active) { setCatalog(connections); setCompanies(companyRows); setList(messages); setError(''); } })
+    const filtersNow = JSON.parse(filterKey);
+    void Promise.all([api.listBusinessMailConnections(), api.listBusinessCompanies(), view === 'threads' ? api.listBusinessMailThreads(filtersNow) : api.listBusinessMail(filtersNow)])
+      .then(([connections, companyRows, rows]) => {
+        if (!active) return;
+        setCatalog(connections); setCompanies(companyRows); setError('');
+        if ('threads' in rows) setThreadList(rows); else setList(rows);
+      })
       .catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [allowed, filterKey, refresh]);
+  }, [allowed, filterKey, refresh, view]);
   useEffect(() => { const timer = setInterval(() => { if (!document.hidden) setRefresh(n => n + 1); }, 30000); return () => clearInterval(timer); }, []);
   useEffect(() => {
-    let active = true; setDetail(null); setNote('');
-    if (allowed && selected) void api.getBusinessMail(selected).then(row => { if (active) { setDetail(row); setNote(row.note || ''); } }).catch(e => { if (active) showToast(e.message, 'error'); });
+    let active = true; setDetail(null); setNote(''); setConversation(null);
+    if (allowed && selected && view === 'messages') void api.getBusinessMail(selected).then(row => { if (active) { setDetail(row); setNote(row.note || ''); } }).catch(e => { if (active) showToast(e.message, 'error'); });
     return () => { active = false; };
-  }, [selected, allowed, showToast]);
+  }, [selected, allowed, showToast, view]);
+  // The open conversation follows new mail and processing without remounting (an unsent draft stays).
+  useEffect(() => {
+    let active = true;
+    if (allowed && selected && view === 'threads') void api.getBusinessMailThread(selected).then(row => { if (active) setConversation(row); }).catch(e => { if (active) showToast(e.message, 'error'); });
+    return () => { active = false; };
+  }, [selected, allowed, showToast, view, refresh]);
   const filter = (key: string, value: string) => {
     const next = new URLSearchParams(params); next.delete('offset'); next.delete('message'); if (key === 'company_id') next.delete('company');
     if (value) next.set(key, value); else next.delete(key);
     setParams(next); setSelected('');
   };
+  const setView = (next: 'threads' | 'messages') => {
+    const query = new URLSearchParams(params); query.delete('offset'); query.delete('message');
+    if (next === 'messages') query.set('view', 'messages'); else query.delete('view');
+    setParams(query); setSelected('');
+  };
+  const own = ownMailAddresses(catalog.connections);
+  const connectionName = (id: string) => catalog.connections.find(c => c.id === id)?.name || translate('메일 연결');
+  const senders = (thread: MailThread) => {
+    const names = thread.senders.map(a => own.has(a.toLowerCase()) ? translate('나') : thread.senders.length > 1 ? a.split('@')[0] : a);
+    return names.join(', ') || '—';
+  };
+  const page = view === 'threads' ? threadList : list;
   const select = (key: string, label: string, options: Array<{ value: string; label: string }>) => <select className="business-filter" aria-label={label} value={filters[key] || ''} onChange={e => filter(key, e.target.value)}><option value="">{label}</option>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>;
   const sync = async (row: MailConnection) => {
     setBusy(row.id);
@@ -95,21 +130,44 @@ export default function BusinessMailPage() {
         {select('confirmation', translate('처리 상태 전체'), [{ value: 'pending', label: translate('미확인') }, { value: 'confirmed', label: translate('확인 완료') }])}
         {select('status', translate('발신·수신 상태 전체'), Object.entries(STATUS).map(([value, label]) => ({ value, label })))}
         {select('reply_status', translate('답장 상태 전체'), Object.entries(MAIL_REPLY_STATUS).map(([value, label]) => ({ value, label })))}
-        <Button variant="ghost" onClick={() => { setParams(connectionsOpen ? { connections: '1' } : {}); setSelected(''); }}>{translate('필터 초기화')}</Button>
+        <Button variant="ghost" onClick={() => { setParams({ ...(connectionsOpen ? { connections: '1' } : {}), ...(view === 'messages' ? { view } : {}) }); setSelected(''); }}>{translate('필터 초기화')}</Button>
+      </div>
+      <div className="business-chip-filters business-mail-view" role="group" aria-label={translate('메일 보기 방식')}>
+        <button aria-pressed={view === 'threads'} onClick={() => setView('threads')}>{translate('대화별')}</button>
+        <button aria-pressed={view === 'messages'} onClick={() => setView('messages')}>{translate('메일별')}</button>
       </div>
     </div>
-    <div className="business-mail-workspace">
+    <div className={`business-mail-workspace ${selected ? 'has-selection' : ''}`}>
       <section className="business-panel business-mail-list" aria-label={translate('통합 메일 목록')} aria-busy={loading}>
-        <div className="business-section-heading"><h2>{translate('전체 메일')}</h2><span className="business-muted">{list.total}{translate('건')}{loading ? translate(' · 불러오는 중…') : ''}</span></div>
-        {!loading && !list.messages.length && <p className="business-empty-inline">{translate('조건에 맞는 메일이 없습니다. 연결을 추가하거나 수집 상태를 확인하세요.')}</p>}
-        {list.messages.map(message => <button key={message.id} disabled={!!busy} className={`business-mail-row ${selected === message.id ? 'selected' : ''}`} onClick={() => setSelected(message.id)} aria-pressed={selected === message.id}>
-          <span className="business-mail-row-meta"><span>{catalog.connections.find(c => c.id === message.connection_id)?.name || translate('메일 연결')}</span><span>{message.reply ? MAIL_REPLY_STATUS[message.reply.status] : STATUS[message.status]} · {message.confirmed ? translate('확인 완료') : translate('미확인')}</span></span>
+        <div className="business-section-heading"><h2>{view === 'threads' ? translate('대화') : translate('전체 메일')}</h2><span className="business-muted">{view === 'threads' ? translate('{0}개 대화', { 0: page.total }) : <>{page.total}{translate('건')}</>}{loading ? translate(' · 불러오는 중…') : ''}</span></div>
+        {!loading && !(view === 'threads' ? threadList.threads.length : list.messages.length) && <p className="business-empty-inline">{translate('조건에 맞는 메일이 없습니다. 연결을 추가하거나 수집 상태를 확인하세요.')}</p>}
+        {view === 'threads' ? threadList.threads.map(thread => {
+          const current = conversation ? conversation.thread.id === thread.id : selected === thread.latest_id;
+          const replies = OPEN_REPLY_STATES.filter(state => thread.replies.includes(state));
+          return <button key={thread.id} disabled={!!busy} className={`business-mail-row business-mail-thread-row ${current ? 'selected' : ''} ${thread.unconfirmed ? 'unconfirmed' : ''}`} onClick={() => setSelected(thread.latest_id)} aria-pressed={current}>
+            <span className="business-mail-row-meta"><span className="business-mail-senders" title={thread.senders.join(', ')}>{senders(thread)}{thread.count > 1 && <span className="business-mail-count">{thread.count}</span>}</span><small>{shortWhen(thread.last_at)}</small></span>
+            <strong>{thread.subject || translate('(제목 없음)')}</strong>
+            <span className="business-mail-preview">{thread.preview}</span>
+            <span className="business-mail-row-tags">
+              <span className="business-pill">{thread.connection_ids.map(connectionName).join(', ')}</span>
+              {thread.unconfirmed > 0 && <span className="business-pill waiting">{translate('미확인 {0}', { 0: thread.unconfirmed })}</span>}
+              {replies.map(state => <span key={state} className="business-pill in_progress">{MAIL_REPLY_STATUS[state]}</span>)}
+              {thread.statuses.map(state => <span key={state} className="business-pill error">{STATUS[state]}</span>)}
+              {thread.attachments > 0 && <span className="business-pill">{translate('첨부 {0}', { 0: thread.attachments })}</span>}
+            </span>
+          </button>;
+        }) : list.messages.map(message => <button key={message.id} disabled={!!busy} className={`business-mail-row ${selected === message.id ? 'selected' : ''}`} onClick={() => setSelected(message.id)} aria-pressed={selected === message.id}>
+          <span className="business-mail-row-meta"><span>{connectionName(message.connection_id)}</span><span>{message.reply ? MAIL_REPLY_STATUS[message.reply.status] : STATUS[message.status]} · {message.confirmed ? translate('확인 완료') : translate('미확인')}</span></span>
           <strong>{message.subject || translate('(제목 없음)')}</strong><span>{message.direction === 'inbound' ? message.from : message.to.join(', ')}</span><small>{when(message.date || message.created_at)}</small>
         </button>)}
-        <div className="business-card-actions business-mail-pagination"><Button variant="ghost" disabled={loading || list.offset === 0} onClick={() => filter('offset', String(Math.max(0, list.offset - list.limit)))}>{translate('이전')}</Button><span className="business-muted">{list.total ? `${list.offset + 1}–${Math.min(list.total, list.offset + list.limit)}` : '0'}</span><Button variant="ghost" disabled={loading || list.offset + list.limit >= list.total} onClick={() => filter('offset', String(list.offset + list.limit))}>{translate('다음')}</Button></div>
+        <div className="business-card-actions business-mail-pagination"><Button variant="ghost" disabled={loading || page.offset === 0} onClick={() => filter('offset', String(Math.max(0, page.offset - page.limit)))}>{translate('이전')}</Button><span className="business-muted">{page.total ? `${page.offset + 1}–${Math.min(page.total, page.offset + page.limit)}` : '0'}</span><Button variant="ghost" disabled={loading || page.offset + page.limit >= page.total} onClick={() => filter('offset', String(page.offset + page.limit))}>{translate('다음')}</Button></div>
       </section>
       <section className="business-panel business-mail-detail" aria-label={translate('메일 내용')}>
-        {!detail ? <p className="business-muted">{selected ? translate('메일을 불러오는 중…') : translate('메일을 선택해 내용과 자동화 결과를 확인하세요.')}</p> : <>
+        {selected && <button className="business-mail-back" onClick={() => setSelected('')}>{translate('← 목록으로')}</button>}
+        {view === 'threads' ? !conversation || !conversation.thread.messages.some(m => m.id === selected)
+          ? <p className="business-muted">{selected ? translate('메일을 불러오는 중…') : translate('대화를 선택하면 답장·전달을 한 흐름으로 확인할 수 있습니다.')}</p>
+          : <BusinessMailConversation key={conversation.thread.id} data={conversation} connections={catalog.connections} focusId={selected} refresh={refresh} onChanged={() => setRefresh(n => n + 1)} />
+        : !detail ? <p className="business-muted">{selected ? translate('메일을 불러오는 중…') : translate('메일을 선택해 내용과 자동화 결과를 확인하세요.')}</p> : <>
           <div className="business-section-heading"><h2>{detail.subject || translate('(제목 없음)')}</h2><span className="business-pill">{STATUS[detail.status]}</span></div>
           <p className="business-muted">{translate('보낸 사람:')} {detail.from}<br />{translate('받는 사람:')} {detail.to.join(', ')}<br />{when(detail.date)}</p>
           {detail.last_error && <p role="status" className="business-error">{detail.last_error}</p>}

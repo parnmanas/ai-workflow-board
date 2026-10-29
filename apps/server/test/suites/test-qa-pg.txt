@@ -9,6 +9,7 @@ test/account-ownership-migration.test.mjs
 test/agent-session-execution-ownership.test.mjs
 test/agent-session-media-ownership.test.mjs
 test/business-http.test.mjs
+test/business-mail-threads.test.mjs
 test/business-mail-workflow.test.mjs
 test/business-mail.test.mjs
 test/business-workflow.test.mjs

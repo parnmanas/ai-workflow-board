@@ -43,12 +43,14 @@ export const mailFiltersSchema = z.object({
   reply_status: z.enum(['queued', 'drafting', 'review', 'sending', 'sent', 'uncertain', 'skipped', 'failed', 'cancelled']).optional(),
   offset: z.coerce.number().int().min(0).max(1000000).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  view: z.enum(['messages', 'threads']).default('messages').describe('threads groups replies and forwards into conversations; a conversation matches when any of its mail matches, and offset/limit count conversations.'),
 });
 export const mailSendSchema = z.object({
   request_id: z.string().uuid().describe('Stable automation operation ID. Reuse unchanged on retries.'),
   from: addressSchema, to: z.array(addressSchema).min(1).max(10),
   subject: line(500).min(1), text: z.string().min(1).max(100000),
   reply_to_message_id: z.string().uuid().optional(),
+  forward_message_id: z.string().uuid().optional().describe('Forward this collected mail of the same connection: keeps it in the conversation (References) without replying. Attachments are not forwarded. Not with reply_to_message_id.'),
   confirm: z.literal(true),
 });
 export const mailConfirmSchema = z.object({

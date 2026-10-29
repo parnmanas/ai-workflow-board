@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, In, LessThanOrEqual } from 'typeorm';
+import { DataSource, EntityManager, In, LessThanOrEqual } from 'typeorm';
 import { createHash, randomUUID } from 'node:crypto';
 import { BusinessMailConnection } from '../../entities/BusinessMailConnection';
 import { BusinessMailMessage } from '../../entities/BusinessMailMessage';
@@ -17,21 +17,31 @@ import { mailConfigSchema, mailConnectionSchema, mailConfirmSchema, mailFiltersS
 import { mailUrl } from './mail/mail-network';
 import { activityEvents } from '../../services/activity.service';
 import { automationFingerprint, mailAutomation, validateMailRuntime, type MailTaskData } from './mail/mail-automation';
+import { assignMailThread, mailReferences } from './mail/mail-thread';
 
 const now = () => new Date().toISOString();
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const read = <T>(value: string): T => JSON.parse(decryptStrict(value));
 const SAFE_ERROR = '메일 연결·인증·서비스 한도를 확인하세요. 기존 수집 기록은 유지됩니다.';
 const UNCERTAIN = '발신 결과를 확정하지 못했습니다. 서버의 발신 기록을 확인하세요. 같은 요청은 다시 전송하지 않습니다.';
+const THREAD_PAGE = 50;
+const THREAD_PREVIEW_ROWS = 20;
+// Rows collected before conversation keys existed stay single-message conversations until the backfill reaches them.
+const THREAD_EXPR = "COALESCE(NULLIF(m.thread_key, ''), 'id:' || CAST(m.id AS varchar))";
 
 @Injectable()
 export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
   readonly watchStates = new Map<string, { mode: 'idle' | 'push' | 'polling'; error?: string }>();
   private timer?: ReturnType<typeof setInterval>;
+  private backfillTimer?: ReturnType<typeof setTimeout>;
   private ticking = false;
+  private backfilling?: Promise<number>;
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
-  onModuleInit() { this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 30_000); this.timer.unref(); }
-  onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
+  onModuleInit() {
+    this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 30_000); this.timer.unref();
+    this.backfillTimer = setTimeout(() => { void this.backfillThreads().catch(() => {}); }, 1000); this.backfillTimer.unref();
+  }
+  onModuleDestroy() { if (this.timer) clearInterval(this.timer); if (this.backfillTimer) clearTimeout(this.backfillTimer); }
 
   async connection(id: string, accountIds: string[]) {
     const row = accountIds.length ? await this.ds.getRepository(BusinessMailConnection).findOneBy({ id, account_id: In(accountIds) }) : null;
@@ -56,7 +66,7 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
       receiving: this.watchStates.get(row.id) || { mode: 'polling' }, busy: lease_until > now() };
   }
   private publicMessage(row: BusinessMailMessage, full = false) {
-    const { encrypted_data, source_key, address_keys, payload_digest, ...safe } = row;
+    const { encrypted_data, source_key, address_keys, payload_digest, message_key, thread_key, subject_key, ...safe } = row;
     const { text, ...content } = read<MailContent>(encrypted_data);
     // A dead process cannot safely retry SMTP. Viewing a stale attempt makes that ambiguity explicit.
     const stale = row.status === 'sending' && Date.now() - new Date(row.created_at).getTime() > 10 * 60_000;
@@ -146,6 +156,13 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     } finally { await repo.update({ id: row.id, lease_token: lease }, { lease_token: '', lease_until: '' }); }
   }
 
+  /** Every connected address of the Account: conversation matching compares the other parties only. */
+  private async ownAddresses(accountId: string, manager: EntityManager = this.ds.manager) {
+    const rows = await manager.getRepository(BusinessMailConnection).find({ where: { account_id: accountId }, select: ['id', 'encrypted_data'] });
+    // An unreadable connection only loses its addresses here; it must not stop collecting or grouping other mail.
+    return new Set(rows.flatMap(r => { try { return read<MailData>(r.encrypted_data).config.addresses.map(a => a.toLowerCase()); } catch { return []; } }));
+  }
+
   async watchContext(row: BusinessMailConnection): Promise<MailContext> {
     await this.activeOwner(row.account_id);
     const data = read<MailData>(row.encrypted_data);
@@ -157,6 +174,7 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     return this.locked(row, async (data, context) => {
       try {
         const result = await mailConnector(row.provider).sync(context);
+        const own = await this.ownAddresses(row.account_id);
         let collected = 0;
         await this.ds.transaction(async manager => {
           // The cursor and every collected record commit together, with a fenced connection lease.
@@ -170,8 +188,9 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
             const key = `in:${digest(message.source_id)}`;
             if (await repo.existsBy({ connection_id: id, source_key: key })) continue;
             const messageId = randomUUID();
+            const thread = await assignMailThread(manager, { accountId: row.account_id, rowId: messageId, content: message, own, at: new Date() });
             await repo.insert({ id: messageId, account_id: row.account_id, connection_id: id, source_key: key, direction: 'inbound',
-              encrypted_data: encrypt(JSON.stringify(message)), status: 'received',
+              encrypted_data: encrypt(JSON.stringify(message)), status: 'received', ...thread,
               address_keys: '\n' + context.config.addresses.filter(a => message.to.some(to => to.toLowerCase() === a.toLowerCase())).map(a => a.toLowerCase()).join('\n') + '\n' });
             // A first import (or UIDVALIDITY reset) is history, not a fresh arrival.
             if (data.cursor && Object.keys(data.cursor).length && !result.baseline) {
@@ -196,9 +215,7 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async list(accountIds: string[], filters: unknown) {
-    const input = parseMail(mailFiltersSchema, filters);
-    if (!accountIds.length) return { messages: [], total: 0, offset: input.offset, limit: input.limit };
+  private filtered(accountIds: string[], input: ReturnType<typeof mailFiltersSchema.parse>) {
     const query = this.ds.getRepository(BusinessMailMessage).createQueryBuilder('m')
       // PostgreSQL stores generated IDs as uuid, but plain references as varchar.
       .innerJoin(BusinessMailConnection, 'c', 'CAST(c.id AS varchar) = m.connection_id AND c.account_id = m.account_id')
@@ -214,9 +231,73 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     if (input.address) query.andWhere("m.address_keys LIKE :address ESCAPE '!'", { address: `%\n${input.address.toLowerCase().replace(/[!%_]/g, c => '!' + c)}\n%` });
     if (input.confirmation) query.andWhere('m.confirmed = :confirmed', { confirmed: input.confirmation === 'confirmed' });
     if (input.reply_status) query.andWhere('EXISTS (SELECT 1 FROM business_mail_tasks t WHERE t.message_id = CAST(m.id AS varchar) AND t.account_id = m.account_id AND t.status = :replyStatus)', { replyStatus: input.reply_status });
-    const [rows, total] = await query.orderBy('m.created_at', 'DESC').addOrderBy('m.id', 'DESC').skip(input.offset).take(input.limit).getManyAndCount();
-    const tasks = rows.length ? await this.ds.getRepository(BusinessMailTask).find({ where: { message_id: In(rows.map(r => r.id)), account_id: In(accountIds) }, select: ['id', 'message_id', 'status'] }) : [];
+    return query;
+  }
+  private async replyTasks(accountIds: string[], ids: string[]): Promise<BusinessMailTask[]> {
+    return ids.length ? this.ds.getRepository(BusinessMailTask).find({ where: { message_id: In(ids), account_id: In(accountIds) }, select: ['id', 'message_id', 'status'] }) : [];
+  }
+
+  async list(accountIds: string[], filters: unknown) {
+    const input = parseMail(mailFiltersSchema, filters);
+    if (input.view === 'threads') return this.threads(accountIds, input);
+    if (!accountIds.length) return { messages: [], total: 0, offset: input.offset, limit: input.limit };
+    const [rows, total] = await this.filtered(accountIds, input).orderBy('m.created_at', 'DESC').addOrderBy('m.id', 'DESC').skip(input.offset).take(input.limit).getManyAndCount();
+    const tasks = await this.replyTasks(accountIds, rows.map(r => r.id));
     return { messages: rows.map(r => ({ ...this.publicMessage(r), reply: tasks.find(t => t.message_id === r.id) || null })), total, offset: input.offset, limit: input.limit };
+  }
+
+  /**
+   * Conversations, newest activity first. A conversation is listed when any of its mail matches the filters,
+   * and its summary covers all of its mail (like a mail client's conversation view).
+   */
+  private async threads(accountIds: string[], input: ReturnType<typeof mailFiltersSchema.parse>) {
+    const empty = { view: 'threads' as const, threads: [], total: 0, offset: input.offset, limit: input.limit };
+    if (!accountIds.length) return empty;
+    const grouped = this.filtered(accountIds, input).select(THREAD_EXPR, 'thread').addSelect('m.account_id', 'account')
+      .addSelect('MAX(m.created_at)', 'last_at').groupBy(THREAD_EXPR).addGroupBy('m.account_id');
+    const [countSql, countParams] = grouped.getQueryAndParameters();
+    const total = Number((await this.ds.query(`SELECT COUNT(*) AS n FROM (${countSql}) g`, countParams))[0]?.n || 0);
+    const page: Array<{ thread: string; account: string }> = await grouped.orderBy('last_at', 'DESC').addOrderBy('thread', 'DESC')
+      .offset(input.offset).limit(Math.min(input.limit, THREAD_PAGE)).getRawMany();
+    if (!page.length) return { ...empty, total };
+    const keys = page.filter(p => !p.thread.startsWith('id:')).map(p => p.thread);
+    const singles = page.filter(p => p.thread.startsWith('id:')).map(p => p.thread.slice(3));
+    const repo = this.ds.getRepository(BusinessMailMessage);
+    const heads = await repo.createQueryBuilder('m')
+      .select(['m.id', 'm.account_id', 'm.connection_id', 'm.thread_key', 'm.direction', 'm.status', 'm.confirmed', 'm.created_at'])
+      .where('m.account_id IN (:...accounts)', { accounts: [...new Set(page.map(p => p.account))].filter(a => accountIds.includes(a)) })
+      .andWhere(keys.length && singles.length ? '(m.thread_key IN (:...keys) OR m.id IN (:...singles))' : keys.length ? 'm.thread_key IN (:...keys)' : 'm.id IN (:...singles)', { keys, singles })
+      .orderBy('m.created_at', 'DESC').addOrderBy('m.id', 'DESC').getMany();
+    const byThread = new Map<string, BusinessMailMessage[]>();
+    for (const head of heads) {
+      const thread = `${head.account_id}\n${head.thread_key || `id:${head.id}`}`;
+      byThread.set(thread, [...(byThread.get(thread) || []), head]);
+    }
+    const shown = [...byThread.values()].flatMap(rows => rows.slice(0, THREAD_PREVIEW_ROWS).map(r => r.id));
+    const [bodies, tasks] = await Promise.all([
+      repo.find({ where: { id: In(shown), account_id: In(accountIds) } }),
+      this.replyTasks(accountIds, heads.map(h => h.id)),
+    ]);
+    const content = new Map(bodies.map(row => [row.id, this.publicMessage(row)]));
+    const threads = page.map(p => {
+      const rows = byThread.get(`${p.account}\n${p.thread}`) || [];
+      const messages = rows.map(r => content.get(r.id)).filter(<T>(m: T | undefined): m is T => !!m);
+      const latest = messages[0]; const first = messages[messages.length - 1];
+      const replies = tasks.filter(t => rows.some(r => r.id === t.message_id));
+      return {
+        id: p.thread, latest_id: rows[0]?.id || '', subject: first?.subject || latest?.subject || '', preview: latest && 'preview' in latest ? latest.preview : '',
+        last_at: latest?.date || (rows[0]?.created_at ? new Date(rows[0].created_at).toISOString() : ''),
+        count: rows.length, unconfirmed: rows.filter(r => r.direction === 'inbound' && !r.confirmed).length,
+        inbound: rows.filter(r => r.direction === 'inbound').length, outbound: rows.filter(r => r.direction === 'outbound').length,
+        // Senders oldest first, like a mail client's conversation row.
+        senders: [...new Set([...messages].reverse().map(m => m.from).filter(Boolean))],
+        connection_ids: [...new Set(rows.map(r => r.connection_id))],
+        attachments: messages.reduce((n, m) => n + (m.attachments?.length || 0), 0),
+        statuses: [...new Set(messages.filter(m => m.direction === 'outbound' && m.status !== 'accepted').map(m => m.status))],
+        replies: [...new Set(replies.map(t => t.status))],
+      };
+    });
+    return { ...empty, threads, total };
   }
   private async message(accountIds: string[], id: string) {
     const row = accountIds.length ? await this.ds.getRepository(BusinessMailMessage).findOneBy({ id, account_id: In(accountIds) }) : null;
@@ -224,6 +305,19 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     return row;
   }
   async detail(accountIds: string[], id: string) { return this.publicMessage(await this.message(accountIds, id), true); }
+  /** The message plus its conversation, oldest first: the latest 50 mails with text and reply status. */
+  async detailWithThread(accountIds: string[], id: string) {
+    const row = await this.message(accountIds, id);
+    const repo = this.ds.getRepository(BusinessMailMessage);
+    const where = row.thread_key ? { account_id: row.account_id, thread_key: row.thread_key } : { id: row.id, account_id: row.account_id };
+    const [rows, total] = await repo.findAndCount({ where, order: { created_at: 'DESC', id: 'DESC' }, take: THREAD_PAGE });
+    if (!rows.some(r => r.id === row.id)) rows.push(row);
+    const tasks = await this.replyTasks([row.account_id], rows.map(r => r.id));
+    const time = (m: { date: string; created_at: Date }) => Date.parse(m.date) || new Date(m.created_at).getTime();
+    const messages = rows.map(r => ({ ...this.publicMessage(r, true), reply: tasks.find(t => t.message_id === r.id) || null }))
+      .sort((a, b) => time(a) - time(b) || new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    return { ...this.publicMessage(row, true), thread: { id: row.thread_key || `id:${row.id}`, total, messages } };
+  }
   async confirm(accountIds: string[], id: string, body: unknown, actor: string) {
     const input = parseMail(mailConfirmSchema, body); const row = await this.message(accountIds, id);
     const content = read<MailContent>(row.encrypted_data);
@@ -246,12 +340,15 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     const config = read<MailData>(connection.encrypted_data).config;
     if (!config.addresses.some(a => a.toLowerCase() === input.from.toLowerCase())) throw new BadRequestException('이 연결에 등록한 발신 주소를 선택하세요.');
     if (connection.provider === 'smtp_imap' && !config.smtp) throw new BadRequestException('수신 전용 연결입니다.');
-    let inReplyTo: string | undefined;
-    if (input.reply_to_message_id) {
-      const reply = await this.message(accountIds, input.reply_to_message_id);
-      if (reply.connection_id !== id) throw new BadRequestException('답장할 메일과 같은 연결을 사용하세요.');
-      const value = read<MailContent>(reply.encrypted_data).message_id;
-      if (/^<[^<>\s]{1,990}>$/.test(value)) inReplyTo = value;
+    if (input.reply_to_message_id && input.forward_message_id) throw new BadRequestException('답장과 전달 중 하나만 선택하세요.');
+    let inReplyTo: string | undefined; let references: string[] = []; let parent: BusinessMailMessage | undefined;
+    if (input.reply_to_message_id || input.forward_message_id) {
+      parent = await this.message(accountIds, (input.reply_to_message_id || input.forward_message_id)!);
+      if (parent.connection_id !== id) throw new BadRequestException(input.reply_to_message_id ? '답장할 메일과 같은 연결을 사용하세요.' : '전달할 메일과 같은 연결을 사용하세요.');
+      const original = read<MailContent>(parent.encrypted_data);
+      // A forward stays in the conversation (References) but is not a reply (no In-Reply-To).
+      if (input.reply_to_message_id && /^<[^<>\s]{1,990}>$/.test(original.message_id)) inReplyTo = original.message_id;
+      references = mailReferences(original);
     }
     return this.locked(connection, async (data, context) => {
       if (automated) {
@@ -265,11 +362,22 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
       const content: MailContent = { source_id: input.request_id, message_id: `<awb-${input.request_id}@${input.from.split('@')[1]}>`,
         from: input.from, to: input.to, subject: input.subject, text: input.text, date: now(), attachments: [],
         ...(automated ? { auto_submitted: 'auto-replied' } : {}),
-        ...(inReplyTo ? { in_reply_to: inReplyTo, references: [inReplyTo] } : {}) };
-      const repo = this.ds.getRepository(BusinessMailMessage);
+        ...(inReplyTo ? { in_reply_to: inReplyTo } : {}), ...(references.length ? { references } : {}) };
+      const own = await this.ownAddresses(connection.account_id);
       // Durable claim BEFORE network I/O. An uncertain SMTP attempt is never automatically replayed.
-      const row = await repo.save(repo.create({ account_id: connection.account_id, connection_id: id, source_key: sourceKey,
-        direction: 'outbound', status: 'sending', address_keys: `\n${input.from.toLowerCase()}\n`, encrypted_data: encrypt(JSON.stringify(content)), payload_digest: payloadDigest, actor_id: actor }));
+      const row = await this.ds.transaction(async manager => {
+        const repo = manager.getRepository(BusinessMailMessage); const rowId = randomUUID();
+        const thread = await assignMailThread(manager, { accountId: connection.account_id, rowId, content, own, at: new Date(), parentThread: parent?.thread_key });
+        return repo.save(repo.create({ id: rowId, account_id: connection.account_id, connection_id: id, source_key: sourceKey, ...thread,
+          direction: 'outbound', status: 'sending', address_keys: `\n${input.from.toLowerCase()}\n`, encrypted_data: encrypt(JSON.stringify(content)), payload_digest: payloadDigest, actor_id: actor }));
+      });
+      const repo = this.ds.getRepository(BusinessMailMessage);
+      if (!automated && input.reply_to_message_id) {
+        // Someone answered this mail directly; a pending agent draft would become a second reply.
+        await this.ds.getRepository(BusinessMailTask).update({ account_id: connection.account_id, message_id: input.reply_to_message_id, status: In(['queued', 'drafting', 'review']) }, {
+          status: 'cancelled', last_error: '직접 보낸 답장이 있어 자동 답장 작업을 취소했습니다.', review_notification_state: 'none', revision: () => 'revision + 1',
+        });
+      }
       try {
         await flushSqljs(this.ds, true);
         await mailConnector(connection.provider).send(context, content);
@@ -281,8 +389,35 @@ export class BusinessMailService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Conversation keys for mail collected before they existed or imported from another instance (import clears
+   * them), oldest first so parents are keyed before replies. Runs on every collection tick; `thread_key` leads an index.
+   */
+  backfillThreads(): Promise<number> {
+    this.backfilling ||= (async () => {
+      const repo = this.ds.getRepository(BusinessMailMessage); const own = new Map<string, Set<string>>(); let done = 0;
+      try {
+        for (;;) {
+          const rows = await repo.find({ where: { thread_key: '' }, order: { created_at: 'ASC', id: 'ASC' }, take: 100 });
+          if (!rows.length) return done;
+          for (const row of rows) {
+            if (!own.has(row.account_id)) own.set(row.account_id, await this.ownAddresses(row.account_id));
+            let content: MailContent | null = null;
+            try { content = read<MailContent>(row.encrypted_data); } catch { /* unreadable rows stay single-mail conversations */ }
+            const keys = content ? await assignMailThread(this.ds.manager, { accountId: row.account_id, rowId: row.id, content, own: own.get(row.account_id)!, at: new Date(row.created_at) })
+              : { message_key: '', subject_key: '', thread_key: `id:${row.id}` };
+            await repo.update({ id: row.id, thread_key: '' }, keys);
+            done++;
+          }
+        }
+      } finally { this.backfilling = undefined; }
+    })();
+    return this.backfilling;
+  }
+
   async tick() {
     if (this.ticking) return;
+    void this.backfillThreads().catch(() => {});
     this.ticking = true;
     try {
       const rows = await this.ds.getRepository(BusinessMailConnection).find({ where: { enabled: true, next_sync_at: LessThanOrEqual(now()), lease_until: LessThanOrEqual(now()) }, order: { next_sync_at: 'ASC' }, take: 10 });
