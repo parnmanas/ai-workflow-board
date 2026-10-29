@@ -18,6 +18,28 @@ Claude Code 는 `~/.claude/projects/<cwd>/<id>.jsonl`, Codex 는 `~/.codex/sessi
 매니저는 이 지침을 매 일반 prompt에 전달한다. Git 저장소가 없는 폴더와 기존 네이티브 세션도
 동일하며, CLI slash command는 원문 그대로 보낸다. 기존 티켓 작업을 요청받으면 해당 티켓을 사용한다.
 
+## MCP에서 세션 열기
+
+`open_session`은 화면과 같은 네이티브 세션 생성·재연결 경로를 사용한다. 새 세션에는 `cli`와
+Host의 작업 폴더 `cwd`를 지정한다. 기존 세션은 `cwd` 대신 네이티브 `session_id`로 이어 연다.
+`manager_id`를 생략하면 호출자의 Host를 사용하며, 같은 Account의 다른 Host UUID를 지정할 수도 있다.
+`title`은 새 세션의 선택적 제목이다.
+
+```json
+{ "cli": "codex", "cwd": "/mnt/data/repositories/ai-workflow-board", "title": "작업 세션" }
+```
+
+반환값은 `manager_id`, `cli`, `session_id`, `status`, `cwd`, `title`과 화면 경로 `path`다.
+네이티브 세션 호출자는 이 주소로 `send_session_message`를 보내 작업을 전달할 수 있다.
+operator의 작업 전달은 기존 `propose_session_prompt` 승인 절차를 따른다.
+
+DB에 등록된 full-scope Host MCP 키와 Account 소유자의 `agent_sessions.use` 권한이 필요하다.
+read-only·runtime·환경 키는 세션을 열 수 없다. 호출 때마다 Host의 현재 소유 Account와
+소유자 상태·권한을 확인하며, 다른 Account의 세션이나 다른 사용자가 운전 중인 세션은 거절한다.
+새 세션은 저장된 CLI 설정·credential을, 재연결은 기존 실행 snapshot을 사용한다.
+도구는 프롬프트를 함께 전송하거나 실행 옵션을 덮어쓰거나 잠긴 CLI를 강제로 인수하지 않는다.
+full·compact 도구 프로필에 모두 포함되며, NestJS 통합 MCP 서버에서 제공한다.
+
 ## 세션 헤더
 
 - 헤더에는 늘 같은 것만 보인다: 제목(호스트 · CLI) · 상태 · **Mode · Model · Effort** 셀렉트 ·
@@ -698,6 +720,8 @@ cache_write` 로 계산한다.
 
 ## 테스트
 
+- 서버: `apps/server/test/session-open.test.mjs` — MCP 생성·재연결·메시지 전송, 저장된 설정,
+  Account·Host·소유자 권한, compact 프로필, 잠금 오류와 강제 인수 차단.
 - 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달 /
   유령 상태 되돌림(list·history·인스턴스 제거·하트비트) / config option·elicitation op 과 awaiting_input / 첫 이벤트의 상태 추정.
 - 서버: `agent-session-read-status-race.test.mjs` — 늦은 list/history 응답과 새 이벤트·하트비트의 경합,

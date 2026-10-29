@@ -86,6 +86,7 @@ export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   // 정상 종료해도 웹 채팅에는 답변이 전달되지 않고 무응답으로 판정된다.
   'send_chat_room_message',
   'send_session_message',
+  'open_session',
   // work order 의 Knowledge 섹션은 skill 목차만 싣고 본문은 이 도구로 읽으라고 한다
   // (docs/skills.md "Knowledge") — 없으면 compact 런은 배정된 skill 을 못 읽는다.
   'get_skill',

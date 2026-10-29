@@ -277,6 +277,7 @@ test/security-schedule-behavior.test.mjs
 test/security-schedule-scope.test.mjs
 test/server-sigterm-exits.test.mjs
 test/session-messages.test.mjs
+test/session-open.test.mjs
 test/single-instance-work.test.mjs
 test/skill-global-scope.test.mjs
 test/spa-fallback-assets-404.test.mjs

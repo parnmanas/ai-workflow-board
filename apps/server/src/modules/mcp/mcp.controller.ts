@@ -64,6 +64,7 @@ import { OntologyLifecycleService } from '../ontology/ontology-lifecycle.service
 import { OntologyQueryService } from '../ontology/ontology-query.service';
 import { OperatorDecisionService } from '../voice/operator-decision.service';
 import { OperatorProposalService } from '../voice/operator-proposal.service';
+import { SessionOpenService } from '../agent-sessions/session-open.service';
 import { SessionMessagesService } from '../agent-sessions/session-messages.service';
 import { InterruptedSessionsService } from '../voice/interrupted-sessions.service';
 
@@ -189,6 +190,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
     private readonly sessionMessagesService: SessionMessagesService,
+    private readonly sessionOpenService: SessionOpenService,
     // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
     private readonly businessMailService: BusinessMailService,
     private readonly businessWorkflowService: BusinessWorkflowService,
@@ -305,6 +307,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorDecisionService: this.operatorDecisionService,
       operatorProposalService: this.operatorProposalService,
       sessionMessagesService: this.sessionMessagesService,
+      sessionOpenService: this.sessionOpenService,
       interruptedSessionsService: this.interruptedSessionsService,
       businessMailService: this.businessMailService,
       businessWorkflowService: this.businessWorkflowService,

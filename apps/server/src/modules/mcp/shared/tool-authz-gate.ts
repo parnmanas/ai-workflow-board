@@ -97,6 +97,7 @@ export type AuthzTier = 'full' | 'caller';
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // Native session messaging additionally checks both sessions' current account/Host ownership.
   send_session_message: 'full',
+  open_session: 'full',
   // Business lifecycle: shared handlers also enforce live Host/Account ownership and business.manage.
   list_business_mail_connections: 'caller',
   configure_business_mail_connection: 'full',

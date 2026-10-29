@@ -447,6 +447,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // Agent-authored messages and approval cards; no ticket mutation.
   request_ticket_unpend_approval: 'assistant', send_chat_room_message: 'assistant',
   send_session_message: 'assistant',
+  open_session: 'assistant', // Opens a native CLI session; no ticket/artifact mutation.
   // agent-state (2)
   clear_current_task: 'agent-state', set_current_task: 'agent-state',
   // orchestration (16) — 오케스트레이션 모드(팀 기반 자율 업무)의 Mission/Step 툴.
