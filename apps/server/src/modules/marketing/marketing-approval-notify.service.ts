@@ -24,6 +24,7 @@ import { LogService } from '../../services/log.service';
 import { UserChannelDispatcherService } from '../../services/notification-providers';
 import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { MarketingListHoldService } from './marketing-list-hold.service';
+import { publicBaseUrl } from '../../common/public-url';
 
 const SWEEP_MS = 60_000;
 /** 한 사람에게 보내는 것 전체의 상한. provider 는 요청마다 끊지만 바인딩 수 · 429 재시도만큼 길어진다. */
@@ -311,7 +312,7 @@ export class MarketingApprovalNotifyService implements OnModuleInit, OnModuleDes
       }
     }
     out.recipients = perUser.size;
-    const baseUrl = process.env.AWB_PUBLIC_URL || '';
+    const baseUrl = publicBaseUrl();
     await Promise.all([...perUser.values()].map(async ({ user, items: mine }) => {
       try {
         const payload = composeApprovalDigest(mine, campaigns, { now, baseUrl });

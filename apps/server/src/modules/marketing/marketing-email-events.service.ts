@@ -32,6 +32,7 @@ import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingEmailService } from './marketing-email.service';
 import { MarketingFeedbackService } from './marketing-feedback.service';
 import { MarketingListHoldService } from './marketing-list-hold.service';
+import { publicBaseUrl } from '../../common/public-url';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESEND_API = 'https://api.resend.com';
@@ -126,7 +127,7 @@ export class MarketingEmailEventsService {
     const credentialId = String(channel.config?.credential_id || '');
     const cred = await this.webhookCredential(credentialId).catch(() => null);
     const provider = cred?.provider || String(channel.config?.provider || '');
-    const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
+    const base = publicBaseUrl();
     const url = (kind: 'events' | 'inbound') => (base && UUID_RE.test(credentialId) ? `${base}/api/m/email/${credentialId}/${kind}` : null);
     const resend = provider === 'resend';
     return {

@@ -107,6 +107,7 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 - `AGENT_API_KEY` - Static API key for agent authentication (checked via X-Agent-Key header)
 - `AGENT_ACCOUNT_ID` - Explicit owning Account for `AGENT_API_KEY`; missing ownership disables that key
 - `AGENT_DEV_MODE` - Explicit dev bypass only outside production and without AGENT_API_KEY
+- `AWB_PUBLIC_URL` - Optional override of this AWB's public address. Nobody has to set it: `common/public-url.ts` (`publicBaseUrl()`, the only reader) uses env → Admin → Settings `server.public_url` → the origin learned from an admin's browser (`Origin`/`Referer`, never the Host header, never downgraded). OAuth sign-ins use the origin of the browser that starts them (`oauthCallbackBase(requestOrigin(req))`). Do not read `process.env.AWB_PUBLIC_URL` anywhere else.
 ## Port Configuration
 - 7700 - Vite client dev server (with /api and /mcp proxies)
 - 7701 - NestJS server API and MCP endpoint

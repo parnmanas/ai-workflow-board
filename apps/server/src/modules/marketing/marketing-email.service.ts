@@ -21,6 +21,7 @@ import { marketingError } from './marketing-errors';
 import { resolveMarketingSecret } from './marketing-credential';
 import { sendEmail } from './marketing-email-providers';
 import { LIST_HOLD_DEFER_PREFIX, MarketingListHoldService } from './marketing-list-hold.service';
+import { publicBaseUrl } from '../../common/public-url';
 
 export const MAX_RECIPIENTS_PER_POST = 10_000;
 const BATCH = 50;
@@ -42,8 +43,8 @@ export interface ChannelSender {
 
 /** 수신거부 링크(공개). AWB_PUBLIC_URL 이 없으면 메일을 보내지 않는다 — 수신거부 링크 없는 광고 메일은 불법이다. */
 export function unsubscribeUrlFor(token: string): string {
-  const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
-  if (!base) throw marketingError(409, 'AWB_PUBLIC_URL is not set — marketing email needs a working unsubscribe link');
+  const base = publicBaseUrl();
+  if (!base) throw marketingError(409, 'The public address of this AWB is not known yet (open AWB once as an admin, or set Admin → Settings → Server address / AWB_PUBLIC_URL) — marketing email needs a working unsubscribe link');
   return `${base}/api/m/u/${token}`;
 }
 

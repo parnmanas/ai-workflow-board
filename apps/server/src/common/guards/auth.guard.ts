@@ -1,6 +1,7 @@
 import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, Optional } from '@nestjs/common';
 import { AuthService } from '../../services/auth.service';
 import { AccountAccessService } from '../../services/account-access.service';
+import { notePublicOrigin } from '../public-url';
 
 function parsePermissions(raw: string): string[] {
   if (!raw) return [];
@@ -32,6 +33,7 @@ export class AuthGuard implements CanActivate {
       permissions: parsePermissions((user as any).permissions || ''),
     };
 
+    notePublicOrigin(request, user.role);
     if (this.accounts) await this.accounts.bindRequest(request);
 
     return true;

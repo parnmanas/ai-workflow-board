@@ -11,6 +11,7 @@ import { LogService } from '../../services/log.service';
 import { flushSqljs } from '../../db';
 import { isQaFailure, validateResultDelivery } from './qa-result-policy';
 import { ticketPath } from '../../common/artifact-ref';
+import { publicBaseUrl } from '../../common/public-url';
 
 @Injectable()
 export class QaResultDeliveryService {
@@ -38,7 +39,7 @@ export class QaResultDeliveryService {
       await flushSqljs(this.ds, true);
       const project = scenario.project_id ? await this.ds.getRepository(Project).findOneBy({ id: scenario.project_id, account_id: run.account_id }) : null;
       const title = `[QA ${run.status}] ${project ? `${project.name} / ` : ''}${scenario.name}`.replace(/[\r\n]/g, ' ').slice(0, 250);
-      const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/$/, '');
+      const base = publicBaseUrl();
       const body = [title, `Run: ${run.id}`, `Project: ${scenario.project_id || '—'}`, run.summary,
         ...(run.step_results || []).map(s => `Step ${s.idx + 1}: ${s.status}${s.log ? ` — ${s.log}` : ''}`),
         run.auto_ticket_id ? `Ticket: ${base}${ticketPath(run.account_id, run.auto_ticket_id)}` : '',

@@ -21,6 +21,7 @@ import { TRADEMARK_CONNECTORS, trademarkConnector } from './connectors/trademark
 import { digest, trademarkRequest } from './connectors/trademark-http';
 import type { IntegrationData, OAuthTokens, PreparedTrademarkAction, TrademarkConnectorContext, TrademarkSourceRecord } from './connectors/trademark-connector';
 import { trademarkReplyAddress } from './connectors/trademark-resend';
+import { oauthCallbackBase } from '../../common/public-url';
 
 const OPEN_ACTIONS = ['draft', 'sending', 'uncertain'];
 const approval = z.object({ confirm: z.literal(true), payload_digest: z.string().length(64), revision: z.number().int().nonnegative(), external_id: z.string().max(500).optional() });
@@ -28,15 +29,6 @@ const readData = <T>(encrypted: string): T => JSON.parse(decryptStrict(encrypted
 const nowIso = () => new Date().toISOString();
 const SAFE_ERROR = '연동에 실패했습니다. 저장된 데이터는 유지됩니다. 로그인·API 권한·연결 설정·서비스 한도를 확인하고 다시 시도하세요.';
 
-export function trademarkPublicBase(): string {
-  const value = process.env.AWB_PUBLIC_URL || '';
-  try {
-    const url = new URL(value);
-    const local = process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-    if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error();
-    return url.origin;
-  } catch { throw new BadRequestException('서버 AWB_PUBLIC_URL에 이 사이트의 HTTPS 주소를 설정하세요. 로컬 개발은 localhost HTTP를 지원합니다.'); }
-}
 export const TRADEMARK_CALLBACK_PATH = '/api/business-integrations/oauth/callback';
 
 @Injectable()
@@ -71,7 +63,7 @@ export class BusinessTrademarkIntegrationsService implements OnModuleInit, OnMod
   }
   private publicConnection(row: BusinessTrademarkIntegration) {
     const data = readData<IntegrationData>(row.encrypted_data);
-    let base = ''; try { base = trademarkPublicBase(); } catch { /* API-key reads work without a public callback origin. */ }
+    let base = ''; try { base = oauthCallbackBase(); } catch { /* API-key reads work without a public callback origin. */ }
     const descriptor = trademarkConnector(row.provider).descriptor;
     return { id: row.id, provider: row.provider, credential_id: row.credential_id, config: data.config, identity: data.identity || null,
       status: row.status, ready: row.status !== 'disconnected' && (descriptor.auth === 'api_key' || !!data.tokens), auto_sync: row.auto_sync, interval_minutes: row.interval_minutes,
@@ -179,10 +171,10 @@ export class BusinessTrademarkIntegrationsService implements OnModuleInit, OnMod
     if (typeof result.access_token !== 'string' || !result.access_token || !Number.isFinite(Number(result.expires_in)) || Number(result.expires_in) <= 0) throw new BadRequestException('OAuth 토큰 응답을 확인하지 못했습니다. 다시 연결하세요.');
     return { access_token: result.access_token, refresh_token: typeof result.refresh_token === 'string' ? result.refresh_token : previousRefresh, expires_at: Date.now() + Number(result.expires_in) * 1000 };
   }
-  async authorize(companyId: string, accountId: string, trademarkId: string, id: string, actor: string) {
+  async authorize(companyId: string, accountId: string, trademarkId: string, id: string, actor: string, origin?: string) {
     const row = await this.connection(companyId, accountId, trademarkId, id); const adapter = trademarkConnector(row.provider);
     if (!adapter.oauth) throw new BadRequestException('이 연결은 API 키를 사용합니다.');
-    const base = trademarkPublicBase();
+    const base = oauthCallbackBase(origin);
     return this.locked(row, async (locked, data) => {
       const { fingerprint, secrets } = await this.credential(row.credential_id, row.provider, accountId);
       if (fingerprint !== data.credential_digest) throw new ConflictException('credential이 변경되었습니다. 연결 설정을 다시 저장하세요.');

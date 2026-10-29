@@ -26,8 +26,8 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
     unexpected.push(`${init.method || 'GET'} ${url}`); throw new Error('unexpected provider request');
   };
   const tokens = new Map([owner, other].map(u => [u.id, app.get(modules.AuthService).createSession(u.id)]));
-  const call = async (path, body, method = body === undefined ? 'GET' : 'POST', user = owner, account = mine.id) => {
-    const res = await nativeFetch(`http://127.0.0.1:${port}/api${path}`, { method, headers: { Authorization: `Bearer ${tokens.get(user.id)}`, 'Content-Type': 'application/json', 'X-Account-Id': account }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const call = async (path, body, method = body === undefined ? 'GET' : 'POST', user = owner, account = mine.id, extra = {}) => {
+    const res = await nativeFetch(`http://127.0.0.1:${port}/api${path}`, { method, headers: { Authorization: `Bearer ${tokens.get(user.id)}`, 'Content-Type': 'application/json', 'X-Account-Id': account, ...extra }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: res.status, body: await res.json().catch(() => null), headers: res.headers };
   };
   const created = await call('/business/companies', { name: 'MCP Orbit LLC', entity_type: 'LLC', country: 'US' });
@@ -46,8 +46,9 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
   });
 
   await t.test('doola: dynamic registration, browser-cookie bound callback and PKCE', async () => {
-    process.env.AWB_PUBLIC_URL = `http://localhost:${port}`;
-    const started = await call(`${base}/doola/authorize`, {});
+    // No server setting: the callback is the address this browser is using.
+    delete process.env.AWB_PUBLIC_URL;
+    const started = await call(`${base}/doola/authorize`, {}, 'POST', owner, mine.id, { Origin: `http://localhost:${port}` });
     assert.equal(started.status, 201); assert.equal(started.body.mode, 'redirect');
     const authorize = new URL(started.body.url);
     assert.equal(authorize.origin, 'https://dds.doola.com');
@@ -118,11 +119,13 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
   await t.test('Northwest: a rejected shared redirect stops before the provider page; an issued client returns to AWB', async () => {
     fake.state.allowedRedirects = ['https://claude.ai/api/mcp/auth_callback'];
     const rejected = await call(`${base}/northwest/authorize`, {});
-    assert.equal(rejected.status, 409); assert.match(rejected.body.message || rejected.body.error, /NORTHWEST_MCP_CLIENT_ID/);
-    process.env.NORTHWEST_MCP_CLIENT_ID = 'awb-issued'; process.env.NORTHWEST_MCP_CLIENT_SECRET = 'issued-secret-private';
-    t.after(() => { delete process.env.NORTHWEST_MCP_CLIENT_ID; delete process.env.NORTHWEST_MCP_CLIENT_SECRET; fake.state.allowedRedirects = null; });
-    process.env.AWB_PUBLIC_URL = `http://localhost:${port}`;
-    const started = await call(`${base}/northwest/authorize`, {});
+    assert.equal(rejected.status, 409); assert.match(rejected.body.message || rejected.body.error, /관리자 설정/);
+    // The issued client is entered in Admin → Settings (secret stored encrypted).
+    const saved = await call('/admin/settings', { settings: { 'business.mcp.northwest.client_id': 'awb-issued', 'business.mcp.northwest.client_secret': 'issued-secret-private' } }, 'PATCH');
+    assert.equal(saved.status, 200);
+    t.after(() => { fake.state.allowedRedirects = null; });
+    assert.doesNotMatch(JSON.stringify(await ds.getRepository('SystemSetting').find()), /issued-secret-private/);
+    const started = await call(`${base}/northwest/authorize`, {}, 'POST', owner, mine.id, { Origin: `http://localhost:${port}` });
     assert.equal(started.status, 201); assert.equal(started.body.mode, 'redirect');
     const authorize = new URL(started.body.url);
     assert.equal(authorize.searchParams.get('client_id'), 'awb-issued');

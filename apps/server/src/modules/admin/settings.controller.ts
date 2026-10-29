@@ -9,8 +9,30 @@ import { encrypt, decrypt } from '../../services/encryption.service';
 import { maskSecret } from '../../common/mask';
 import { sessionStore, DEFAULT_MAX_SESSIONS } from '../../modules/mcp/internal/session-store';
 import { VOICE_SETTING_DEFINITIONS, invalidateVoiceConfig } from '../voice/voice-config';
+import { PUBLIC_URL_DETECTED_SETTING, PUBLIC_URL_SETTING, learnedPublicUrl, normalizeConfiguredBase, setConfiguredPublicUrl } from '../../common/public-url';
 
-const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string }> = {
+const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: boolean; default_value: string; read_only?: boolean }> = {
+  [PUBLIC_URL_SETTING]: {
+    description: 'Address people use to reach this AWB (links in notifications and mail, OAuth callbacks). Leave empty to use the address learned from an admin browser.',
+    is_secret: false,
+    default_value: '',
+  },
+  [PUBLIC_URL_DETECTED_SETTING]: {
+    description: 'Address learned from the browser of an admin who opened AWB. Used when no address is set above.',
+    is_secret: false,
+    default_value: '',
+    read_only: true,
+  },
+  'business.mcp.northwest.client_id': {
+    description: 'OAuth client ID Northwest Registered Agent issued to this AWB (redirect: <AWB address>/api/business-mcp/oauth/callback). Empty = shared public client.',
+    is_secret: false,
+    default_value: '',
+  },
+  'business.mcp.northwest.client_secret': {
+    description: 'Client secret for the Northwest OAuth client, if one was issued. Stored encrypted.',
+    is_secret: true,
+    default_value: '',
+  },
   'embedding.provider': { description: 'Embedding provider (openai or none)', is_secret: false, default_value: 'none' },
   'embedding.api_key': { description: 'API key for the embedding provider', is_secret: true, default_value: '' },
   'embedding.model': { description: 'Embedding model name', is_secret: false, default_value: 'text-embedding-3-small' },
@@ -45,6 +67,7 @@ const SETTING_DEFINITIONS: Record<string, { description: string; is_secret: bool
  * is persisted; new keys with no side effect can omit the entry.
  */
 function applyLiveSettingChange(key: string, rawValue: string): void {
+  if (key === PUBLIC_URL_SETTING) setConfiguredPublicUrl(rawValue);
   if (key === 'mcp.max_sessions') {
     const n = parseInt(rawValue, 10);
     if (Number.isFinite(n) && n > 0) sessionStore.setMaxSessions(n);
@@ -67,7 +90,7 @@ export class SettingsController {
 
     const settings = Object.entries(SETTING_DEFINITIONS).map(([key, def]) => {
       const row = rowMap.get(key);
-      let value = row?.value ?? def.default_value;
+      let value = key === PUBLIC_URL_DETECTED_SETTING ? learnedPublicUrl() || row?.value || '' : row?.value ?? def.default_value;
       if (def.is_secret && value) {
         value = maskSecret(decrypt(value));
       }
@@ -76,6 +99,7 @@ export class SettingsController {
         value,
         description: def.description,
         is_secret: def.is_secret,
+        read_only: !!def.read_only,
         updated_at: row?.updated_at || null,
       };
     });
@@ -92,8 +116,11 @@ export class SettingsController {
 
     const results: any[] = [];
     for (const [key, value] of Object.entries(settings) as [string, string][]) {
-      if (!SETTING_DEFINITIONS[key]) continue;
+      if (!SETTING_DEFINITIONS[key] || SETTING_DEFINITIONS[key].read_only) continue;
       const def = SETTING_DEFINITIONS[key];
+      if (key === PUBLIC_URL_SETTING && value?.trim() && !normalizeConfiguredBase(value)) {
+        return res.status(400).json({ error: 'Server address must be an http(s) URL such as https://awb.example.com' });
+      }
 
       if (def.is_secret && value && isMasked(value)) continue;
 

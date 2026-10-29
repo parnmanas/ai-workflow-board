@@ -33,6 +33,7 @@ import {
   NotificationProviderRegistry,
   UserChannelDispatcherService,
 } from './notification-providers';
+import { PublicUrlService } from './public-url.service';
 
 /**
  * Global cross-cutting services.
@@ -57,6 +58,7 @@ import {
     ]),
   ],
   providers: [
+    PublicUrlService,
     ActivityService,
     AuthService,
     ApiKeyService,

@@ -8,6 +8,7 @@ import { UserChannelDispatcherService } from '../../services/notification-provid
 import { NotifyPayload } from '../../services/notification-providers/types';
 import { AWAITING_USER_STATUS } from './orchestration.constants';
 import { OrchestrationMissionService } from './orchestration-mission.service';
+import { publicBaseUrl } from '../../common/public-url';
 
 /**
  * **한 사람에게 보내는 전체**에 걸리는 상한. provider 쪽 상한(티켓 672ffcb5)과 축이 다르다.
@@ -327,7 +328,7 @@ export class OrchestrationConfirmNotifyService {
    * 클라이언트 라우트(`App.tsx` 의 `orchestration/missions/:missionId`)와 같다.
    */
   private missionUrl(mission: OrchestrationMission): string | undefined {
-    const base = process.env.AWB_PUBLIC_URL?.replace(/\/$/, '') || '';
+    const base = publicBaseUrl();
     if (!base) return undefined;
     return `${base}/missions/${mission.id}`;
   }

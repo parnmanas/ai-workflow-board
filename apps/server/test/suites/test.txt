@@ -236,6 +236,7 @@ test/outreach-resolve-notifier.test.mjs
 test/personal-account-migration.test.mjs
 test/postgres-schema-search-path.test.mjs
 test/proxy-passthrough.test.mjs
+test/public-url.test.mjs
 test/published-deps-audit-guard.test.mjs
 test/qa-batch-dispatch-inflight-guard.test.mjs
 test/qa-cron.test.mjs

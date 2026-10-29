@@ -138,6 +138,58 @@ export default function SettingsManager() {
   return (
     <div style={{ maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 20 }}>
 
+      {/* ─── Server address ─── */}
+      <Card padding="20px">
+        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+          {translate('Server address')}</div>
+        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
+          {translate('Used for links in notifications and mail and for sign-in callbacks. AWB learns it from the address an admin opens it with; set it here only to override.')}</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <label style={labelStyle}>{translate('Address in use')}</label>
+            <div style={hintStyle}>{formValues['server.public_url']?.trim() ? translate('Set below') : formValues['server.public_url_detected'] ? translate('Learned from an admin browser') : translate('Not known yet — it is learned the next time an admin opens AWB')}</div>
+            <code style={{ fontSize: 12 }}>{formValues['server.public_url']?.trim() || formValues['server.public_url_detected'] || window.location.origin}</code>
+          </div>
+          <div>
+            <label style={labelStyle}>{translate('Override address')}</label>
+            <div style={hintStyle}>{translate('Leave empty to use the learned address. The AWB_PUBLIC_URL environment variable, when set on the server, takes precedence.')}</div>
+            <Input
+              value={formValues['server.public_url'] || ''}
+              onChange={(e) => handleChange('server.public_url', e.target.value)}
+              placeholder={formValues['server.public_url_detected'] || window.location.origin}
+            />
+          </div>
+        </div>
+      </Card>
+
+      {/* ─── Business MCP clients ─── */}
+      <Card padding="20px">
+        <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
+          {translate('Business MCP clients')}</div>
+        <div style={{ fontSize: '12px', color: tokens.colors.textSecondary, marginBottom: 20, lineHeight: 1.5 }}>
+          {translate('Northwest Registered Agent only lets its own listed apps sign in with the shared client. If Northwest issues an OAuth client to this AWB, enter it here. Redirect URI to register:')}{' '}
+          <code style={{ fontSize: 11 }}>{(formValues['server.public_url']?.trim() || formValues['server.public_url_detected'] || window.location.origin).replace(/\/+$/, '')}/api/business-mcp/oauth/callback</code></div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <label style={labelStyle}>{translate('Northwest client ID')}</label>
+            <Input
+              value={formValues['business.mcp.northwest.client_id'] || ''}
+              onChange={(e) => handleChange('business.mcp.northwest.client_id', e.target.value)}
+            />
+          </div>
+          <div>
+            <label style={labelStyle}>{translate('Client Secret')}</label>
+            <div style={hintStyle}>{translate('Stored encrypted. Re-enter to rotate; masked on read.')}</div>
+            <input
+              type="password"
+              value={formValues['business.mcp.northwest.client_secret'] || ''}
+              onChange={(e) => handleChange('business.mcp.northwest.client_secret', e.target.value)}
+              style={secretInputStyle}
+            />
+          </div>
+        </div>
+      </Card>
+
       {/* ─── Embedding Configuration ─── */}
       <Card padding="20px">
         <div style={{ fontSize: '15px', fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>

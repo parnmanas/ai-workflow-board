@@ -5,6 +5,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { BusinessTrademarkIntegrationsService, TRADEMARK_CALLBACK_PATH } from './business-trademark-integrations.service';
+import { requestOrigin } from '../../common/public-url';
 
 @ApiTags('business')
 @Controller('api/business/companies/:companyId/trademarks/:trademarkId/integrations')
@@ -20,7 +21,7 @@ export class BusinessTrademarkIntegrationsController {
   disconnect(@Param() p: any, @Req() req: any, @Body() body: any) { return this.service.disconnect(p.companyId, req.currentAccountId, p.trademarkId, p.id, body?.revision); }
   @Post(':id/authorize') @Header('Cache-Control', 'no-store')
   async authorize(@Param() p: any, @Req() req: any, @Res({ passthrough: true }) res: Response) {
-    const result = await this.service.authorize(p.companyId, req.currentAccountId, p.trademarkId, p.id, req.currentUser.id);
+    const result = await this.service.authorize(p.companyId, req.currentAccountId, p.trademarkId, p.id, req.currentUser.id, requestOrigin(req));
     res.cookie(result.cookie_name, result.cookie, { httpOnly: true, sameSite: 'lax', secure: result.secure, path: TRADEMARK_CALLBACK_PATH, maxAge: 600_000 });
     return { url: result.url };
   }

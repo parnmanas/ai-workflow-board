@@ -15,6 +15,7 @@ import { flushSqljs } from '../../db';
 import { BusinessMailService } from './business-mail.service';
 import { automationFingerprint, mailAutomation, mailDigest, replyBlockReason, validateMailRuntime, type MailTaskData } from './mail/mail-automation';
 import { mailReplyDraftSchema, mailReplyDecisionSchema, parseMail, type MailContent, type MailData } from './mail/mail.types';
+import { publicBaseUrl } from '../../common/public-url';
 
 const now = () => new Date().toISOString();
 const read = <T>(value: string): T => JSON.parse(decryptStrict(value));
@@ -112,7 +113,7 @@ export class BusinessMailWorkflowService implements OnModuleInit, OnModuleDestro
       action: review ? 'review' : 'received', title, body, notification_id: `${row.id}:${review ? 'review' : 'received'}`, timestamp: now() });
     try {
       const result = await this.notifications.dispatchForUser(owner.id, 'notify_mail', { title, body,
-        ...(process.env.AWB_PUBLIC_URL ? { url: `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}${path}` } : {}) });
+        ...(publicBaseUrl() ? { url: `${publicBaseUrl()}${path}` } : {}) });
       await repo.update({ id: row.id, [field]: 'sending' }, { [field]: result.failed ? row[attempts] >= 2 ? 'failed' : 'pending' : 'sent' });
     } catch { await repo.update({ id: row.id, [field]: 'sending' }, { [field]: row[attempts] >= 2 ? 'failed' : 'pending' }); }
   }

@@ -9,7 +9,7 @@ import { BUSINESS_STAGES } from '../../business/business.types';
 import { BUSINESS_TEMPLATE } from '../../business/business-template';
 import { selfAnswersSchema } from '../../business/business-self-service';
 import { BUSINESS_CONNECTORS, businessConnector } from '../../business/connectors/registry';
-import { trademarkPublicBase } from '../../business/business-trademark-integrations.service';
+import { publicBaseUrl } from '../../../common/public-url';
 import { businessRunInput, businessRunResult } from '../../business/business-workflow.service';
 import { getCallerAgent } from '../shared/session-auth';
 
@@ -93,7 +93,7 @@ export function registerBusinessTools(server: McpServer, ctx: ToolContext): void
     mcpProvider, run(false, async (a, s) => {
       await business.company(a.company_id, s.accountId);
       const params = new URLSearchParams({ company: a.company_id, stage: 'formation', mcp: a.provider });
-      let base = ''; try { base = trademarkPublicBase(); } catch { /* Relative link when AWB_PUBLIC_URL is not configured. */ }
+      const base = publicBaseUrl(); // Relative link until the public address is known.
       return { status: 'owner_sign_in_required', url: `${base}/business/connectors?${params}`, provider: a.provider,
         instruction: 'Ask the Account owner to open this AWB page, press the provider login button and finish sign-in. Then call list_business_mcp_connections and confirm status=connected.' };
     }));

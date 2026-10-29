@@ -79,8 +79,8 @@ Resend 대시보드의 발송 ID를 입력해 발신·수신·회신·제목·�
 상표 기록의 **회신 · 계약 · 사건 자동화**에서 서비스별 연결을 관리한다. 서버 레지스트리가 카드·설정 필드·기능을 제공하며
 공급자를 추가할 때 별도 화면을 복제하지 않는다. 각 상표에 서비스별 연결 하나를 둘 수 있다.
 
-1. OAuth 서비스는 서버 환경변수 `AWB_PUBLIC_URL=https://사이트주소`를 설정한다. 경로 없는 HTTPS origin이며,
-   로컬 개발만 `http://localhost:포트`를 허용한다. Docker Compose는 `.env`의 값을 컨테이너로 전달한다.
+1. 콜백 주소는 로그인을 시작한 브라우저가 쓰는 AWB 주소다(설정 불필요). HTTPS여야 하며 로컬 개발만
+   `http://localhost:포트`를 허용한다. 서버 주소는 관리자 설정 → 서버 주소에서 확인·변경한다(`AWB_PUBLIC_URL`은 선택적 덮어쓰기).
 2. 공급자 앱에 `https://사이트주소/api/business-integrations/oauth/callback`을 Web redirect URI로 등록한다.
    개발 중 프런트엔드 주소와 서버 주소를 혼용하지 말고 브라우저가 이용하는 사이트 origin을 사용한다.
 3. 연결 설정에서 같은 Account의 서버 전용 키를 선택하거나 등록한다. OAuth는 client ID·secret,

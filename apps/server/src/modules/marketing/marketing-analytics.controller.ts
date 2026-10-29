@@ -10,6 +10,7 @@ import { MarketingAnalyticsService } from './marketing-analytics.service';
 import { linkToJson, metricToJson } from './marketing-json';
 import { errorStatus } from './marketing-errors';
 import { boundAccountId, userActor } from './marketing-http';
+import { publicBaseUrl } from '../../common/public-url';
 
 function parseDate(value: string | undefined): Date | undefined {
   if (!value) return undefined;
@@ -44,7 +45,7 @@ export class MarketingAnalyticsController {
   async links(@Param('id') id: string, @Req() req: Request, @Res() res: Response) {
     try {
       const campaign = await this.campaigns.get(id, boundAccountId(req));
-      const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
+      const base = publicBaseUrl();
       return res.json((await this.analytics.listLinks(campaign)).map((l) => linkToJson(l, base ? `${base}/api/m/${l.code}` : null)));
     } catch (e: any) {
       return res.status(errorStatus(e)).json({ error: e?.message || 'Failed to list links' });

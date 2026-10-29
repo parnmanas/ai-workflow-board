@@ -20,6 +20,7 @@ import { MarketingCampaignHooks } from './marketing-campaign-hooks';
 import { marketingError } from './marketing-errors';
 import { hostAllowed } from './marketing-campaign.logic';
 import { normalizeHttpUrl } from './marketing-channel.logic';
+import { publicBaseUrl } from '../../common/public-url';
 
 const BASE62 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const CODE_LENGTH = 12;
@@ -95,8 +96,8 @@ export class MarketingAnalyticsService {
 
   /** 추적 링크의 공개 주소. AWB_PUBLIC_URL 이 없으면 바깥에서 열 수 없는 링크가 되므로 만들지 않는다. */
   publicLinkUrl(code: string): string {
-    const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
-    if (!base) throw marketingError(409, 'AWB_PUBLIC_URL is not set on this server — tracked links need its public address');
+    const base = publicBaseUrl();
+    if (!base) throw marketingError(409, 'The public address of this AWB is not known yet (open AWB once as an admin, or set Admin → Settings → Server address / AWB_PUBLIC_URL) — tracked links need its public address');
     return `${base}/api/m/${code}`;
   }
 

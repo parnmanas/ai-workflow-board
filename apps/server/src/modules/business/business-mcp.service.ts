@@ -9,11 +9,12 @@ import { discoverOAuthServerInfo, exchangeAuthorization, refreshAuthorization, r
 import type { AuthorizationServerMetadata, OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { Account } from '../../entities/Account';
+import { SystemSetting } from '../../entities/SystemSetting';
 import { BusinessMcpConnection } from '../../entities/BusinessMcpConnection';
-import { encrypt, decryptStrict } from '../../services/encryption.service';
+import { encrypt, decrypt, decryptStrict } from '../../services/encryption.service';
 import { BusinessService } from './business.service';
 import { MCP_CONNECTORS, MCP_LOOPBACK_REDIRECT, mcpConnector, isOwnerOnlyTool, registeredMcpClient, type McpProviderSpec } from './connectors/mcp-providers';
-import { trademarkPublicBase } from './business-trademark-integrations.service';
+import { oauthCallbackBase } from '../../common/public-url';
 
 export const BUSINESS_MCP_CALLBACK_PATH = '/api/business-mcp/oauth/callback';
 const FLOW_MS = 10 * 60_000;
@@ -100,15 +101,26 @@ export class BusinessMcpService {
     this.discovery.set(provider, found);
     return found;
   }
-  private redirectFor(spec: McpProviderSpec): { uri: string; mode: 'redirect' | 'paste' } {
-    if (registeredMcpClient(spec)) return { uri: `${trademarkPublicBase()}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' };
+  /** A client the provider issued to this AWB: env first, then Admin → Settings. */
+  private async issuedClient(spec: McpProviderSpec): Promise<{ client_id: string; client_secret?: string } | null> {
+    if (spec.client.kind !== 'public') return null;
+    const env = registeredMcpClient(spec); if (env) return env;
+    const prefix = spec.client.registered_setting;
+    const rows = await this.ds.getRepository(SystemSetting).findBy([{ key: `${prefix}.client_id` }, { key: `${prefix}.client_secret` }]).catch(() => [] as SystemSetting[]);
+    const id = rows.find(row => row.key === `${prefix}.client_id`)?.value.trim();
+    const sealed = rows.find(row => row.key === `${prefix}.client_secret`)?.value;
+    const secret = sealed ? decrypt(sealed).trim() : '';
+    return id ? { client_id: id, ...(secret ? { client_secret: secret } : {}) } : null;
+  }
+  private redirectFor(spec: McpProviderSpec, origin: string | undefined, issued: boolean): { uri: string; mode: 'redirect' | 'paste' } {
+    if (issued) return { uri: `${oauthCallbackBase(origin)}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' };
     if (spec.client.kind === 'public') return { uri: MCP_LOOPBACK_REDIRECT, mode: 'paste' };
-    try { return { uri: `${trademarkPublicBase()}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' }; }
-    // Without a public HTTPS origin the provider cannot return to AWB; the owner pastes the loopback address instead.
+    try { return { uri: `${oauthCallbackBase(origin)}${BUSINESS_MCP_CALLBACK_PATH}`, mode: 'redirect' }; }
+    // Not on HTTPS (e.g. a LAN http:// address): the provider cannot return to AWB; the owner pastes the loopback address instead.
     catch { return { uri: MCP_LOOPBACK_REDIRECT, mode: 'paste' }; }
   }
   private async clientFor(provider: string, spec: McpProviderSpec, found: Discovery, data: McpData, redirectUri: string): Promise<OAuthClientInformationFull> {
-    const issued = registeredMcpClient(spec);
+    const issued = await this.issuedClient(spec);
     if (issued) return { ...issued, redirect_uris: [redirectUri] };
     if (spec.client.kind === 'public') return { client_id: spec.client.client_id, redirect_uris: [redirectUri] };
     if (data.client?.redirect_uri === redirectUri) return { client_id: data.client.client_id, ...(data.client.client_secret ? { client_secret: data.client.client_secret } : {}), redirect_uris: [redirectUri] };
@@ -133,8 +145,7 @@ export class BusinessMcpService {
     try { const res = await pinnedFetch(spec, 15_000)(url, { method: 'GET' }); status = res.status; await res.body?.cancel(); }
     catch { return; /* Unreachable or redirected: let the browser show the provider's own page. */ }
     if (status === 400) {
-      const env = spec.client.kind === 'public' ? spec.client.registered_env : '';
-      throw new ConflictException(`${name}가 공용 로그인 클라이언트의 AWB 주소(${MCP_LOOPBACK_REDIRECT})를 더 이상 허용하지 않습니다. ${name}에서 이 AWB용 OAuth 클라이언트를 발급받아 서버에 ${env}_CLIENT_ID(필요하면 ${env}_CLIENT_SECRET)와 AWB_PUBLIC_URL을 설정하세요.`);
+      throw new ConflictException(`${name}가 공용 로그인 클라이언트로 외부 앱의 로그인을 더 이상 받지 않습니다(Claude·ChatGPT·Cursor만 허용). ${name}에서 이 AWB용 OAuth 클라이언트를 발급받으면 관리자 설정 → Business MCP 클라이언트에 넣으세요.`);
     }
   }
 
@@ -152,7 +163,7 @@ export class BusinessMcpService {
   }
 
   /** Starts the owner's provider sign-in. Paste mode returns the loopback address the owner copies back. */
-  async authorize(companyId: string, accountId: string, provider: string, userId: string) {
+  async authorize(companyId: string, accountId: string, provider: string, userId: string, origin?: string) {
     const company = await this.business.company(companyId, accountId);
     const descriptor = mcpConnector(provider); const spec = descriptor.mcp;
     const found = await this.discover(provider, spec);
@@ -162,13 +173,14 @@ export class BusinessMcpService {
     return this.exclusive(row.id, async () => {
       const current = await repo.findOneByOrFail({ id: row!.id });
       const data = read(current);
-      const redirect = this.redirectFor(spec);
+      const issued = !!(await this.issuedClient(spec));
+      const redirect = this.redirectFor(spec, origin, issued);
       const clientInformation = await this.clientFor(provider, spec, found, data, redirect.uri);
       const state = randomBytes(32).toString('base64url');
       const cookie = redirect.mode === 'redirect' ? randomBytes(32).toString('base64url') : '';
       const { authorizationUrl, codeVerifier } = await startAuthorization(found.url, { metadata: found.metadata, clientInformation, redirectUrl: redirect.uri, state,
         ...(spec.scope ? { scope: spec.scope } : {}), ...(found.resource ? { resource: found.resource } : {}) });
-      if (spec.client.kind === 'public' && !registeredMcpClient(spec)) await this.checkSharedClientRedirect(descriptor.name, spec, authorizationUrl);
+      if (spec.client.kind === 'public' && !issued) await this.checkSharedClientRedirect(descriptor.name, spec, authorizationUrl);
       data.flow = { verifier: codeVerifier, user_id: userId, expires: Date.now() + FLOW_MS, redirect_uri: redirect.uri, mode: redirect.mode, ...(cookie ? { cookie_hash: sha(cookie) } : {}) };
       await this.store(current, data, { oauth_state_hash: sha(state), last_error: '' });
       await this.ds.transaction(manager => this.business.event(manager, company, userId, 'connector', `${descriptor.name} MCP 로그인을 시작했습니다.`));

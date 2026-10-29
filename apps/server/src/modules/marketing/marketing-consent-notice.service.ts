@@ -36,6 +36,7 @@ import { MarketingAuditService } from './marketing-audit.service';
 import { MarketingEmailService, unsubscribeUrlFor, type ChannelSender } from './marketing-email.service';
 import { sendEmail, type EmailOutcome } from './marketing-email-providers';
 import { marketingError } from './marketing-errors';
+import { publicBaseUrl } from '../../common/public-url';
 
 const TICK_MS = 60_000;
 /** 줄 세우기(브랜드별 동의를 훑는다)는 이 간격으로만 — 보내기는 매 tick. */
@@ -58,8 +59,8 @@ export const NO_SENDER_PREFIX = 'deferred: no email channel';
 
 /** 이 안내의 "동의 유지" 링크(공개). AWB_PUBLIC_URL 이 없으면 안내를 보내지 않는다 — 유지 · 철회 방법은 법정 항목이다. */
 export function consentKeepUrlFor(token: string): string {
-  const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
-  if (!base) throw marketingError(409, 'AWB_PUBLIC_URL is not set — the consent notice needs working keep and unsubscribe links');
+  const base = publicBaseUrl();
+  if (!base) throw marketingError(409, 'The public address of this AWB is not known yet (open AWB once as an admin, or set Admin → Settings → Server address / AWB_PUBLIC_URL) — the consent notice needs working keep and unsubscribe links');
   return `${base}/api/m/c/${token}`;
 }
 
@@ -321,8 +322,8 @@ export class MarketingConsentNoticeService implements OnModuleInit, OnModuleDest
       }
     }
     if (!picked) warnings.push('no email channel can send this notice yet — approve an email channel for the lists your contacts are on');
-    const base = (process.env.AWB_PUBLIC_URL || '').replace(/\/+$/, '');
-    if (!base) warnings.push('AWB_PUBLIC_URL is not set — notices cannot carry keep and unsubscribe links until it is');
+    const base = publicBaseUrl();
+    if (!base) warnings.push('The public address of this AWB is not known yet (open AWB once as an admin, or set Admin → Settings → Server address / AWB_PUBLIC_URL) — notices cannot carry keep and unsubscribe links until it is');
     const link = (kind: 'c' | 'u') => `${base || 'https://<AWB_PUBLIC_URL>'}/api/m/${kind}/…`;
     const sample = sampleConsentNoticeContact(now, value.lead_days);
     const message = composeConsentNotice({

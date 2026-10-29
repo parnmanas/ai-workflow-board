@@ -11,6 +11,7 @@ import { ticketPath } from '../../common/artifact-ref';
 import { NotificationProviderRegistry } from './registry.service';
 import { ticketParticipantUserIds } from './ticket-participants';
 import { NotifyPayload } from './types';
+import { publicBaseUrl } from '../../common/public-url';
 
 interface UserMentionEvent {
   mention_id: string;
@@ -201,8 +202,8 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     const ambientContent = ev.content.replace(/@\[[^\]]+\]/g, '').trim();
     if (!ambientContent) return;
 
-    const url = process.env.AWB_PUBLIC_URL
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}/chat/${ev.room_id}?message=${ev.message_id}`
+    const url = publicBaseUrl()
+      ? `${publicBaseUrl()}/chat/${ev.room_id}?message=${ev.message_id}`
       : undefined;
 
     const payload: NotifyPayload = {
@@ -248,8 +249,8 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
     const userIds = participants.filter((id) => id !== log.actor_id);
     if (userIds.length === 0) return;
 
-    const url = process.env.AWB_PUBLIC_URL && ticket.account_id
-      ? `${process.env.AWB_PUBLIC_URL.replace(/\/$/, '')}${ticketPath(ticket.account_id, ticketId)}`
+    const url = publicBaseUrl() && ticket.account_id
+      ? `${publicBaseUrl()}${ticketPath(ticket.account_id, ticketId)}`
       : undefined;
 
     const action = log.action.replace('_', ' ');
@@ -298,7 +299,7 @@ export class UserChannelDispatcherService implements OnModuleInit, OnModuleDestr
    * same view the in-app inbox would.
    */
   private _buildDeepLink(ev: UserMentionEvent): string | null {
-    const base = process.env.AWB_PUBLIC_URL?.replace(/\/$/, '') || '';
+    const base = publicBaseUrl();
     if (!base) return null;
     if (ev.source_type === 'chat_message' && ev.room_id) {
       const params = new URLSearchParams({ room: ev.room_id, message: ev.source_id });

@@ -10,15 +10,15 @@ import type { ConnectorDescriptor } from '../business.types';
  * - Northwest: Keycloak rejects anonymous registration ("Trusted Hosts"). Its documented public
  *   client `mcp-connector` accepted `http://localhost:<port>/…` on 2026-10-29 (owner pastes the final
  *   address back), but by 2026-10-30 only claude.ai, chatgpt.com and Cursor's `cursor://` callback.
- *   A client Northwest issues to this AWB deployment goes in `NORTHWEST_MCP_CLIENT_ID` (+ `_SECRET`);
- *   then sign-in returns to AWB_PUBLIC_URL like any redirect client.
+ *   A client Northwest issues to this AWB goes in Admin → Settings (`business.mcp.northwest.client_id`
+ *   / `.client_secret`, or env `NORTHWEST_MCP_CLIENT_ID` / `_SECRET`); then sign-in returns to AWB.
  */
 export interface McpProviderSpec {
   url: string;
   /** Every OAuth endpoint the discovery documents announce must live on one of these origins. */
   auth_origins: string[];
   scope: string;
-  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true; registered_env: string };
+  client: { kind: 'dynamic' } | { kind: 'public'; client_id: string; loopback_only: true; registered_env: string; registered_setting: string };
   /**
    * Tools that charge a saved payment method or enrol it in autopay. Never relayed; the owner finishes
    * them in the provider. Matched with or without a client prefix (`v2_client__checkout_cart_tool`).
@@ -48,7 +48,7 @@ export const MCP_CONNECTORS = [
     setup_note: 'Northwest 고객 계정으로 로그인하면 에이전트가 Northwest MCP로 회사·신고·서류·청구서를 조회하고 신청 장바구니를 준비합니다. 결제(체크아웃)는 Northwest 화면에서 소유자가 직접 진행합니다.',
     docs_url: 'https://www.northwestregisteredagent.com/ai/mcp', portal_url: 'https://www.northwestregisteredagent.com/login',
     mcp: { url: 'https://mcp.northwestregisteredagent.com/', auth_origins: ['https://mcp.northwestregisteredagent.com', 'https://id.northwestregisteredagent.com'], scope: 'openid profile email',
-      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP' },
+      client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP', registered_setting: 'business.mcp.northwest' },
       // Northwest checks out against a card already on file (tools catalogue, 2026-10-22).
       owner_only_tools: ['checkout_cart_tool', 'pay_invoice_tool', 'enable_autopay_tool', 'purchase_compliance_service_tool'] },
   }),

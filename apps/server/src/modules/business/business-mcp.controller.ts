@@ -5,6 +5,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { BUSINESS_MCP_CALLBACK_PATH, BusinessMcpService } from './business-mcp.service';
+import { requestOrigin } from '../../common/public-url';
 
 @ApiTags('business')
 @Controller('api/business/companies/:companyId/mcp')
@@ -16,7 +17,7 @@ export class BusinessMcpController {
   list(@Param('companyId') companyId: string, @Req() req: any) { return this.service.list(companyId, req.currentAccountId); }
   @Post(':provider/authorize') @Header('Cache-Control', 'no-store')
   async authorize(@Param() p: any, @Req() req: any, @Res({ passthrough: true }) res: Response) {
-    const result = await this.service.authorize(p.companyId, req.currentAccountId, p.provider, req.currentUser.id);
+    const result = await this.service.authorize(p.companyId, req.currentAccountId, p.provider, req.currentUser.id, requestOrigin(req));
     if (result.cookie) res.cookie(result.cookie_name, result.cookie, { httpOnly: true, sameSite: 'lax', secure: result.secure, path: BUSINESS_MCP_CALLBACK_PATH, maxAge: 600_000 });
     return { url: result.url, mode: result.mode, redirect_uri: result.redirect_uri };
   }

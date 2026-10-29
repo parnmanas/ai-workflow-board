@@ -60,6 +60,7 @@ import { BusinessMailWorkflowService } from '../../business/business-mail-workfl
 import { BusinessService } from '../../business/business.service';
 import { BusinessCashbookService } from '../../business/business-cashbook.service';
 import { BusinessMcpService } from '../../business/business-mcp.service';
+import { bindPublicUrlStore } from '../../../common/public-url';
 import { BusinessTrademarkService } from '../../business/business-trademark.service';
 import { BusinessTrademarkIntegrationsService } from '../../business/business-trademark-integrations.service';
 import type { MarketingAgentService } from '../../marketing/marketing-agent.service';
@@ -269,6 +270,7 @@ export interface ToolContext {
  * creates via `initDb()` — TypeORM repositories resolve at call time.
  */
 export function createStandaloneContext(dataSource: DataSource): ToolContext {
+  void bindPublicUrlStore(dataSource);
   const logger: McpLogger = {
     info: (category, message, meta) => { console.log(`[${category}]`, message, meta || ''); },
     warn: (category, message, meta) => { console.warn(`[${category}]`, message, meta || ''); },
