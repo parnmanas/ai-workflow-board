@@ -48,6 +48,11 @@ WORKDIR /app
 
 # Copy all dependencies (npm workspaces hoists to root)
 COPY --from=deps /app/node_modules ./node_modules
+# 호이스팅되지 못한 workspace 전용 의존성(lockfile 의 `apps/client/node_modules/*`,
+# 예: katex)은 루트가 아니라 workspace 아래에 깔린다 — 같이 복사하지 않으면
+# client 빌드가 import 를 못 찾는다(.dockerignore 가 node_modules 를 빼므로
+# 아래 `COPY . .` 로는 오지 않는다).
+COPY --from=deps /app/apps/client/node_modules ./apps/client/node_modules
 COPY --from=deps /app/package-lock.json ./
 
 # Copy all source files
