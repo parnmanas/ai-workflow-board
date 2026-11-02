@@ -52,6 +52,7 @@ import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { AWAITING_USER_STATUS, IN_FLIGHT_STEP_STATUSES, isAwaitingUser, isInFlight } from './orchestration.constants';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
+import { OrchestrationApprovalService } from './orchestration-approval.service';
 
 /**
  * 한 스윕이 가져오는 confirm 리마인더 후보 수 상한(티켓 a78cb566). 남은 것은 다음 스윕이
@@ -132,6 +133,9 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     private readonly instanceQuiesce: InstanceQuiesceService,
     // 장기 미응답 confirm 게이트 리마인더(티켓 a78cb566).
     private readonly confirmNotify: OrchestrationConfirmNotifyService,
+    // 실행 승인 정리(docs/orchestration.md → "실행 승인") — 기다리는 쪽이 사라진 요청 취소,
+    // 오케스트레이터가 답하지 않은 요청을 사용자에게. 맨 뒤 + optional: 스텁으로 만드는 테스트가 많다.
+    private readonly approvals?: OrchestrationApprovalService,
   ) {}
 
   onModuleInit(): void {
@@ -171,14 +175,16 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
       const running = await this.reapStalledRunning(now);
       const postActionsRecovered = await this.reapPendingPostActions(now);
       const confirmReminders = await this.remindAwaitingConfirm(now);
+      const approvals = await this.settleApprovals(now);
       const nudged = planning.nudged + running.nudged;
       const failed = planning.failed + running.failed;
-      if (stepsFailed || nudged || failed || postActionsRecovered || confirmReminders) {
+      if (stepsFailed || nudged || failed || postActionsRecovered || confirmReminders || approvals.cancelled || approvals.escalated) {
         this.logService.info(
           'Orchestration',
           `reaper sweep: ${stepsFailed} step(s) timed out, ${nudged} mission(s) re-briefed, ${failed} failed, ` +
             `${postActionsRecovered} mission(s)' post-actions recovered, ` +
-            `${confirmReminders} confirm gate(s) reminded`,
+            `${confirmReminders} confirm gate(s) reminded, ` +
+            `${approvals.cancelled} approval request(s) withdrawn, ${approvals.escalated} handed to the user`,
         );
       }
       return {
@@ -214,6 +220,26 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
    * 찾아낸다. `take`는 한 스윕이 한 번에 처리하는 상한일 뿐 선택 기준이
    * 아니다 — 남은 건 다음 스윕(주기적 setInterval)이 이어받는다.
    */
+  private async missionsWaitingOnApproval(missionIds: string[]): Promise<Set<string>> {
+    if (!this.approvals || missionIds.length === 0) return new Set();
+    try {
+      return await this.approvals.missionsWithPendingRequests(missionIds);
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** 실행 승인 스윕 — 실패해도 다른 리퍼 임무를 막지 않는다. */
+  private async settleApprovals(now: Date): Promise<{ cancelled: number; escalated: number }> {
+    if (!this.approvals) return { cancelled: 0, escalated: 0 };
+    try {
+      return await this.approvals.sweep(now);
+    } catch (e: any) {
+      this.logService.warn('Orchestration', `approval sweep failed: ${e?.message || e}`);
+      return { cancelled: 0, escalated: 0 };
+    }
+  }
+
   private async reapPendingPostActions(now: Date): Promise<number> {
     const candidates = await this.missionRepo.find({
       where: { status: In(['completed', 'failed']), post_actions_pending: true },
@@ -296,9 +322,12 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     let nudged = 0;
     let failed = 0;
 
+    const waitingOnApproval = await this.missionsWaitingOnApproval(planning.map((m) => m.id));
     for (const mission of planning) {
       const baseline = mission.started_at ?? mission.created_at;
       if (!baseline || nowMs - new Date(baseline).getTime() < this.planningTimeoutMs) continue;
+      // 오케스트레이터가 실행 승인을 기다리며 멈춰 있다 — 정지가 아니라 사람의 답을 기다리는 중이다.
+      if (waitingOnApproval.has(mission.id)) continue;
 
       // Attempt bookkeeping lives in the timeline so it survives a restart and
       // needs no extra column. `data.reason` is read rather than the event type
@@ -392,7 +421,10 @@ export class OrchestrationReaperService implements OnModuleInit, OnModuleDestroy
     let nudged = 0;
     let failed = 0;
 
+    const waitingOnApproval = await this.missionsWaitingOnApproval(running.map((m) => m.id));
     for (const mission of running) {
+      // 실행 승인을 기다리는 runtime 이 있다(오케스트레이터 자신일 수 있다) — confirm 대기와 같은 이유로 정지가 아니다.
+      if (waitingOnApproval.has(mission.id)) continue;
       const steps = await this.stepRepo.find({ where: { mission_id: mission.id } });
       // Legitimately busy — reapStuckSteps owns timing these out.
       if (steps.some((s) => isInFlight(s.status))) continue;

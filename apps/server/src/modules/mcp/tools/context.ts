@@ -81,6 +81,7 @@ import type { OrchestrationRunnerService } from '../../orchestration/orchestrati
 import type { OrchestrationMissionService } from '../../orchestration/orchestration-mission.service';
 import { OrchestrationMission as OrchestrationMissionEntity } from '../../../entities/OrchestrationMission';
 import type { OrchestrationTeamService } from '../../orchestration/orchestration-team.service';
+import type { OrchestrationApprovalService } from '../../orchestration/orchestration-approval.service';
 import type { AgentManagerCommandService } from '../../agent-manager/agent-manager-command.service';
 import type { OntologyLifecycleService } from '../../ontology/ontology-lifecycle.service';
 import type { OntologyQueryService } from '../../ontology/ontology-query.service';
@@ -218,6 +219,9 @@ export interface ToolContext {
   orchestrationRunnerService?: OrchestrationRunnerService;
   orchestrationMissionService?: OrchestrationMissionService;
   orchestrationTeamService?: OrchestrationTeamService;
+  // 실행 승인 — `decide_orchestration_approval`. 대기 중인 CLI 가 이 프로세스의 long-poll 로 답을 받으므로
+  // standalone context 에는 없다.
+  orchestrationApprovalService?: OrchestrationApprovalService;
   // ticket 6ff827cb: keep_chat_session_alive routes an extend/release grant
   // to the calling agent's own live agent-manager instance over the same
   // agent_manager_command SSE channel spawn_agent/stop_agent already use.

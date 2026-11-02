@@ -1,5 +1,6 @@
 import { t as translate } from '../i18n/core';
 import { missionStyle } from './orchestration/status';
+import { missionAttention } from './orchestration/approvals.logic';
 import type { ActivityView } from '../activity';
 
 // 사이드바 WORK 섹션의 계층 모델 (티켓 03ca8b5b).
@@ -61,7 +62,13 @@ export interface WorkNavInput {
   /** `?team=<id>` 로 선택된 팀(Teams 서브메뉴 active 판정용). */
   selectedTeamId?: string | null;
   teams: Array<{ id: string; name: string }>;
-  missions: Array<{ id: string; title: string; status?: string }>;
+  missions: Array<{
+    id: string;
+    title: string;
+    status?: string;
+    /** 사람이 답해야 하는 수(실행 승인 · 확인 게이트). 있으면 상태보다 먼저 점이 된다. */
+    counts?: { awaitingUser?: number; awaitingApproval?: number } | null;
+  }>;
   teamsLoading?: boolean;
   missionsLoading?: boolean;
 }
@@ -73,6 +80,20 @@ export interface WorkNavInput {
 function missionActivityView(status: string): ActivityView {
   const style = missionStyle(status);
   return { label: style.label, tone: style.tone, live: style.live };
+}
+
+/**
+ * 사이드바 미션 행의 점. 사람의 답을 기다리는 사실(실행 승인 · 확인 게이트)이 미션 상태보다 먼저다 —
+ * 세션 행이 `awaiting_permission` 을 링 펄스로 그리는 것과 같은 tone(attention)이다. 기다리는 동안
+ * 미션은 여전히 `running` 이라, 상태만 보면 "돌고 있음" 으로 보여 아무도 답하지 않는다.
+ */
+function missionNavActivity(mission: WorkNavInput['missions'][number]): ActivityView | undefined {
+  const attention = missionAttention({
+    awaitingUser: mission.counts?.awaitingUser ?? 0,
+    awaitingApproval: mission.counts?.awaitingApproval ?? 0,
+  });
+  if (attention) return attention;
+  return mission.status ? missionActivityView(mission.status) : undefined;
 }
 
 /** `path` 자신이거나 그 하위 경로인가. */
@@ -160,7 +181,7 @@ export function buildWorkNavGroups(input: WorkNavInput): WorkNavGroup[] {
         label: mission.title,
         path: `${orchestrationsPath}/${mission.id}`,
         active: pathname === `${orchestrationsPath}/${mission.id}`,
-        activity: mission.status ? missionActivityView(mission.status) : undefined,
+        activity: missionNavActivity(mission),
       })),
       emptyLabel: translate('No missions yet'),
       loading: missionsLoading,

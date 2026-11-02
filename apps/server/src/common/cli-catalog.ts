@@ -178,7 +178,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
-    mission_approvals: false,
+    mission_approvals: true,
   },
   {
     // DeepSeek 는 Claude Code 바이너리로 DeepSeek 의 Anthropic 호환 endpoint 에
@@ -209,7 +209,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
-    mission_approvals: false,
+    mission_approvals: true,
   },
   {
     id: 'codex',

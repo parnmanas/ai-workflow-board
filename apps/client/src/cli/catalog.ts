@@ -97,7 +97,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
-    mission_approvals: false,
+    mission_approvals: true,
   },
   {
     id: 'deepseek',
@@ -117,7 +117,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
-    mission_approvals: false,
+    mission_approvals: true,
   },
   {
     id: 'codex',

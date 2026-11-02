@@ -62,6 +62,8 @@ const MISSION_EVENT_KINDS: Record<string, AnnouncementKind> = {
   mission_failed: 'mission_failed',
   mission_cancelled: 'mission_cancelled',
   confirm_notified: 'mission_needs_decision',
+  // 실행 승인 요청이 사용자에게 왔다(docs/orchestration.md "실행 승인") — 세션의 승인 대기와 같은 알림.
+  approval_notified: 'mission_needs_approval',
 };
 
 interface StoredAnnouncement extends VoiceAnnouncementPayload {
@@ -439,7 +441,7 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
     const recipients = await this.missionRecipients(mission);
     if (!recipients.length) return;
     let stepTitle: string | null = null;
-    if (kind === 'mission_needs_decision' && e.last_event?.step_key) {
+    if ((kind === 'mission_needs_decision' || kind === 'mission_needs_approval') && e.last_event?.step_key) {
       const step: any = await this.dataSource.getRepository('OrchestrationStep')
         .findOne({ where: { mission_id: mission.id, step_key: e.last_event.step_key } });
       stepTitle = step?.title || e.last_event.step_key;
@@ -451,7 +453,8 @@ export class VoiceAnnouncerService implements OnModuleInit, OnModuleDestroy {
       summary: kind === 'mission_completed' ? mission.result_summary : kind === 'mission_failed' ? (mission.failure_reason || mission.result_summary) : null,
       stepTitle,
     }, announcementLanguage(config.stt.languages));
-    this.announce(recipients, kind, text, { type: 'mission', account_id: mission.account_id, mission_id: mission.id });
+    // 승인 대기는 세션의 승인 대기와 같게 다룬다 — 그 미션 화면을 보고 있어도 알린다(멈춘 것은 사람의 답 때문이다).
+    this.announce(recipients, kind, text, { type: 'mission', account_id: mission.account_id, mission_id: mission.id }, undefined, kind === 'mission_needs_approval');
   }
 
   /**

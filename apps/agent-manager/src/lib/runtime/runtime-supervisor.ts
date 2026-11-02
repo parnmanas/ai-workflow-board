@@ -54,6 +54,15 @@ export interface RuntimeDispatchRequest {
   // text to confirm what was actually said, instead of inferring delivery
   // from `stopReason` alone.
   onEvent?: (event: RuntimeEvent) => void;
+  /**
+   * 실행 승인(docs/orchestration.md "실행 승인") — 이 디스패치의 `approve` 등급 권한 요청에 답할
+   * 곳. 미션 방처럼 답할 사람이 있는 디스패치만 넘긴다. 없으면 생성자 수준 `requestApproval`,
+   * 그것도 없으면 예전처럼 취소(거부)한다.
+   */
+  requestApproval?: (
+    context: RuntimeDispatchContext,
+    request: AcpPermissionRequest,
+  ) => AcpPermissionOutcome | Promise<AcpPermissionOutcome>;
 }
 
 export interface RuntimeDispatchContext {
@@ -88,6 +97,7 @@ interface SessionPolicy {
   context: RuntimeDispatchContext;
   config: AgentRuntimeConfig;
   onEvent?: (event: RuntimeEvent) => void;
+  requestApproval?: RuntimeDispatchRequest['requestApproval'];
 }
 
 function normalizedUsage(value?: AcpUsage): RuntimeDispatchResult['usage'] {
@@ -186,6 +196,7 @@ export class RuntimeSupervisor {
       context,
       config,
       onEvent: request.onEvent,
+      requestApproval: request.requestApproval,
     });
 
     const prompt = [
@@ -318,8 +329,9 @@ export class RuntimeSupervisor {
     }
     let outcome: AcpPermissionOutcome;
     if (policy.config.permission_mode === 'approve') {
-      outcome = this.#requestApproval
-        ? await this.#requestApproval(policy.context, request)
+      const requestApproval = policy.requestApproval ?? this.#requestApproval;
+      outcome = requestApproval
+        ? await requestApproval(policy.context, request)
         : { outcome: 'cancelled' };
     } else {
       const allowed = request.options.find((option) =>

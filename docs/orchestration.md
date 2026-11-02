@@ -1005,6 +1005,70 @@ auto-join 이 그 플래그를 보기 때문이고, 방 생성·옵션 변경·�
 `carryGraphThroughReplan` 이 결과 전체를 그 함수에 다시 통과시킨다 — 그래서 patch 로
 node kind 를 `confirm` 으로 바꾸거나 replan 으로 그래프를 이어받아도 정책을 우회할 수 없다.
 
+### 실행 승인 — 멤버의 도구 사용을 누가 허락하는가
+
+slot 의 `runtime_config.permission_mode` 가 `approve` 인 runtime 은 권한이 필요한 도구(셸 명령,
+파일 수정 …)를 쓰기 전에 묻는다. 예전에는 미션 방에서 이 등급을 띄우지 않았다 — 헤드리스 CLI 가
+물을 곳이 없어 "사람이 승인한다" 가 조용히 "묻지 않고 거부" 로 바뀌기 때문이다(`docs/agent-manager.md`
+→ Permission tier). 미션 방·step 방에는 이제 답할 사람이 있다:
+
+| 누가 묻나 | 오케스트레이터 slot | 누가 답하나 |
+| --- | --- | --- |
+| 멤버 | `trusted` | **오케스트레이터** — 미션 방에 `Approval request` 메시지로 깨워지고 `decide_orchestration_approval` 로 답한다 |
+| 멤버 | `trusted` 아님 | **사용자** — 미션 화면 · 알림 |
+| 오케스트레이터 자신 | 무관 | **사용자** — 자기 요청을 스스로 승인하는 길은 없다 |
+
+신뢰된 오케스트레이터만 대신 답하는 이유: 그 slot 은 이미 묻지 않고 계정 위에서 실행하므로, 멤버의 도구
+호출을 허락해도 자기가 갖지 않은 권한을 내주는 일이 아니다. 신뢰되지 않은 오케스트레이터에게 맡기면
+승인 권한이 슬쩍 위로 번진다. 서버는 결정할 때 그 등급을 **다시 읽는다**(MCP 툴은 403).
+
+오케스트레이터의 답 — `allow`(이번만) · `allow_session`(CLI 가 제안한 규칙을 그 세션에서만 기억) ·
+`deny`(사유가 멤버에게 간다) · `escalate`(사용자에게 넘김). 되돌릴 수 없는 일, 미션 범위 밖, 비밀·운영
+환경에 닿는 일, 확신이 없는 일은 넘기라고 브리핑한다. 오케스트레이터가
+`ORCHESTRATION_APPROVAL_ESCALATE_MS`(기본 10분) 안에 답하지 않거나 깨울 수 없으면 요청은 저절로 사용자에게
+간다 — 멤버가 오케스트레이터 때문에 영원히 멈추지 않게. 사용자는 오케스트레이터 차례인 요청에도 먼저 답할
+수 있다(먼저 정한 쪽이 이긴다 — 모든 전이가 `status = 'pending'` 조건의 단일 UPDATE 다).
+
+**사용자에게 묻는 것은 세션의 승인 대기와 같게 다룬다**: 미션 화면 맨 위 승인 패널(확인 게이트처럼 접지
+않는다), 사이드바 미션 행의 점이 `Needs your approval`(세션의 `awaiting_permission` 과 같은 attention
+tone — 기다리는 동안 미션은 `running` 이라 상태만 보면 "돌고 있음" 이다), step 목록의 표시, UserChannel
+알림(`notify_mention`, 요청당 1회 — `user_notified_at` 선점), 그리고 `approval_notified` 타임라인 행이
+음성 알림(`mission_needs_approval`, 보고 있어도 울린다)으로 이어진다. 개수는 `counts.awaitingApproval`
+이고 목록 · 상세 · `orchestration_update` 가 같은 값을 싣는다. 오케스트레이터가 판단 중인 요청은 세지 않는다.
+
+**경로** — 서버가 미션 방·step 방의 `chat_room_message` 에만 `approval_route: 'orchestration'` 을 싣는다
+(server·agent-manager 공동 contract). 그 방의 세션이 `approve` 등급이면 매니저가
+
+- claude(stream-json 세션): `--permission-prompt-tool stdio` 로 띄워 CLI 의 `control_request`
+  (`can_use_tool`)를 받고, `control_response` 로 답한다(Claude Agent SDK 의 `canUseTool` 과 같은 프로토콜).
+  `AskUserQuestion` 처럼 터미널 앞 사람이 필요한 도구와 모르는 제어 요청은 그 자리에서 거절한다 — 답하지
+  않으면 CLI 가 영원히 멈춘다.
+- Hermes(ACP): `session/request_permission` 을 같은 길로 올리고 답에 맞는 option 을 고른다.
+
+요청은 `POST /api/agent/orchestration/approvals` 로 올리고(CLI 의 request id 로 멱등),
+`GET …/:id/wait` 를 long-poll(최대 25초)한다. 런타임 키는 자기 자신만, 매니저 키는 자기 Host 의 runtime 만
+대신할 수 있다. 답을 얻지 못하면 **거부**다 — 승인으로 추측하지 않는다.
+
+**기다리는 동안 죽이지 않는다** — 답을 기다리는 CLI 는 일부러 멈춰 있다. 매니저의 idle · maxTurns ·
+unhealthy 리퍼는 미결 승인이 있는 세션을 건너뛰고, 서버는 long-poll 을 그 step 의 하트비트로 센다
+(`last_heartbeat_at`, lease 유예 해제). 정지 리퍼(`reapStalledPlanning`/`reapStalledRunning`)도 미결 승인이
+있는 미션을 정지로 보지 않는다. 반대로 기다리는 쪽이 사라진 요청(3분간 poll 없음), 끝났거나 새 attempt 로
+밀려난 step 의 요청, 끝난 미션의 요청은 `cancelled` 로 거둔다 — 사용자가 아무도 기다리지 않는 요청을
+승인하게 두지 않는다.
+
+**지원하지 않는 CLI** — 어느 CLI 가 미션에서 `approve` 로 돌 수 있는지는 CLI 카탈로그의
+`mission_approvals` 한 곳이 말한다(server `cli-catalog.ts` · client `cli/catalog.ts`, 지금은 claude ·
+deepseek · hermes). codex·opencode·pi·antigravity 는 실행 중 권한 요청을 밖으로 낼 프로토콜이 없어 매니저가
+`approve` 실행을 거부하므로, 팀 slot 저장 · 미션 시작/다시 열기 · step 디스패치가 그 조합을 사유와 함께 막는다
+(`missionApprovalProblem`) — 예전에는 slot 이 저장된 뒤 step 이 lease 만료까지 소식 없이 멈췄다. 그 slot 은
+`trusted` 또는 `strict` 로 정할 것. 카탈로그 값과 매니저 사실(`native_approvals` 또는 stdio 권한 요청을 지원하는
+persistent 세션)의 일치는 agent-manager 의 `cli-catalog-contract` 테스트가 강제한다.
+
+기록은 `orchestration_approvals`(엔티티 `OrchestrationApproval`)와 타임라인 이벤트
+`approval_requested` / `approval_escalated` / `approval_notified` / `approval_decided` / `approval_cancelled`
+다. 구현: `orchestration-approval.ts`(규칙) · `orchestration-approval.service.ts` ·
+`orchestration-approval-agent.controller.ts` · 매니저 `orchestration-approval-bridge.ts`.
+
 ---
 
 ## 디스패치가 채팅룸을 재사용하는 이유
@@ -1207,6 +1271,7 @@ UI 에는 step 배정/완료 버튼이 없다. 계획은 오케스트레이터�
 | `patch_orchestration_graph` | 실행 중인 그래프를 **부분** 수정 — 분기 열기/닫기, 의존 재배선, 반복 상한 조정, 폭주 loop 정지. plan 을 건드리지 않아 `plan_version` 을 소모하지 않는다 |
 | `update_orchestration_step` | `retry` / `reassign` / `amend` / `skip` / `cancel` / `set_retry_budget` — `max_attempts` 를 함께 보내면 예산이 바닥난 노드도 **같은 노드로** 다시 돈다 · 재배정은 `assignee`(+ 생략하면 step 의 지금 project 를 유지하는 `project`) |
 | `add_orchestration_note` | 타임라인에 판단 근거 기록 |
+| `decide_orchestration_approval` | 멤버의 실행 승인 요청에 답한다 — `allow` / `allow_session` / `deny` / `escalate`. 오케스트레이터 slot 이 `trusted` 일 때만(위 "실행 승인") |
 | `complete_orchestration_mission` | `completed` / `failed` — **미션을 끝내는 유일한 경로** |
 
 **멤버**

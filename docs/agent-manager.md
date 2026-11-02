@@ -260,7 +260,7 @@ resolve the policy the same way.
 | `antigravity` | `--dangerously-skip-permissions` | flag omitted (approximated) | flag omitted (approximated) |
 | `pi` | `--approve` | flag omitted (approximated) | flag omitted (approximated) |
 | `opencode` | `--auto` (`run --auto`) | flag omitted (approximated) | flag omitted (approximated) |
-| `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path (the only `native` approve) | ACP request cancelled |
+| `hermes` | ACP permission requests auto-allowed | ACP request bridged to the AWB approval path in mission rooms (cancelled elsewhere) | ACP request cancelled |
 
 Each runtime declares how faithfully it expresses a tier via
 `permissionCapabilities()` (adapter side) and `RuntimeCapabilities.permission_tiers`
@@ -296,6 +296,22 @@ This is deliberately a loud stop rather than a quiet downgrade, including for
 agents whose `approve` came from the `BackfillAgentRuntimeConfig` migration
 default: each affected agent gets one explicit operator decision instead of a
 silent change in what its trust level means.
+
+**Mission rooms are the exception that has someone to ask** (docs/orchestration.md
+→ "실행 승인"). The server stamps `approval_route: 'orchestration'` on
+`chat_room_message` for mission and step rooms only. There the manager builds an
+approval bridge (`orchestration-approval-bridge.ts`) and the spawn gate counts it
+as an approval path for adapters that can relay prompts over stdio
+(`supportsStdioPermissionPrompt()` — claude): the session gets
+`--permission-prompt-tool stdio`, every `control_request` `can_use_tool` is posted
+to `POST /api/agent/orchestration/approvals` and long-polled, and the answer goes
+back as a `control_response` (allow with the tool input, optionally the CLI's
+suggested rules pinned to `destination: 'session'`; or deny with the decider's
+reason). Hermes takes the same bridge through a per-dispatch `requestApproval`.
+While a prompt is pending the idle / maxTurns / unhealthy reapers leave the
+session alone. Codex and the flag-less CLIs still have no prompt protocol, so an
+`approve` slot on them is refused in missions too. Everywhere else (tickets,
+plain chat, Action/QA runs) nothing changed.
 
 `antigravity`/`pi`/`opencode` have no per-tier option at all, so `approve`/`strict` are
 approximated by dropping their auto-approve flag (all run non-interactively, so

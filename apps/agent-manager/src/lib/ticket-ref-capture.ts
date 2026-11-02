@@ -463,6 +463,7 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   add_orchestration_note: 'orchestration',
   complete_orchestration_mission: 'orchestration',
   create_orchestration_mission: 'orchestration',
+  decide_orchestration_approval: 'orchestration',
   get_orchestration_mission: 'orchestration',
   get_orchestration_step: 'orchestration',
   list_my_orchestration_steps: 'orchestration',

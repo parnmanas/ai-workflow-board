@@ -54,7 +54,7 @@ export class AccountAccessService {
     let entity: string | undefined;
     let resourceId: string | undefined;
     const nested = path.match(/\/api\/(qa|security|actions|functions)\/(scenarios|profiles|schedules|runs|batches)\/([^/]+)/);
-    const orchestration = path.match(/\/orchestration\/(missions|teams|steps)\/([^/]+)/);
+    const orchestration = path.match(/\/orchestration\/(missions|teams|steps|approvals)\/([^/]+)/);
     const marketing = path.match(/\/api\/marketing\/([a-z-]+)\/([^/]+)/);
     const business = path.match(/\/api\/business\/companies\/([^/]+)/);
     if (business) {
@@ -70,7 +70,9 @@ export class AccountAccessService {
       } as Record<string, string>)[marketing[1]];
       resourceId = marketing[2];
     } else if (orchestration) {
-      entity = { missions: 'OrchestrationMission', teams: 'OrchestrationTeam', steps: 'OrchestrationStep' }[orchestration[1]];
+      entity = {
+        missions: 'OrchestrationMission', teams: 'OrchestrationTeam', steps: 'OrchestrationStep', approvals: 'OrchestrationApproval',
+      }[orchestration[1]];
       resourceId = orchestration[2];
     } else if (nested) {
       entity = ({ qa: { scenarios: 'QaScenario', schedules: 'QaSchedule', runs: 'QaRun', batches: 'QaRunBatch' },

@@ -48,6 +48,7 @@ import { OrchestrationTeamService } from './orchestration-team.service';
 import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationRunnerService, ActorRef } from './orchestration-runner.service';
 import { OrchestrationReaperService } from './orchestration-reaper.service';
+import { OrchestrationApprovalService } from './orchestration-approval.service';
 
 function actorOf(req: Request): ActorRef {
   const user = (req as any).currentUser as { id?: string; name?: string } | undefined;
@@ -69,6 +70,7 @@ export class OrchestrationController {
     private readonly missions: OrchestrationMissionService,
     private readonly runner: OrchestrationRunnerService,
     private readonly reaper: OrchestrationReaperService,
+    private readonly approvals: OrchestrationApprovalService,
   ) {}
 
   // ── Teams ─────────────────────────────────────────────────────────────────
@@ -529,6 +531,31 @@ export class OrchestrationController {
       });
     } catch (e: any) {
       return fail(res, e, 'Failed to submit the confirmation');
+    }
+  }
+
+  /**
+   * 실행 승인 요청에 답한다(docs/orchestration.md → "실행 승인"). 멤버·오케스트레이터의 CLI 가 이
+   * 답을 기다리며 멈춰 있다. 오케스트레이터가 판단 중인 요청에도 답할 수 있다 — 사람이 먼저 정하면
+   * 그것이 이긴다(오케스트레이터의 늦은 답은 409).
+   *
+   * "사람이 step 을 직접 만지지 않는다" 규칙의 예외가 아니다: plan 도 step 상태도 바꾸지 않고,
+   * 에이전트가 사람에게 물은 질문에 답할 뿐이다.
+   */
+  @Post('approvals/:id/decide')
+  async decideApproval(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const actor = actorOf(req);
+      return res.json(
+        await this.approvals.decideAsUser(id, body?.account_id, { id: actor.id, name: actor.name }, body?.decision, body?.note),
+      );
+    } catch (e: any) {
+      return fail(res, e, 'Failed to answer the approval request');
     }
   }
 

@@ -588,6 +588,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         // instruction and tell the subagent to do the work directly. Omit when
         // absent so ordinary chat turns keep the wire byte-for-byte unchanged.
         is_action_room: event.is_action_room ? true : undefined,
+        // 실행 승인 경로(docs/orchestration.md "실행 승인") — 미션 방·step 방에만. 조건부 생략.
+        approval_route: event.approval_route === 'orchestration' ? 'orchestration' : undefined,
         // F-1 (ticket 24694916): structured ticket-action refs. RoomMessagingService
         // forwards the parsed object it persisted (agent-manager captured it from
         // mcp__awb__* tool results). Omit when absent so ordinary chat turns keep
@@ -1260,6 +1262,9 @@ export const EVENT_TYPES: EventDefinition[] = [
           failed: Number(event.counts?.failed ?? 0),
           inFlight: Number(event.counts?.inFlight ?? 0),
           pending: Number(event.counts?.pending ?? 0),
+          // 사람이 답해야 하는 수 — 사이드바 미션 점(attention)이 이 프레임으로 갱신된다.
+          awaitingUser: Number(event.counts?.awaitingUser ?? 0),
+          awaitingApproval: Number(event.counts?.awaitingApproval ?? 0),
         },
         last_event: event.last_event
           ? {

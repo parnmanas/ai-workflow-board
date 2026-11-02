@@ -21,6 +21,8 @@ import {
   PARSE_STAGE,
   type OneshotSpec,
   type ParseResult,
+  type PermissionAnswer,
+  type PermissionPrompt,
   type SessionSpec,
   type SpawnDescriptor,
   type TurnImage,
@@ -106,6 +108,20 @@ function normalizeClaudeMode(raw?: string | null): string | null {
   if (!v) return null;
   if (v === 'default') return 'auto';
   return CLAUDE_PERMISSION_MODES.has(v) ? v : null;
+}
+
+/**
+ * 승인 경로가 있는 세션(docs/orchestration.md "실행 승인")에서만: CLI 가 권한 요청을 묻는 대신 stdio
+ * 로 내보내게 한다. `trusted` 는 애초에 묻지 않으므로(스킵 플래그) 붙이지 않는다.
+ */
+function permissionPromptArgs(
+  permissionPrompt: SessionSpec['permissionPrompt'],
+  policy?: EffectivePermissionPolicy | null,
+  harness?: HarnessSpec | null,
+): string[] {
+  if (permissionPrompt !== 'stdio') return [];
+  if (permissionPolicyOrDefault(policy, harness?.permission_mode).tier === 'trusted') return [];
+  return ['--permission-prompt-tool', 'stdio'];
 }
 
 /** tier 를 대표하는 claude 모드 — harness 가 같은 tier 의 구체적인 모드를
@@ -299,7 +315,7 @@ export class ClaudeCliAdapter extends CliAdapter {
     };
   }
 
-  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode, sessionMode, sessionId, permission }: SessionSpec): SpawnDescriptor {
+  buildSessionSpawn({ rolePrompt, mcpConfigPath, model, harness, effort, ultracode, sessionMode, sessionId, permission, permissionPrompt }: SessionSpec): SpawnDescriptor {
     // Session ultracode is best-effort and applied at SESSION CREATION only:
     // a persistent session has no single "task text" arg, so we fold the
     // `ultracode` keyword into the composed system prompt here. Follow-up
@@ -331,6 +347,7 @@ export class ClaudeCliAdapter extends CliAdapter {
         finalSystemPrompt,
         ...disallowedToolsArgs(harness),
         ...permissionArgs(permission, harness),
+        ...permissionPromptArgs(permissionPrompt, permission, harness),
       ],
       stdio: ['pipe', 'pipe', 'pipe'],
       needsMcpConfig: true,
@@ -560,11 +577,87 @@ export class ClaudeCliAdapter extends CliAdapter {
     return { kind: 'subscription', expires_at_ms: expires, refresh_token_present };
   }
 
-  /** Claude 는 세 등급 모두 전용 플래그를 갖지만, 실행 중 권한 요청을 밖으로
-   *  노출하는 훅이 없어 `approve` 는 AWB 승인 요청을 만들지 못한다 —
-   *  {@link TIER_FLAG_PERMISSION_CAPABILITIES} 참고 (ticket 5851e435). */
+  /** Claude 는 세 등급 모두 전용 플래그를 갖지만, `--print` 일회성 실행에는 실행 중 권한 요청을
+   *  밖으로 노출하는 훅이 없어 `approve` 는 AWB 승인 요청을 만들지 못한다 —
+   *  {@link TIER_FLAG_PERMISSION_CAPABILITIES} 참고 (ticket 5851e435). stream-json **세션**은
+   *  예외다: `--permission-prompt-tool stdio` 로 요청을 stdio 에 실을 수 있고, 승인 경로가 있는
+   *  방(미션)에서만 매니저가 그 길을 연다 — {@link supportsStdioPermissionPrompt}. */
   permissionCapabilities(): PermissionCapabilities {
     return TIER_FLAG_PERMISSION_CAPABILITIES;
+  }
+
+  /**
+   * `--permission-prompt-tool stdio` (Claude Agent SDK 의 `canUseTool` 과 같은 프로토콜): 권한이
+   * 필요한 도구 호출마다 CLI 가 stdout 에 `control_request`(subtype `can_use_tool`)를 쓰고 stdin 의
+   * `control_response` 를 기다린다. stream-json 입력 세션에서만 성립한다(답을 쓸 stdin 이 있어야 한다).
+   */
+  supportsStdioPermissionPrompt(): boolean {
+    return true;
+  }
+
+  parsePermissionPrompt(raw: any): PermissionPrompt | null {
+    if (!raw || raw.type !== 'control_request' || raw.request?.subtype !== 'can_use_tool') return null;
+    const requestId = typeof raw.request_id === 'string' ? raw.request_id : '';
+    if (!requestId) return null;
+    const req = raw.request;
+    const toolName = typeof req.tool_name === 'string' ? req.tool_name : 'unknown tool';
+    return {
+      requestId,
+      toolName,
+      title: typeof req.title === 'string' ? req.title : (typeof req.display_name === 'string' ? req.display_name : ''),
+      description: typeof req.description === 'string' ? req.description : '',
+      input: req.input ?? {},
+      suggestions: Array.isArray(req.permission_suggestions) ? req.permission_suggestions : [],
+      // AskUserQuestion 은 터미널 앞의 사람에게 묻는 도구다. AWB 가 띄운 CLI 앞에는 아무도 없다.
+      interactiveOnly: toolName === 'AskUserQuestion',
+      raw,
+    };
+  }
+
+  parsePermissionPromptCancel(raw: any): string | null {
+    if (!raw || raw.type !== 'control_cancel_request') return null;
+    return typeof raw.request_id === 'string' && raw.request_id ? raw.request_id : null;
+  }
+
+  rejectUnsupportedControlRequest(raw: any): string | null {
+    if (!raw || raw.type !== 'control_request' || raw.request?.subtype === 'can_use_tool') return null;
+    if (typeof raw.request_id !== 'string' || !raw.request_id) return null;
+    return JSON.stringify({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: raw.request_id,
+        error: `AWB agent-manager does not handle control requests of type "${String(raw.request?.subtype || '')}"`,
+      },
+    });
+  }
+
+  formatPermissionAnswer(prompt: PermissionPrompt, answer: PermissionAnswer): string | null {
+    const toolUseID = typeof prompt.raw?.request?.tool_use_id === 'string' ? prompt.raw.request.tool_use_id : undefined;
+    const response = answer.allow
+      ? {
+          behavior: 'allow',
+          updatedInput: prompt.input ?? {},
+          // 제안된 규칙을 이 세션에서만 기억시킨다 — `localSettings` 등으로 저장하면 저장소 파일
+          // (.claude/settings.local.json)을 바꾸게 된다. 세션이 끝나면 함께 사라진다.
+          ...(answer.rememberForSession && prompt.suggestions.length
+            ? {
+                updatedPermissions: prompt.suggestions
+                  .filter((sug) => sug && typeof sug === 'object')
+                  .map((sug) => ({ ...(sug as Record<string, unknown>), destination: 'session' })),
+              }
+            : {}),
+          ...(toolUseID ? { toolUseID } : {}),
+        }
+      : {
+          behavior: 'deny',
+          message: answer.message || 'Denied.',
+          ...(toolUseID ? { toolUseID } : {}),
+        };
+    return JSON.stringify({
+      type: 'control_response',
+      response: { subtype: 'success', request_id: prompt.requestId, response },
+    });
   }
 
   /**

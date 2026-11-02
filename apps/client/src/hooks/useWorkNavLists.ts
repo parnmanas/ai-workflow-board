@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useBoardStreamEvent } from '../contexts/BoardStreamContext';
-import type { OrchestrationMissionStatus, OrchestrationUpdateEvent } from '../types';
+import type { OrchestrationCounts, OrchestrationMissionStatus, OrchestrationUpdateEvent } from '../types';
 import { MISSIONS_CHANGED_EVENT, TEAMS_CHANGED_EVENT } from '../components/workNavigation';
 
 /**
@@ -31,6 +31,11 @@ export interface WorkNavMission {
    * 프레임에서 그렇게 보여야 한다는 것이 이 필드가 있는 이유다.
    */
   status: OrchestrationMissionStatus;
+  /**
+   * 사람이 답해야 하는 수 — 실행 승인 요청(`awaitingApproval`)과 확인 게이트(`awaitingUser`).
+   * 있으면 사이드바 점이 미션 상태 대신 "답을 기다린다" 를 말한다(세션의 승인 대기와 같은 tone).
+   */
+  counts?: { awaitingUser: number; awaitingApproval: number };
 }
 
 export interface WorkNavLists {
@@ -38,6 +43,10 @@ export interface WorkNavLists {
   missions: WorkNavMission[];
   teamsLoading: boolean;
   missionsLoading: boolean;
+}
+
+function attentionCounts(counts: OrchestrationCounts | null | undefined): WorkNavMission['counts'] {
+  return { awaitingUser: counts?.awaitingUser ?? 0, awaitingApproval: counts?.awaitingApproval ?? 0 };
 }
 
 export function useWorkNavLists(accountId: string | null): WorkNavLists {
@@ -73,7 +82,13 @@ export function useWorkNavLists(accountId: string | null): WorkNavLists {
     try {
       const list = await api.listOrchestrationMissions(accountId, { limit: WORK_NAV_MISSION_LIMIT });
       if (generationRef.current !== generation) return;
-      setMissions(list.map((mission) => ({ id: mission.id, title: mission.title, status: mission.status, account_id: mission.account_id })));
+      setMissions(list.map((mission) => ({
+        id: mission.id,
+        title: mission.title,
+        status: mission.status,
+        account_id: mission.account_id,
+        counts: attentionCounts(mission.counts),
+      })));
     } catch {
       if (generationRef.current !== generation) return;
       setMissions([]);
@@ -128,9 +143,16 @@ export function useWorkNavLists(accountId: string | null): WorkNavLists {
     }
     setMissions((prev) => {
       const idx = prev.findIndex((mission) => mission.id === data.mission_id);
-      if (idx === -1 || (prev[idx].title === data.title && prev[idx].status === data.status)) return prev;
+      if (idx === -1) return prev;
+      const counts = data.counts ? attentionCounts(data.counts) : prev[idx].counts;
+      if (
+        prev[idx].title === data.title
+        && prev[idx].status === data.status
+        && prev[idx].counts?.awaitingUser === counts?.awaitingUser
+        && prev[idx].counts?.awaitingApproval === counts?.awaitingApproval
+      ) return prev;
       const next = [...prev];
-      next[idx] = { ...next[idx], title: data.title, status: data.status };
+      next[idx] = { ...next[idx], title: data.title, status: data.status, counts };
       return next;
     });
   });

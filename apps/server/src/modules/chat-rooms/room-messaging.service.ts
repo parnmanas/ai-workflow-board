@@ -813,6 +813,9 @@ export class RoomMessagingService {
       // flag (instead of a new payload field) means the agent-manager needs no
       // change and the SSE contract is untouched.
       is_action_room: !!roomForName?.action_id || !!roomForName?.orchestration_mission_id || ['mail', 'business'].includes(roomForName?.run_kind || ''),
+      // 실행 승인(docs/orchestration.md "실행 승인") — 미션의 CLI 는 approve 등급에서 권한 요청을
+      // 오케스트레이터/사용자에게 올릴 수 있다. 그 밖의 방에는 키 자체가 없다.
+      ...(roomForName?.orchestration_mission_id ? { approval_route: 'orchestration' as const } : {}),
       // F-1 (ticket 24694916): forward the parsed refs on the wire (object, not the
       // stringified column) so the event-registry map() + client get the shape
       // directly. Omitted when absent → ordinary chat turns keep the legacy wire.
@@ -947,6 +950,7 @@ export class RoomMessagingService {
       // chat_room_message emits. A system alert posted into an Action room
       // still carries the action_id so any responder gets the right prompt.
       is_action_room: !!room.action_id || !!room.orchestration_mission_id || ['mail', 'business'].includes(room.run_kind || ''),
+      ...(room.orchestration_mission_id ? { approval_route: 'orchestration' as const } : {}),
     });
 
     this.logService.info('ChatRooms', `system message posted to room ${roomId}`, {

@@ -82,6 +82,7 @@ export { OrchestrationTeamMember } from './OrchestrationTeamMember';
 export { OrchestrationMission } from './OrchestrationMission';
 export { OrchestrationStep } from './OrchestrationStep';
 export { OrchestrationEvent } from './OrchestrationEvent';
+export { OrchestrationApproval } from './OrchestrationApproval';
 // Ontology Graph 스키마(ticket 6ca4894a, docs/ontology-graph/DESIGN.md 축
 // 2/3) — OntologyNode/OntologyEdge. sql.js(dev) 백엔드에서는 이 둘을
 // 의도적으로 db.ts의 primary `entities` 배열에서 제외하고 대신 독립적으로

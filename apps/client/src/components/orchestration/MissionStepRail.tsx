@@ -31,6 +31,7 @@ export default function MissionStepRail({
   counts,
   planVersion,
   emptyHint,
+  approvalsByStep,
 }: {
   steps: OrchestrationStep[];
   graph: OrchestrationGraphSpec | null;
@@ -42,6 +43,8 @@ export default function MissionStepRail({
   planVersion: number;
   /** step 이 아직 없을 때 레일에 적을 한 줄. */
   emptyHint: string;
+  /** step key → 사용자에게 온 미결 실행 승인 수(approvals.logic.ts `approvalsByStep`). */
+  approvalsByStep?: Map<string, number>;
 }) {
   useLocale();
   const depths = computeDepths(steps, graph);
@@ -103,6 +106,7 @@ export default function MissionStepRail({
                     step={step}
                     now={now}
                     stepTimeoutMinutes={stepTimeoutMinutes}
+                    awaitingApproval={approvalsByStep?.get(step.step_key) ?? 0}
                     selected={step.id === selectedId}
                     // 같은 행을 다시 누르면 선택이 풀린다 — 이 레일에서 미션 대화로
                     // 돌아가는 가장 짧은 동작이고, 맨 위 Mission 행과 같은 결과다.
@@ -122,12 +126,14 @@ function StepRailRow({
   step,
   now,
   stepTimeoutMinutes,
+  awaitingApproval,
   selected,
   onClick,
 }: {
   step: OrchestrationStep;
   now: number;
   stepTimeoutMinutes: number;
+  awaitingApproval: number;
   selected: boolean;
   onClick: () => void;
 }) {
@@ -167,6 +173,12 @@ function StepRailRow({
         )}
         {step.status === 'awaiting_user' && (
           <span style={{ fontSize: 9, color: tokens.colors.warningLight, fontWeight: 700 }}>{translate('답변 필요')}</span>
+        )}
+        {/* 실행 승인 — 담당 runtime 이 도구 사용 승인을 기다리며 멈춰 있다. step 상태는 running 그대로라 따로 표시한다. */}
+        {awaitingApproval > 0 && (
+          <span data-testid="rail-approval-badge" style={{ fontSize: 9, color: tokens.colors.warningLight, fontWeight: 700 }}>
+            {translate('Needs your approval')}
+          </span>
         )}
         {(step.evidence_count ?? 0) > 0 && (
           <span

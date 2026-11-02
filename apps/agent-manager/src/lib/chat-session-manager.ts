@@ -443,6 +443,7 @@ export class ChatSessionManager
           // (ticket path has passed it correctly all along), the chat path
           // just never filled it in.
           runtimeProfile: spec.runtimeProfile ?? null,
+          approvalBridge: spec.approvalBridge ?? null,
         },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight

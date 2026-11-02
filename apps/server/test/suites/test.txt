@@ -202,6 +202,7 @@ test/ontology-resolver-polymorphic-cap.test.mjs
 test/ontology-sqljs-corruption-guard.test.mjs
 test/ontology-sqljs-independent-datasource.test.mjs
 test/operational-capability-ticket.test.mjs
+test/orchestration-approvals.test.mjs
 test/orchestration-confirm-controller.test.mjs
 test/orchestration-confirm-notify.test.mjs
 test/orchestration-confirm-policy.test.mjs

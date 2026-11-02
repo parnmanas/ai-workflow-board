@@ -2572,6 +2572,43 @@ export interface OrchestrationCounts {
   pending: number;
   /** 사람의 confirm 판정을 기다리는 step 수(티켓 5dbe4aa2). pending 과 별개 축. */
   awaitingUser: number;
+  /**
+   * 사용자에게 온 실행 승인 요청 수(docs/orchestration.md "실행 승인"). step 상태가 아니라 요청에서
+   * 센다 — 승인을 기다리는 멤버의 step 은 `running` 그대로다. 구 서버 응답에는 없다.
+   */
+  awaitingApproval?: number;
+}
+
+export type OrchestrationApprovalDecision = 'allow' | 'allow_session' | 'deny';
+
+/** 미션 runtime 의 도구 사용 승인 요청 하나(docs/orchestration.md "실행 승인"). */
+export interface OrchestrationApproval {
+  id: string;
+  mission_id: string;
+  step_id: string | null;
+  step_key: string | null;
+  /** 'member' | 'orchestrator' */
+  requester_role: string;
+  requester_agent_id: string;
+  requester_name: string;
+  tool_name: string;
+  title: string;
+  description: string;
+  /** 도구 입력(JSON, 잘린 사본). 표시용. */
+  input: string;
+  can_allow_session: boolean;
+  status: 'pending' | 'approved' | 'denied' | 'cancelled';
+  /** 지금 답할 쪽 — 'orchestrator' | 'user'. */
+  route: 'orchestrator' | 'user';
+  /** orchestrator_trusted | orchestrator_not_trusted | orchestrator_request | orchestrator_escalated | orchestrator_timeout | orchestrator_unreachable */
+  route_reason: string;
+  routed_at: string;
+  decision: OrchestrationApprovalDecision | null;
+  decided_by_type: 'orchestrator' | 'user' | 'system' | null;
+  decided_by_name: string;
+  decision_note: string;
+  decided_at: string | null;
+  created_at: string;
 }
 
 /** Mission 단위 사용자 확인 강도(티켓 5dbe4aa2). */
@@ -2849,6 +2886,8 @@ export interface OrchestrationMissionDetail extends OrchestrationMissionListItem
   user_chat_mode: OrchestrationUserChatMode;
   /** 미션 방에 올라온 이미지·동영상 수. 구 서버 응답에는 없으므로 옵셔널. */
   mission_evidence_count?: number;
+  /** 실행 승인 요청 — 미결 전부(오래된 순) + 최근에 끝난 것. 구 서버 응답에는 없다. */
+  approvals?: OrchestrationApproval[];
   steps: OrchestrationStep[];
   events: OrchestrationTimelineEvent[];
   /** Present only on the create-with-start response when the brief failed to send. */

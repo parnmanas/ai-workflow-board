@@ -21,6 +21,8 @@ import { copyPlainText } from '../../utils/clipboard';
 import MissionHeaderMenu, { MissionIdentity } from './MissionHeaderMenu';
 import PlanGraph from './PlanGraph';
 import ConfirmRequestPanel from './ConfirmRequestPanel';
+import ApprovalRequestPanel from './ApprovalRequestPanel';
+import { approvalsByStep } from './approvals.logic';
 import MissionConversationPanel from './MissionConversationPanel';
 import MissionStepRail from './MissionStepRail';
 import StepSessionPanel from './StepSessionPanel';
@@ -256,6 +258,8 @@ export default function MissionDetailPage() {
         <StatusStrip mission={mission} />
         {/* 미션 전체가 여기서 멈춰 있으므로 접지 않는다 — 사람이 답해야 진행된다. */}
         <ConfirmRequestPanel steps={mission.steps} accountId={accountId} onDecided={() => load({ silent: true })} />
+        {/* 실행 승인 — 요청한 runtime 이 그 자리에서 멈춰 있으므로 확인 게이트처럼 접지 않는다. */}
+        <ApprovalRequestPanel approvals={mission.approvals} accountId={accountId} onDecided={() => load({ silent: true })} />
       </div>
 
       {/*
@@ -277,6 +281,7 @@ export default function MissionDetailPage() {
             setStepsOpen(false);
           }}
           counts={mission.counts}
+          approvalsByStep={approvalsByStep(mission.approvals)}
           planVersion={mission.plan_version}
           emptyHint={
             mission.status === 'draft'
@@ -620,8 +625,11 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
           {mission.counts.total > 0
             ? translate('{0} done · {1} working · {2} waiting', { 0: mission.counts.done, 1: mission.counts.inFlight, 2: mission.counts.pending }) +
               `${mission.counts.awaitingUser ? translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser }) : ''}` +
+              `${mission.counts.awaitingApproval ? translate(' · {0} awaiting your approval', { 0: mission.counts.awaitingApproval }) : ''}` +
               `${mission.counts.failed ? translate(' · {0} failed', { 0: mission.counts.failed }) : ''}`
-            : translate('No steps yet')}
+            : mission.counts.awaitingApproval
+              ? translate('{0} awaiting your approval', { 0: mission.counts.awaitingApproval })
+              : translate('No steps yet')}
         </span>
         <div
           style={{

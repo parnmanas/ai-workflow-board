@@ -60,7 +60,8 @@ import {
   type MaxOutputTokensResolution,
   type RuntimeLease,
 } from './runtime-profiles.js';
-import type { RuntimeProfileSpec } from './cli-adapters/base.js';
+import type { PermissionPrompt, RuntimeProfileSpec } from './cli-adapters/base.js';
+import type { ApprovalBridge } from './orchestration-approval-bridge.js';
 import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 
 const { PERSISTENT_SESSION } = ADAPTER_CAPABILITIES;
@@ -194,6 +195,13 @@ export interface SpawnOpts {
    *  (effectiveModel + fallback_models)로부터 매번 결정적으로 재구성되므로
    *  인덱스만 전달하면 충분하다. */
   chainAttempt?: number;
+  /**
+   * 실행 승인 경로(docs/orchestration.md "실행 승인"). 미션 방처럼 권한 요청에 답할 사람이 있는
+   * 방에서만 넘어온다. 있고 어댑터가 stdio 권한 요청을 지원하면 `approve` 등급 세션을 띄우고
+   * (없으면 예전처럼 거절), CLI 의 권한 요청을 이 브리지로 올려 답을 기다린다. 세션 생성 시점에만
+   * 적용된다 — 같은 방의 후속 턴은 세션이 태어난 경로를 그대로 쓴다.
+   */
+  approvalBridge?: ApprovalBridge | null;
 }
 
 interface TurnState {
@@ -391,6 +399,11 @@ export interface SessionRecord {
    *  between rechecks by design — this is a best-effort UI badge, not a
    *  liveness decision. */
   _lastBackgroundTaskCount?: number;
+  /** 실행 승인 — 이 세션이 권한 요청을 올리는 곳(승인 경로가 열린 세션만). */
+  _approvalBridge?: ApprovalBridge | null;
+  /** 답을 기다리는 권한 요청(CLI request id → 취소 손잡이). 비어 있지 않으면 CLI 는 일부러
+   *  멈춰 있는 것이다 — idle/maxTurns/unhealthy 리퍼가 죽이지 않는다. */
+  _pendingApprovals?: Map<string, AbortController>;
 }
 
 /** Reservation placed on `_inflight` from the moment a dispatcher commits to
@@ -650,7 +663,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt, approvalBridge }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -705,11 +718,16 @@ export class BaseSessionManager {
     );
     if (permissionGap) log(`${this.#logTag} permission capability: ${permissionGap}`);
     // 리뷰 라운드2 지적 #3 — SubagentManager.spawn 과 같은 게이트. 세션 경로도
-    // approve 를 승인 없이 실행하면 안 된다.
+    // approve 를 승인 없이 실행하면 안 된다. 승인 경로가 열린 방(미션)에서 stdio 로 권한 요청을
+    // 주고받을 수 있는 CLI 는 예외다 — 그 요청은 AWB 를 거쳐 오케스트레이터/사용자에게 간다.
+    const stdioApprovals = !!approvalBridge && adapter.supportsStdioPermissionPrompt() && permission.tier === 'approve';
     const approveGate = decideApproveDispatch(permission, {
       id: adapter.cliType,
-      native_approvals: adapter.permissionCapabilities().native_approvals,
+      native_approvals: adapter.permissionCapabilities().native_approvals || stdioApprovals,
     });
+    if (stdioApprovals) {
+      log(`${this.#logTag} approvals relayed to AWB: ${this.#keyField}=${sessionKey} cli=${adapter.cliType}`);
+    }
     if (approveGate.blocked) {
       log(
         `${this.#logTag} spawn refused — ${approveGate.reason}: ${this.#keyField}=${sessionKey} ` +
@@ -851,6 +869,7 @@ export class BaseSessionManager {
         effort: effortFlag,
         ultracode,
         permission,
+        permissionPrompt: stdioApprovals ? ('stdio' as const) : null,
         sessionId: sessionKey as string | undefined,
       };
       const buildSessionArgs = (spec: Record<string, unknown>) =>
@@ -1113,6 +1132,7 @@ export class BaseSessionManager {
         chainAttempt,
         _cliHomeDir: agentContext?.cli_home_dir || null,
         _cwd: claudeRuntimeProfile?.cwd || effectiveCwd || null,
+        _approvalBridge: stdioApprovals ? approvalBridge : null,
       };
       sess.tap =
         this.#monitor?.register({
@@ -1206,6 +1226,12 @@ export class BaseSessionManager {
     if (sess._keepAliveUntilMs && Date.now() < sess._keepAliveUntilMs) {
       log(
         `${this.#logTag} maxTurns=${maxTurns} reached but keep-alive active — deferring respawn ${this.#keyField}=${key} pid=${sess.pid}`,
+      );
+      return;
+    }
+    if (sess._pendingApprovals?.size) {
+      log(
+        `${this.#logTag} maxTurns=${maxTurns} reached but waiting on an approval — deferring respawn ${this.#keyField}=${key} pid=${sess.pid}`,
       );
       return;
     }
@@ -1382,6 +1408,7 @@ export class BaseSessionManager {
           // window, exactly like a real user turn would.
           this._resetIdleTimer(sess);
         }
+        if (sess._approvalBridge && parsed.raw && typeof parsed.raw === 'object') this.#handleControlLine(sess, parsed.raw);
         this.#advanceTurn(sess, parsed);
         // Buffer stdout into the tail ring so subclasses can surface "what
         // went wrong" on silent exit. Plain-text lines (non-JSON parser
@@ -1418,6 +1445,91 @@ export class BaseSessionManager {
         if (trimmed) this.#pushOutputLine(sess.pid, trimmed);
         this._onStderrLine(sess, line);
       });
+    }
+  }
+
+  /**
+   * 실행 승인(docs/orchestration.md "실행 승인") — CLI 가 stdout 에 쓴 제어 요청 하나를 처리한다.
+   * 권한 요청이면 AWB 로 올려 답을 기다린 뒤 stdin 으로 돌려주고, 취소면 기다림을 거두고, 모르는
+   * 제어 요청이면 곧바로 거절한다(답하지 않으면 CLI 가 영원히 멈춘다).
+   */
+  #handleControlLine(sess: SessionRecord, raw: any): void {
+    const cancelled = sess.adapter.parsePermissionPromptCancel(raw);
+    if (cancelled) {
+      sess._pendingApprovals?.get(cancelled)?.abort();
+      return;
+    }
+    const prompt = sess.adapter.parsePermissionPrompt(raw);
+    if (!prompt) {
+      const reject = sess.adapter.rejectUnsupportedControlRequest(raw);
+      if (reject) this.#writeControl(sess, reject);
+      return;
+    }
+    if (prompt.interactiveOnly) {
+      this.#answerPrompt(sess, prompt, {
+        allow: false,
+        message:
+          `${prompt.toolName} needs a person at the terminal and nobody is there — this CLI runs unattended for AWB. ` +
+          'Decide yourself from the work order, or report what you need in your step report.',
+      });
+      return;
+    }
+    if (!sess._pendingApprovals) sess._pendingApprovals = new Map();
+    if (sess._pendingApprovals.has(prompt.requestId)) return; // 같은 요청의 중복 줄
+    const controller = new AbortController();
+    sess._pendingApprovals.set(prompt.requestId, controller);
+    const bridge = sess._approvalBridge!;
+    log(
+      `${this.#logTag} approval requested ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid} ` +
+        `tool=${prompt.toolName} request=${prompt.requestId.slice(0, 8)}`,
+    );
+    void bridge
+      .request(
+        {
+          requestKey: prompt.requestId,
+          toolName: prompt.toolName,
+          title: prompt.title,
+          description: prompt.description,
+          input: prompt.input,
+          canAllowSession: prompt.suggestions.length > 0,
+        },
+        controller.signal,
+      )
+      .then((outcome) => {
+        if (controller.signal.aborted) return;
+        this.#answerPrompt(sess, prompt, {
+          allow: outcome.decision !== 'deny',
+          rememberForSession: outcome.decision === 'allow_session',
+          message: outcome.message,
+        });
+      })
+      .catch((err: any) => {
+        if (controller.signal.aborted) return;
+        this.#answerPrompt(sess, prompt, { allow: false, message: `Approval failed: ${err?.message ?? err}` });
+      })
+      .finally(() => {
+        if (sess._pendingApprovals?.get(prompt.requestId) === controller) sess._pendingApprovals.delete(prompt.requestId);
+        // 답을 받은 뒤의 침묵부터 idle 을 다시 잰다.
+        sess._lastOutputAtMs = Date.now();
+      });
+  }
+
+  #answerPrompt(sess: SessionRecord, prompt: PermissionPrompt, answer: { allow: boolean; rememberForSession?: boolean; message?: string }): void {
+    const line = sess.adapter.formatPermissionAnswer(prompt, answer);
+    if (!line) return;
+    log(
+      `${this.#logTag} approval answered ${this.#keyField}=${sess[this.#keyField]} pid=${sess.pid} ` +
+        `tool=${prompt.toolName} ${answer.allow ? (answer.rememberForSession ? 'allow_session' : 'allow') : 'deny'}`,
+    );
+    this.#writeControl(sess, line);
+  }
+
+  #writeControl(sess: SessionRecord, line: string): void {
+    try {
+      sess.child.stdin.write(line + '\n');
+      sess.tap?.inLine(line);
+    } catch (err: any) {
+      log(`${this.#logTag} control write failed pid=${sess.pid}: ${err?.message ?? err}`);
     }
   }
 
@@ -1463,6 +1575,9 @@ export class BaseSessionManager {
         clearTimeout(sess.idleTimer);
         sess.idleTimer = null;
       }
+      // 기다리던 권한 요청은 받을 프로세스가 사라졌다 — AWB 에서도 거둔다.
+      for (const pending of sess._pendingApprovals?.values() ?? []) pending.abort();
+      sess._pendingApprovals?.clear();
       this.#endTurn(sess);
       const durationSec = Math.round((Date.now() - sess.startedAt) / 1000);
       const key = sess[this.#keyField];
@@ -1557,6 +1672,17 @@ export class BaseSessionManager {
       // fall through to the ordinary progress gate below (still may survive
       // on real signals; just no longer unconditionally protected).
       sess._keepAliveUntilMs = null;
+    }
+
+    // 실행 승인을 기다리는 CLI 는 일부러 멈춰 있다 — 출력이 없는 것이 정상이고, 죽이면 답이 와도
+    // 받을 프로세스가 없다. 답이 오거나 요청이 취소될 때까지 확인 주기로만 다시 본다.
+    if (sess._pendingApprovals?.size) {
+      log(
+        `${this.#logTag} idle expired but waiting on ${sess._pendingApprovals.size} approval(s) — deferring reap ` +
+          `${this.#keyField}=${key} pid=${sess.pid}`,
+      );
+      this.#rearmIdleTimer(sess, idleWindowMs);
+      return;
     }
 
     const verdict = await checkSessionProgress(
@@ -1819,6 +1945,12 @@ export class BaseSessionManager {
     if (sess._keepAliveUntilMs && Date.now() < sess._keepAliveUntilMs) {
       log(
         `${this.#logTag} unhealthy threshold hit but keep-alive active — deferring kill ${this.#keyField}=${key} pid=${sess.pid} (${reason})`,
+      );
+      return;
+    }
+    if (sess._pendingApprovals?.size) {
+      log(
+        `${this.#logTag} unhealthy threshold hit but waiting on an approval — deferring kill ${this.#keyField}=${key} pid=${sess.pid} (${reason})`,
       );
       return;
     }

@@ -108,6 +108,8 @@ import type {
   OrchestrationMissionProjectInput,
   OrchestrationFolderScope,
   OrchestrationConfirmDecision,
+  OrchestrationApproval,
+  OrchestrationApprovalDecision,
   OrchestrationConfirmPolicy,
   OrchestrationUserChatMode,
   OrchestrationStepStatus, OrchestrationStepSession, OrchestrationStepAttachment, OrchestrationEvidenceItem, AgentSessionHost, AgentSessionSummary, AgentSessionLiveSnapshot, AgentSessionDetail, AgentSessionEventRecord, AgentSessionCliSettings, TerminalHost, TerminalSummary, TerminalSnapshot, MemoryHostInfo, MemoryHostSnapshot, MemoryFileInfo, MemoryVersionInfo, MemoryBatchOp, MemoryBatchResultItem, SkillAssignment, SkillAssignmentTarget, SessionProposal, VoiceConfigView, VoiceOperator, VoiceOptionView, VoiceTranscript, LibraryItem } from './types';
@@ -2543,6 +2545,18 @@ export const api = {
       loop_reentered: string[];
       orchestrator_woken: boolean;
     }>(`/orchestration/steps/${stepId}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
+  /**
+   * 미션 runtime 의 실행 승인 요청에 답한다(docs/orchestration.md "실행 승인"). 오케스트레이터가
+   * 판단 중인 요청에도 답할 수 있다 — 먼저 정한 쪽이 이긴다.
+   */
+  decideOrchestrationApproval: (
+    approvalId: string,
+    data: { account_id: string; decision: OrchestrationApprovalDecision; note?: string },
+  ) =>
+    request<{ approval: OrchestrationApproval; already_decided: boolean }>(
+      `/orchestration/approvals/${approvalId}/decide`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
   /**
    * 종료된 미션을 다시 연다(운영자 입구). orchestrator 는 같은 전이를
    * `reopen_orchestration_mission` MCP 툴로 스스로 부르므로, 대화만으로도 이어서 진행된다.

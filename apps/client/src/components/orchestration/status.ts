@@ -88,6 +88,11 @@ export function eventColor(type: string): string {
   // 이미 처리한 부수 기록이라 정보색이다 — 경고색을 주면 confirm_requested 와 나란히
   // 떠서 "답해야 할 것이 두 개" 로 읽힌다.
   if (type === 'confirm_notified') return toneStyle('live').color;
+  // 실행 승인(docs/orchestration.md "실행 승인") — 요청 · 사용자에게 넘어감은 사람이 답해야 하는 신호,
+  // 답은 진행 재개, 거둬짐은 아무 일도 아니다. 알림 발송은 confirm_notified 와 같은 부수 기록이다.
+  if (type === 'approval_requested' || type === 'approval_escalated') return toneStyle('attention').color;
+  if (type === 'approval_decided') return toneStyle('done').color;
+  if (type === 'approval_notified') return toneStyle('live').color;
   return toneStyle('idle').color;
 }
 

@@ -16,6 +16,8 @@ import { Brackets, DataSource, EntityManager, Repository, In, Not } from 'typeor
 import { OrchestrationMission, MissionExtraMember } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
+import { OrchestrationApproval } from '../../entities/OrchestrationApproval';
+import { projectApproval, type ApprovalView } from './orchestration-approval';
 import { OrchestrationTeam } from '../../entities/OrchestrationTeam';
 import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember';
 import { ChatRoom } from '../../entities/ChatRoom';
@@ -92,6 +94,12 @@ export interface MissionCounts {
    * "아직 시작 안 함"과 "당신의 답을 기다리는 중"은 운영자가 해야 할 행동이 정반대다.
    */
   awaitingUser: number;
+  /**
+   * 사용자에게 온 실행 승인 요청 수(docs/orchestration.md → "실행 승인"). step 상태가 아니라
+   * `orchestration_approvals` 에서 센다 — 승인을 기다리는 멤버의 step 은 그대로 `running` 이다.
+   * 오케스트레이터가 판단 중인 요청은 세지 않는다(사람이 할 일이 아니다).
+   */
+  awaitingApproval: number;
 }
 
 export interface MissionListItem {
@@ -373,6 +381,11 @@ export interface MissionDetail extends MissionListItem {
   user_chat_mode: UserChatMode;
   /** 미션 방(step 이 아닌)에 올라온 이미지·동영상 수. step 별 수는 각 step 에. */
   mission_evidence_count: number;
+  /**
+   * 실행 승인 요청(docs/orchestration.md → "실행 승인") — 미결 전부(오래된 순) + 최근에 끝난 것 몇 개.
+   * 미션 화면의 승인 패널과 타임라인 옆 기록이 읽는다.
+   */
+  approvals: ApprovalView[];
   steps: MissionStepView[];
   events: Array<{
     id: string;
@@ -1081,6 +1094,7 @@ export class OrchestrationMissionService {
     const orchIds = missions.map((m) => m.orchestrator_agent_id).filter((v): v is string => !!v);
     // P4c-4: Host/링크 이름으로 해소한다 (Agent 테이블 없음).
     const displayById = await resolveAgentDisplayNamesByIds(this.dataSource, orchIds);
+    const approvals = await this.pendingUserApprovalCounts(missions.map((m) => m.id));
 
     return missions.map((m) => ({
       id: m.id,
@@ -1095,7 +1109,7 @@ export class OrchestrationMissionService {
       orchestrator_name: readRuntimeRoster(m.runtime_roster)?.orchestrator.name
         || (m.orchestrator_agent_id ? displayById.get(m.orchestrator_agent_id) ?? '' : ''),
       plan_version: m.plan_version,
-      counts: countSteps(steps.filter((s) => s.mission_id === m.id)),
+      counts: countSteps(steps.filter((s) => s.mission_id === m.id), approvals.get(m.id) ?? 0),
       started_at: m.started_at,
       finished_at: m.finished_at,
       created_at: m.created_at,
@@ -1183,7 +1197,7 @@ export class OrchestrationMissionService {
         mission.orchestrator_agent_id, orchSpecRec, String(orchSpecRec?.cli ?? ''),
       ),
       plan_version: mission.plan_version,
-      counts: countSteps(steps),
+      counts: countSteps(steps, (await this.pendingUserApprovalCounts([mission.id])).get(mission.id) ?? 0),
       // 상세 화면은 step 카드마다 `activity` 를 따로 갖지만, 이 요약은 `MissionDetail`
       // 이 `MissionListItem` 을 확장하는 계약을 지키는 값이다 — 목록에서 상세로 들어온
       // 화면이 같은 필드를 읽어도 비어 있지 않아야 한다.
@@ -1303,6 +1317,7 @@ export class OrchestrationMissionService {
         };
       }),
       mission_evidence_count: mission.room_id ? evidenceByRoom.get(mission.room_id) ?? 0 : 0,
+      approvals: await this.listApprovals(mission.id),
       // Oldest-first for rendering; the DESC + take above is only there so the
       // limit keeps the RECENT tail rather than the first N events of a long run.
       events: events.reverse().map((e) => ({
@@ -1724,7 +1739,8 @@ export class OrchestrationMissionService {
         plan_versions_used: mission.plan_version,
         steps_used: steps.length,
       },
-      counts: countSteps(steps),
+      counts: countSteps(steps, (await this.pendingUserApprovalCounts([mission.id])).get(mission.id) ?? 0),
+      pending_approvals: await this.pendingOrchestratorApprovals(mission.id),
       dispatchable_now: progress.dispatchable,
       waiting_on_dependencies: progress.waiting,
       confirm_policy: normalizeConfirmPolicy(mission.confirm_policy),
@@ -2033,6 +2049,72 @@ export class OrchestrationMissionService {
   }
 
   /**
+   * 사용자에게 온 미결 실행 승인 요청 수(미션별). 목록 · 상세 · SSE 헤드라인이 같은 값을 읽는다 —
+   * 사이드바 점과 미션 화면이 "당신의 승인을 기다린다" 를 같은 근거로 말하게.
+   *
+   * 실패하면 빈 맵이다: 숫자 하나 때문에 미션 화면 · 타임라인 갱신을 죽이지 않는다(emitUpdate 와 같은 계약).
+   */
+  async pendingUserApprovalCounts(missionIds: string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (missionIds.length === 0) return out;
+    try {
+      const rows = await this.dataSource
+        .getRepository(OrchestrationApproval)
+        .createQueryBuilder('a')
+        .select('a.mission_id', 'mission_id')
+        .addSelect('COUNT(*)', 'n')
+        .where('a.mission_id IN (:...ids)', { ids: missionIds })
+        .andWhere('a.status = :status', { status: 'pending' })
+        .andWhere('a.route = :route', { route: 'user' })
+        .groupBy('a.mission_id')
+        .getRawMany<{ mission_id: string; n: number | string }>();
+      for (const row of rows) out.set(row.mission_id, Number(row.n) || 0);
+    } catch {
+      /* best-effort headline number */
+    }
+    return out;
+  }
+
+  /** 미결 요청 전부 + 최근에 끝난 20개. 실패하면 빈 목록 — 미션 화면 전체를 죽이지 않는다. */
+  private async listApprovals(missionId: string): Promise<ApprovalView[]> {
+    try {
+      const repo = this.dataSource.getRepository(OrchestrationApproval);
+      const pending = await repo.find({ where: { mission_id: missionId, status: 'pending' }, order: { created_at: 'ASC' } });
+      const recent = await repo.find({
+        where: { mission_id: missionId, status: In(['approved', 'denied', 'cancelled']) },
+        order: { updated_at: 'DESC' },
+        take: 20,
+      });
+      return [...pending, ...recent].map(projectApproval);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 오케스트레이터가 답해야 하는 미결 요청 — 깨우는 메시지를 놓쳐도 미션을 다시 읽으면 보인다. */
+  private async pendingOrchestratorApprovals(missionId: string): Promise<Array<Record<string, any>>> {
+    try {
+      const rows = await this.dataSource.getRepository(OrchestrationApproval).find({
+        where: { mission_id: missionId, status: 'pending' },
+        order: { created_at: 'ASC' },
+        take: 50,
+      });
+      return rows.map((r) => ({
+        approval_id: r.id,
+        step_key: r.step_key,
+        requester: r.requester_name,
+        tool_name: r.tool_name,
+        title: r.title,
+        input: r.input.slice(0, 2000),
+        decided_by: r.route === 'orchestrator' ? 'you (decide_orchestration_approval)' : 'the user',
+        requested_at: r.created_at,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Push an `orchestration_update` SSE frame.
    *
    * UI fuel only (the event-registry filter restricts it to `user` subscribers),
@@ -2047,9 +2129,11 @@ export class OrchestrationMissionService {
     // Counts are read fresh rather than threaded through every caller: the
     // frame is a "something changed, here is the headline" nudge and the client
     // refetches the detail view for anything it renders in depth.
-    this.stepRepo
-      .find({ where: { mission_id: mission.id }, select: ['id', 'mission_id', 'status'] })
-      .then((steps) => {
+    Promise.all([
+      this.stepRepo.find({ where: { mission_id: mission.id }, select: ['id', 'mission_id', 'status'] }),
+      this.pendingUserApprovalCounts([mission.id]),
+    ])
+      .then(([steps, approvals]) => {
         activityEvents.emit('orchestration_update', {
           mission_id: mission.id,
           account_id: mission.account_id,
@@ -2057,7 +2141,7 @@ export class OrchestrationMissionService {
           title: mission.title,
           status: mission.status,
           plan_version: mission.plan_version,
-          counts: countSteps(steps),
+          counts: countSteps(steps, approvals.get(mission.id) ?? 0),
           last_event: lastEvent ?? null,
           timestamp: new Date().toISOString(),
         });
@@ -2088,7 +2172,7 @@ export class OrchestrationMissionService {
       title: mission.title,
       status: mission.status,
       plan_version: mission.plan_version,
-      counts: { total: 0, done: 0, failed: 0, inFlight: 0, pending: 0 },
+      counts: { total: 0, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0, awaitingApproval: 0 },
       last_event: null,
       deleted: true,
       timestamp: new Date().toISOString(),
@@ -2096,8 +2180,10 @@ export class OrchestrationMissionService {
   }
 }
 
-export function countSteps(steps: Array<{ status: string }>): MissionCounts {
-  const counts: MissionCounts = { total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0 };
+export function countSteps(steps: Array<{ status: string }>, awaitingApproval = 0): MissionCounts {
+  const counts: MissionCounts = {
+    total: steps.length, done: 0, failed: 0, inFlight: 0, pending: 0, awaitingUser: 0, awaitingApproval,
+  };
   for (const s of steps) {
     if (s.status === 'done' || s.status === 'skipped') counts.done += 1;
     else if (s.status === 'failed' || s.status === 'blocked' || s.status === 'cancelled') counts.failed += 1;

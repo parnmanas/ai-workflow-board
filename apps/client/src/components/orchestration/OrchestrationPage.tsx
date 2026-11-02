@@ -269,6 +269,12 @@ export function MissionRow({
               {translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser })}
             </span>
           )}
+          {/* 실행 승인 — 요청한 runtime 이 사람의 답을 기다리며 멈춰 있다(docs/orchestration.md "실행 승인"). */}
+          {(mission.counts.awaitingApproval ?? 0) > 0 && (
+            <span style={{ color: tokens.colors.warningLight }}>
+              {translate(' · {0} awaiting your approval', { 0: mission.counts.awaitingApproval })}
+            </span>
+          )}
           {mission.counts.failed > 0 && translate(' · {0} failed', { 0: mission.counts.failed })}
         </span>
       </div>

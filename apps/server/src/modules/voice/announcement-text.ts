@@ -16,6 +16,8 @@ export type AnnouncementKind =
   | 'mission_failed'
   | 'mission_cancelled'
   | 'mission_needs_decision'
+  /** 미션의 runtime 이 도구 사용 승인을 기다린다(docs/orchestration.md "실행 승인"). */
+  | 'mission_needs_approval'
   /** operator 가 작업 보고를 요약한 답(글은 operator 가 썼다 — 템플릿이 아니다). */
   | 'operator_report'
   /** 사용자가 operator 에게 물은 것의 답 — 그 화면을 떠나 있을 때. */
@@ -66,7 +68,7 @@ export interface MissionAnnouncementInput {
   counts?: { total?: number; done?: number; failed?: number } | null;
   /** 완료 요약 또는 실패 사유. */
   summary?: string | null;
-  /** 결정을 기다리는 단계 이름(확인 게이트). */
+  /** 결정을 기다리는 단계 이름(확인 게이트 · 실행 승인). */
   stepTitle?: string | null;
 }
 
@@ -90,6 +92,7 @@ export function missionAnnouncementText(
     }
     if (kind === 'mission_cancelled') return `'${title}' 미션이 취소됐어요.`;
     const step = input.stepTitle?.trim();
+    if (kind === 'mission_needs_approval') return `'${title}' 미션에서 승인을 기다리고 있어요.${step ? ` 단계: ${step}.` : ''}`;
     return `'${title}' 미션에서 결정이 필요해요.${step ? ` 단계: ${step}.` : ''}`;
   }
   if (kind === 'mission_completed') {
@@ -102,5 +105,6 @@ export function missionAnnouncementText(
   }
   if (kind === 'mission_cancelled') return `Mission "${title}" was cancelled.`;
   const step = input.stepTitle?.trim();
+  if (kind === 'mission_needs_approval') return `Mission "${title}" is waiting for your approval.${step ? ` Step: ${step}.` : ''}`;
   return `Mission "${title}" needs your decision.${step ? ` Step: ${step}.` : ''}`;
 }

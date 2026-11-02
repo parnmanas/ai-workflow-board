@@ -5,6 +5,7 @@ import { OrchestrationTeamMember } from '../../entities/OrchestrationTeamMember'
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { OrchestrationEvent } from '../../entities/OrchestrationEvent';
+import { OrchestrationApproval } from '../../entities/OrchestrationApproval';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
 import { ChatRoomMessage } from '../../entities/ChatRoomMessage';
@@ -19,6 +20,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
 import { ActionsModule } from '../actions/actions.module';
 import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { AgentAuthGuard } from '../../common/guards/agent-auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { OrchestrationController } from './orchestration.controller';
 import { OrchestrationTeamService } from './orchestration-team.service';
@@ -27,6 +29,8 @@ import { OrchestrationMissionService } from './orchestration-mission.service';
 import { OrchestrationConfirmNotifyService } from './orchestration-confirm-notify.service';
 import { OrchestrationRunnerService } from './orchestration-runner.service';
 import { OrchestrationReaperService } from './orchestration-reaper.service';
+import { OrchestrationApprovalService } from './orchestration-approval.service';
+import { OrchestrationApprovalAgentController } from './orchestration-approval-agent.controller';
 
 /**
  * Orchestration mode — a Team led by one orchestrator plans a Mission at runtime
@@ -49,6 +53,8 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
       OrchestrationMission,
       OrchestrationStep,
       OrchestrationEvent,
+      // 실행 승인(docs/orchestration.md → "실행 승인") — 승인 대기 행.
+      OrchestrationApproval,
       ChatRoom,
       ChatRoomParticipant,
       ChatRoomMessage,
@@ -75,7 +81,7 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
     ActionsModule,
     SharedServicesModule,
   ],
-  controllers: [OrchestrationController],
+  controllers: [OrchestrationController, OrchestrationApprovalAgentController],
   providers: [
     OrchestrationTeamService,
     // Runtime Host catalogue for the team editor (read-only; slots no longer
@@ -87,9 +93,12 @@ import { OrchestrationReaperService } from './orchestration-reaper.service';
     OrchestrationConfirmNotifyService,
     OrchestrationRunnerService,
     OrchestrationReaperService,
+    // 실행 승인 — Runtime Host 가 올린 CLI 권한 요청을 오케스트레이터/사용자에게 묻고 답을 돌려준다.
+    OrchestrationApprovalService,
     AuthGuard,
     PermissionGuard,
+    AgentAuthGuard,
   ],
-  exports: [OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService],
+  exports: [OrchestrationTeamService, OrchestrationMissionService, OrchestrationRunnerService, OrchestrationApprovalService],
 })
 export class OrchestrationModule {}

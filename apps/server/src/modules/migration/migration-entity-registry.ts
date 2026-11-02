@@ -120,6 +120,7 @@ export const MIGRATION_ENTITY_ORDER: string[] = [
   'ChatRoomParticipant', // FK: ChatRoom
   'AutomationSchedule',
   'OrchestrationTeamMember', 'OrchestrationMission', 'OrchestrationStep', 'OrchestrationEvent',
+  'OrchestrationApproval', // 평문 varchar 참조(mission/step/room) — 실FK 없음
 
   // Ticket 및 그 자식들
   'Ticket', // self-FK parent_id → 별도 backfill 패스

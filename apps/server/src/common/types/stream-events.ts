@@ -467,6 +467,12 @@ export interface ChatRoomMessagePayload {
   // the wire (absent for ordinary chat turns) so the legacy shape is byte-for-byte
   // unchanged for non-Action rooms.
   is_action_room?: boolean;
+  // 실행 승인(docs/orchestration.md "실행 승인"): `'orchestration'` 이면 이 방의 CLI 가
+  // `approve` 등급에서 띄우는 권한 요청을 매니저가 `POST /api/agent/orchestration/approvals`
+  // 로 올려 답을 기다릴 수 있다(멤버 → 신뢰된 오케스트레이터 또는 사용자). 미션 방·step 방에만
+  // 실린다. 없으면 예전처럼 승인 경로가 없는 방이다 — approve 등급 CLI 는 띄우지 않는다.
+  // server·agent-manager 공동 contract.
+  approval_route?: 'orchestration';
   // F-1 (ticket 24694916): structured message metadata. Carries `ticket_refs`
   // captured by the agent-manager from mcp__awb__* tool results, driving the
   // reliable ticket-action card render on the client. Conditional-omit on the
@@ -898,7 +904,17 @@ export interface OrchestrationUpdatePayload {
   title: string;
   status: string;
   plan_version: number;
-  counts: { total: number; done: number; failed: number; inFlight: number; pending: number };
+  counts: {
+    total: number;
+    done: number;
+    failed: number;
+    inFlight: number;
+    pending: number;
+    /** confirm 게이트에서 사람의 판정을 기다리는 step 수. */
+    awaitingUser: number;
+    /** 사용자에게 온 실행 승인 요청 수(docs/orchestration.md "실행 승인"). */
+    awaitingApproval: number;
+  };
   last_event: { type: string; message: string; step_key: string } | null;
   /**
    * 이 미션이 방금 삭제됐다는 표시(티켓 03ca8b5b). 삭제는 REST

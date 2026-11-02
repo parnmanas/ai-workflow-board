@@ -234,6 +234,11 @@ export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // 스코프 하한선만 본다 — full 스코프 키라도 남의 미션은 되살릴 수 없다.
   reopen_orchestration_mission: 'caller',
   list_orchestration_graph_templates: 'caller',
+  // decide_orchestration_approval(docs/orchestration.md → "실행 승인"): 진짜 인가는
+  // OrchestrationApprovalService.decideAsOrchestrator() 다 — 호출자가 그 미션의
+  // orchestrator 이고 그 slot 이 trusted 이며 요청이 아직 오케스트레이터 차례일 때만
+  // 통과한다. full 스코프 키라도 남의 미션 승인에는 답하지 못한다.
+  decide_orchestration_approval: 'caller',
 
   // ticket 6ff827cb: new tool, not in KNOWN_EXISTING_TOOLS. 'caller' mirrors
   // what the handler already enforces on its own: it resolves the caller's

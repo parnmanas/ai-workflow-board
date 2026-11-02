@@ -10,6 +10,7 @@ import { type ToolContext, type ToolProfile } from './tools';
 import { OrchestrationRunnerService } from '../orchestration/orchestration-runner.service';
 import { OrchestrationMissionService } from '../orchestration/orchestration-mission.service';
 import { OrchestrationTeamService } from '../orchestration/orchestration-team.service';
+import { OrchestrationApprovalService } from '../orchestration/orchestration-approval.service';
 import { AgentManagerCommandService } from '../agent-manager/agent-manager-command.service';
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
@@ -203,6 +204,8 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // Marketing(docs/marketing.md) — marketing-tools.ts 의 캠페인 에이전트 표면.
     private readonly marketingAgentService: MarketingAgentService,
     private readonly marketingCycleService: MarketingCycleService,
+    // 실행 승인(docs/orchestration.md) — 신뢰된 오케스트레이터가 멤버의 도구 사용 요청에 답한다.
+    private readonly orchestrationApprovalService: OrchestrationApprovalService,
   ) {}
 
   onModuleInit() {
@@ -301,6 +304,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       orchestrationRunnerService: this.orchestrationRunnerService,
       orchestrationMissionService: this.orchestrationMissionService,
       orchestrationTeamService: this.orchestrationTeamService,
+      orchestrationApprovalService: this.orchestrationApprovalService,
       agentManagerCommandService: this.agentManagerCommandService,
       ontologyLifecycleService: this.ontologyLifecycleService,
       ontologyQueryService: this.ontologyQueryService,

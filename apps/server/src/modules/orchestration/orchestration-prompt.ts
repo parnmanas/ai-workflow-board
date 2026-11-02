@@ -26,6 +26,7 @@ import type { OrchestrationMission } from '../../entities/OrchestrationMission';
 import type { OrchestrationStep } from '../../entities/OrchestrationStep';
 import { normalizeConfirmPolicy } from './orchestration.constants';
 import { renderKnowledgeSection, type KnowledgeBlock } from '../../common/ticket-work-order';
+import { orchestratorMayApprove } from './orchestration-approval';
 
 export interface RosterEntry {
   /** The slot's roster address — what the orchestrator puts in a step's `assignee`. */
@@ -239,6 +240,23 @@ export function renderMissionPrompt(args: {
   }
 
   lines.push(section('Your team', renderRoster(roster, args.folderScope)));
+
+  // 실행 승인(docs/orchestration.md "실행 승인") — 신뢰된 오케스트레이터만 멤버의 요청을 받는다.
+  if (orchestratorMayApprove(mission)) {
+    lines.push(
+      section(
+        'Tool approvals from members',
+        'Members whose slot runs at `approve` trust must ask before using a gated tool (shell commands, file ' +
+          'edits, …). Because your own slot is trusted, those requests come to you as "Approval request" messages ' +
+          'in this room, and the member is blocked until you answer. Answer each one promptly with ' +
+          '`mcp__awb__decide_orchestration_approval` — `allow`, `allow_session`, `deny` (with a reason the member ' +
+          'reads), or `escalate` to let the user decide. Allow what the step\'s work order plainly needs; escalate ' +
+          'anything irreversible, destructive, outside this mission, or touching secrets/production. Unanswered ' +
+          'requests move to the user after a while. `get_orchestration_mission` lists open ones under ' +
+          '`pending_approvals`.',
+      ),
+    );
+  }
 
   lines.push('## How this works');
   lines.push(

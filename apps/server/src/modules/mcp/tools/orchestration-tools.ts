@@ -9,6 +9,7 @@
  *     patch_orchestration_graph      — 실행 중인 미션의 그래프를 부분 수정 (ticket 2fc8f99a)
  *     update_orchestration_step      — retry / reassign / amend / skip a step
  *     add_orchestration_note         — leave a reasoning note on the timeline
+ *     decide_orchestration_approval  — answer a member's tool approval request (trusted orchestrators only)
  *     complete_orchestration_mission — the ONLY clean way a mission ends
  *     reopen_orchestration_mission    — bring a finished mission back (operator asked for more in the room)
  *
@@ -601,6 +602,44 @@ export function registerOrchestrationTools(server: McpServer, ctx: ToolContext):
         });
       } catch (e: any) {
         return toolError(e, 'failed to update completion criteria');
+      }
+    },
+  );
+
+  server.tool(
+    'decide_orchestration_approval',
+    'Answer a member\'s tool approval request in a mission you orchestrate (docs/orchestration.md → "실행 승인"). ' +
+      'A member whose slot runs at `approve` trust is BLOCKED until someone answers; you receive each request as an ' +
+      '"Approval request" message in the mission conversation (get_orchestration_mission also lists them under ' +
+      'pending_approvals). Only the mission\'s orchestrator may call this, and only while its own slot is `trusted` — ' +
+      'an orchestrator without trusted permissions never receives requests; the user answers them in the AWB mission ' +
+      'screen. decision: "allow" (this once), "allow_session" (also stop asking for the same kind of action in that ' +
+      'member\'s session), "deny" (the member reads `reason`), or "escalate" (hand it to the user). Escalate anything ' +
+      'irreversible, destructive, outside the mission scope, touching secrets/credentials or production, or that you ' +
+      'are unsure about. A request you leave unanswered goes to the user on its own after a while, and the user may ' +
+      'answer before you — then your call is refused with 409.',
+    {
+      approval_id: z.string().describe('From the "Approval request" message or get_orchestration_mission.pending_approvals'),
+      decision: z.enum(['allow', 'allow_session', 'deny', 'escalate']),
+      reason: z
+        .string()
+        .optional()
+        .describe('Why. Required in spirit for deny/escalate — the member (deny) or the user (escalate) reads it.'),
+    },
+    async ({ approval_id, decision, reason }, extra) => {
+      const svc = ctx.orchestrationApprovalService;
+      if (!svc) return err(NO_RUNTIME);
+      try {
+        const result = await svc.decideAsOrchestrator(approval_id, callerRef(extra), decision, reason);
+        return ok({
+          approval_id: result.approval.id,
+          status: result.approval.status,
+          route: result.approval.route,
+          decision: result.approval.decision,
+          already_decided: result.already_decided,
+        });
+      } catch (e: any) {
+        return toolError(e, 'failed to decide the approval request');
       }
     },
   );

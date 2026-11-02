@@ -54,6 +54,7 @@ import { cliDispatch, isAcpRuntime } from './clis/index.js';
 import { effortKeysForSlice, effortSliceKeys } from './clis/effort.js';
 import type { AgentRuntimeConfig } from './runtime/runtime-types.js';
 import type {
+  RuntimeDispatchRequest,
   RuntimeDispatchResult,
   RuntimeSupervisor,
 } from './runtime/runtime-supervisor.js';
@@ -84,6 +85,7 @@ import { mentionTriggerId } from './trigger-id.js';
 import { SHARED_WORKTREE_COLD_IMPORT_TTL_MINUTES, DEFAULT_CLI_ID } from './constants.js';
 import { parseClonePolicy, type CloneWirePolicy } from './repo-credential.js';
 import { createHash } from 'node:crypto';
+import { acpApprovalRelay, createOrchestrationApprovalBridge, type ApprovalBridge } from './orchestration-approval-bridge.js';
 import {
   SkillMaterializer,
   type RuntimeSkillSnapshot,
@@ -826,6 +828,9 @@ export interface ChatDispatchArgs {
    *  a declined dispatch never calls it, so the dispatcher releases on that path
    *  itself. Idempotent on the caller side (kill paths may double-fire). */
   onExit?: () => void;
+  /** 실행 승인(docs/orchestration.md "실행 승인") — 서버가 이 방에 `approval_route` 를 실었을 때만.
+   *  세션이 `approve` 등급이면 CLI 의 권한 요청을 이 브리지로 AWB 에 올린다. */
+  approvalBridge?: ApprovalBridge | null;
 }
 
 export interface ChatDispatchResult {
@@ -2052,6 +2057,16 @@ export class EventDispatcher {
     return { ...refreshed, model: context.model, runtime_config: context.runtime_config };
   }
 
+  /**
+   * 실행 승인(docs/orchestration.md "실행 승인") — 서버가 `approval_route: 'orchestration'` 을 실은
+   * 방(미션 방·step 방)에서만 승인 브리지를 만든다. 그 밖의 방에서는 null 이라 `approve` 등급 CLI 는
+   * 예전처럼 승인 경로가 없다는 이유로 띄우지 않는다.
+   */
+  #approvalBridgeFor(p: any, agentId: string, ctx?: AgentExecutionContext | null): ApprovalBridge | null {
+    if (p?.approval_route !== 'orchestration' || !p?.room_id || !agentId) return null;
+    return createOrchestrationApprovalBridge(this.#config, { roomId: p.room_id, agentId, apiKey: ctx?.api_key || null });
+  }
+
   async #dispatchHermes(args: {
     agentContext: AgentExecutionContext;
     runId: string;
@@ -2064,6 +2079,8 @@ export class EventDispatcher {
     // `message_delta` text so delivery can be confirmed by what Hermes
     // actually said, not by `stopReason` alone.
     onEvent?: (event: RuntimeEvent) => void;
+    /** 실행 승인 — `approve` 등급 Hermes 의 ACP 권한 요청을 AWB 로 올린다(미션 방만). */
+    requestApproval?: RuntimeDispatchRequest['requestApproval'];
   }): Promise<RuntimeDispatchResult> {
     if (!this.#runtimeSupervisor) {
       const err: any = new Error('Hermes runtime supervisor is not available on this Runtime Host');
@@ -2101,6 +2118,7 @@ export class EventDispatcher {
       ].filter(Boolean).join('\n\n'),
       task: args.task,
       onEvent: args.onEvent,
+      requestApproval: args.requestApproval,
     });
   }
 
@@ -5452,6 +5470,7 @@ export class EventDispatcher {
         const runId = runProvision?.run_id
           || `chat:${p.room_id || 'room'}:${runContext.agent_id}`;
         let replyText = '';
+        const hermesApprovals = this.#approvalBridgeFor(p, runContext.agent_id, runContext);
         const result = await this.#dispatchHermes({
           agentContext: runContext,
           runId,
@@ -5461,6 +5480,7 @@ export class EventDispatcher {
           onEvent: (event) => {
             if (event.type === 'message_delta') replyText += event.text;
           },
+          requestApproval: hermesApprovals ? acpApprovalRelay(hermesApprovals) : undefined,
         });
         this.#chatSessionManager?.recordRoomMessage(p);
         if (p.room_id) await this.#setChatRoomTyping(p.room_id, false, '', roomResponderId).catch(() => {});
@@ -5498,6 +5518,8 @@ export class EventDispatcher {
         const result = await this.#chatSessionManager.dispatch({
           roomId: p.room_id,
           agentId: responderAgentId,
+          // 실행 승인(docs/orchestration.md "실행 승인") — 서버가 미션 방에만 싣는다.
+          approvalBridge: this.#approvalBridgeFor(p, responderAgentId, runContext),
           senderId: p.sender_id || '',
           senderName: p.sender_name || '',
           messageId: p.message_id || p.id || '',

@@ -304,7 +304,7 @@ const VALUE_FLAGS = new Set([
   '--model', '--effort', '--format', '--session', '--agent', '--title',
   '--output-format', '--input-format',
   '--mcp-config', '--allowedTools', '--disallowedTools', '--append-system-prompt',
-  '--permission-mode', '--sandbox',
+  '--permission-mode', '--sandbox', '--permission-prompt-tool',
   '--resume', '--session-id',
 ]);
 
@@ -332,6 +332,8 @@ const LOGGABLE_FLAG_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['--input-format', new Set(['stream-json', 'json', 'text'])],
   ['--format', new Set(['default', 'json'])],
   ['--effort', new Set(['low', 'medium', 'high', 'max'])],
+  // 실행 승인(docs/orchestration.md "실행 승인") — 매니저가 붙이는 값은 `stdio` 하나뿐이다.
+  ['--permission-prompt-tool', new Set(['stdio'])],
 ]);
 
 /** codex 의 `-c` 는 임의 config 오버라이드를 싣는 다목적 플래그라(같은 플래그로
@@ -492,6 +494,41 @@ export interface SessionSpec {
   /** effective permission policy — OneshotSpec.permission 참고. 세션 생성
    *  시점에만 적용된다(권한 플래그는 spawn 에서 고정). */
   permission?: EffectivePermissionPolicy | null;
+  /**
+   * 실행 중 권한 요청을 어디로 올리는가(docs/orchestration.md "실행 승인"). `'stdio'` 면 CLI 가
+   * 묻는 대신 자기 stdout 으로 요청을 내보내고 stdin 으로 답을 받는다 — 매니저가 그 요청을 AWB 에
+   * 올려 답을 기다린다. {@link CliAdapter.supportsStdioPermissionPrompt} 가 true 인 어댑터만 받고,
+   * `approve` 등급에서만 의미가 있다. 세션 생성 시점에만 적용된다.
+   */
+  permissionPrompt?: 'stdio' | null;
+}
+
+/** A permission prompt the CLI raised over its stdio (see {@link SessionSpec.permissionPrompt}). */
+export interface PermissionPrompt {
+  /** The CLI's id for this request — echoed back in the answer. */
+  requestId: string;
+  toolName: string;
+  title: string;
+  description: string;
+  /** The tool input the CLI wants to run. Echoed back unchanged on allow. */
+  input: unknown;
+  /** Rules the CLI offered for remembering the answer ("allow for the session"). */
+  suggestions: unknown[];
+  /**
+   * A tool that only makes sense with a person at the terminal (e.g. asking the user a question).
+   * Nobody sits at an AWB-run CLI, so the manager refuses these on the spot instead of asking.
+   */
+  interactiveOnly: boolean;
+  raw: any;
+}
+
+/** How a permission prompt was answered. */
+export interface PermissionAnswer {
+  allow: boolean;
+  /** Also let the CLI remember the rule it suggested, for the rest of its session. */
+  rememberForSession?: boolean;
+  /** Shown to the model on a denial. */
+  message?: string;
 }
 
 export interface SpawnDescriptor {
@@ -773,6 +810,39 @@ export abstract class CliAdapter {
    */
   permissionCapabilities(): PermissionCapabilities {
     return BYPASS_ONLY_PERMISSION_CAPABILITIES;
+  }
+
+  /**
+   * 세션 모드에서 실행 중 권한 요청을 자기 stdio 로 주고받을 수 있는가(docs/orchestration.md
+   * "실행 승인"). true 면 매니저가 승인 경로가 있는 방(미션)에서 `approve` 등급 세션을 띄우고,
+   * 요청을 AWB 로 중계한다. 베이스 기본값 false — 그런 프로토콜이 없는 CLI 는 예전처럼
+   * approve 등급을 띄우지 않는다(조용히 "묻지 않고 거부" 로 바꾸지 않는다).
+   */
+  supportsStdioPermissionPrompt(): boolean {
+    return false;
+  }
+
+  /** stdout 한 줄(`ParseResult.raw`)이 권한 요청이면 그 내용. 아니면 null. */
+  parsePermissionPrompt(_raw: any): PermissionPrompt | null {
+    return null;
+  }
+
+  /** stdout 한 줄이 이미 보낸 권한 요청의 취소면 그 요청 id. 아니면 null. */
+  parsePermissionPromptCancel(_raw: any): string | null {
+    return null;
+  }
+
+  /**
+   * stdout 한 줄이 이 매니저가 답할 수 없는 제어 요청이면, 그 요청을 거절하는 stdin 한 줄.
+   * 답하지 않으면 CLI 가 영원히 기다린다. 아니면 null.
+   */
+  rejectUnsupportedControlRequest(_raw: any): string | null {
+    return null;
+  }
+
+  /** 권한 요청의 답을 stdin 한 줄로. 지원하지 않는 어댑터는 null. */
+  formatPermissionAnswer(_prompt: PermissionPrompt, _answer: PermissionAnswer): string | null {
+    return null;
   }
 
   /**
