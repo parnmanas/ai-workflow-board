@@ -1961,6 +1961,7 @@
   "Pick a voice…": "Pick a voice…",
   "Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.": "Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.",
   "Pick an execution strategy and a permission tier.": "Pick an execution strategy and a permission tier.",
+  "Approve is not available for {0} in a mission — it cannot ask for permission through AWB. Pick Trusted or Strict.": "Approve is not available for {0} in a mission — it cannot ask for permission through AWB. Pick Trusted or Strict.",
   "Pick at least one project — members work in its folder on their own host.": "Pick at least one project — members work in its folder on their own host.",
   "Pick working directory on manager host": "Pick working directory on manager host",
   "Pin latest": "Pin latest",

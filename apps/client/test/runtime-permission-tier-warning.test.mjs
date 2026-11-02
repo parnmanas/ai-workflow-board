@@ -32,15 +32,17 @@ function selectionFor(runtime, permissionMode) {
   };
 }
 
-function render({ runtime, permissionMode, permissionTiers }) {
+function render({ runtime, permissionMode, permissionTiers, approveAvailable }) {
   const dom = setupDom();
   const view = mount(React.createElement(RuntimeConfigFields, {
     value: selectionFor(runtime, permissionMode),
     onChange() {},
     permissionTiers,
+    approveAvailable,
   }));
   return {
     warning: () => view.container.querySelector('[data-testid="approve-unsupported-warning"]'),
+    approveOption: () => [...view.container.querySelectorAll('option')].find((o) => o.value === 'approve') ?? null,
     text: () => view.container.textContent || '',
     cleanup() { view.unmount(); dom.cleanup(); },
   };
@@ -111,4 +113,35 @@ test('Host 가 permission_tiers 를 보고하지 않으면 경고를 지어내�
       h.cleanup();
     }
   }
+});
+
+// 미션 slot 은 카탈로그 `mission_approvals` 로 approve 를 거른다. OpenCode 를 approve 로 저장하면
+// 매니저가 step 을 조용히 버려 lease 만료까지 멈췄다(2026-11-02 ralf).
+test('approve 를 실행할 수 없는 자리에서는 고를 수 없고, 저장된 approve 는 경고와 함께 보인다', async () => {
+  const fresh = render({ runtime: 'opencode', permissionMode: 'trusted', approveAvailable: false });
+  try {
+    await act(async () => {});
+    assert.equal(fresh.approveOption(), null, 'approve 는 선택지에 없어야 한다');
+    assert.equal(fresh.warning(), null);
+  } finally {
+    fresh.cleanup();
+  }
+  const stored = render({ runtime: 'opencode', permissionMode: 'approve', approveAvailable: false });
+  try {
+    await act(async () => {});
+    assert.equal(stored.approveOption()?.disabled, true, '이미 저장된 값은 보이되 다시 고를 수 없다');
+    assert.ok(stored.warning(), 'Host 보고가 없어도 경고한다');
+  } finally {
+    stored.cleanup();
+  }
+});
+
+test('팀 slot: approve 를 실행할 수 없는 CLI 는 저장을 막는다', async () => {
+  const { slotDraftProblem, emptySlotDraft } = await import('../src/components/orchestration/TeamSlotRuntimeFields.tsx');
+  const draft = (runtime, permissionMode) => ({
+    ...emptySlotDraft(), manager_agent_id: 'host-1', runtime: selectionFor(runtime, permissionMode),
+  });
+  assert.match(slotDraftProblem(draft('opencode', 'approve')) || '', /OpenCode/);
+  assert.equal(slotDraftProblem(draft('opencode', 'trusted')), null);
+  assert.equal(slotDraftProblem(draft('hermes', 'approve')), null);
 });

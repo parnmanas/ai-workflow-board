@@ -58,6 +58,8 @@ export interface CliDescriptor {
   model_selectable: boolean;
   runtime_config: { profiles: boolean; child_limits: boolean };
   updatable: boolean;
+  /** Can run at the `approve` tier in a mission — only CLIs that relay permission requests to AWB. */
+  mission_approvals: boolean;
 }
 
 /** The CLI a form starts on when nothing else picked one. */
@@ -95,6 +97,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'deepseek',
@@ -114,6 +117,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'codex',
@@ -142,6 +146,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'antigravity',
@@ -162,6 +167,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'pi',
@@ -176,6 +182,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'opencode',
@@ -207,6 +214,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'hermes',
@@ -221,6 +229,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: false,
     runtime_config: { profiles: true, child_limits: true },
     updatable: true,
+    mission_approvals: true,
   },
   {
     id: 'custom',
@@ -235,6 +244,7 @@ export const STATIC_CLI_CATALOG: CliDescriptor[] = [
     model_selectable: true,
     runtime_config: { ...NO_RUNTIME_CONFIG },
     updatable: false,
+    mission_approvals: false,
   },
 ];
 
@@ -351,6 +361,11 @@ export function cliRuntimeConfig(id: string | null | undefined): CliDescriptor['
 
 export function cliCollaboration(id: string | null | undefined): CliCollaboration[] {
   return cliDescriptor(id)?.collaboration ?? ['single'];
+}
+
+/** Whether a mission slot may use the `approve` tier. Unknown CLIs cannot — the manager refuses it. */
+export function cliMissionApprovals(id: string | null | undefined): boolean {
+  return cliDescriptor(id)?.mission_approvals ?? false;
 }
 
 /** Unknown CLIs are assumed updatable (only the catalog can say otherwise). */

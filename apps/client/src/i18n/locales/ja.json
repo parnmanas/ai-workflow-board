@@ -1961,6 +1961,7 @@
   "Pick a voice…": "声を選んで...",
   "Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.": "ドライブを開けたら 上にあるパンの塊を使って穴を掘り込む",
   "Pick an execution strategy and a permission tier.": "実行戦略と許可レベルを選択してください.",
+  "Approve is not available for {0} in a mission — it cannot ask for permission through AWB. Pick Trusted or Strict.": "ミッションでは {0} に Approve を使えません — AWB 経由で権限を確認できません。Trusted または Strict を選んでください。",
   "Pick at least one project — members work in its folder on their own host.": "プロジェクトを1つ以上選択してください。メンバーは各ホスト上の対応フォルダーで作業します。",
   "Pick working directory on manager host": "管理者ホストで作業ディレクトリを選択",
   "Pin latest": "最新版に固定",

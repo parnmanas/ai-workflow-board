@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { ADAPTER_CAPABILITIES } from '../dist/lib/cli-adapters/base.js';
 import { BUILTIN_CLI_MODULES } from '../dist/lib/clis/index.js';
 
 const serverCatalogPath = new URL('../../server/src/common/cli-catalog.ts', import.meta.url);
@@ -79,5 +80,13 @@ test('매니저 CLI 모듈과 서버 CLI 카탈로그가 같은 사실을 선언
     // 7. collaboration (capabilities 에서 파생)
     const collab = ['single', ...(m.capabilities.collaboration ?? [])];
     assert.deepEqual([...d.collaboration], collab, `${m.id} collaboration`);
+    // 8. 미션 approve — 매니저가 그 등급을 띄우는 조건(approve 게이트): 런타임이 직접 승인을
+    //    묻거나(native_approvals), 영속 세션이 stdio 로 권한 요청을 주고받는다(그 길을 가진 어댑터만
+    //    `supportsStdioPermissionPrompt()` 를 둔다). 서버가 이 값으로 팀 slot 을 거르므로, 어긋나면
+    //    저장은 되는데 매니저가 조용히 거부하거나(true 쪽) 쓸 수 있는 등급을 막는다(false 쪽).
+    const adapter = m.createCliAdapter?.();
+    const relaysApprovals = m.capabilities.native_approvals
+      || (!!adapter && adapter.has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION) && adapter.supportsStdioPermissionPrompt?.() === true);
+    assert.equal(d.mission_approvals, relaysApprovals, `${m.id} mission_approvals`);
   }
 });

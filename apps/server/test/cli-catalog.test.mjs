@@ -35,7 +35,7 @@ const {
   buildProviderFields,
   buildRevealableFields,
 } = await import('../dist/common/credential-providers.js');
-const { TEAM_SLOT_CLIS, mergeTeamAgentSpec } = await import('../dist/common/orchestration-member-spec.js');
+const { TEAM_SLOT_CLIS, mergeTeamAgentSpec, mergeTeamSlotSpec, normalizeTeamSlotSpec, parseTeamSlotSpec, missionApprovalProblem } = await import('../dist/common/orchestration-member-spec.js');
 const { SESSION_CLI_CREDENTIAL_PREFIX, BACKEND_PROFILE_CLIS } = await import(
   '../dist/modules/agent-sessions/agent-sessions.service.js'
 );
@@ -282,6 +282,31 @@ test('mergeTeamAgentSpec resets strategy/knobs per the catalog on a CLI change',
   assert.deepEqual(toHermes.runtime_config, { strategy: 'single', permission_mode: 'strict' });
 });
 
+// 미션의 approve 는 카탈로그 `mission_approvals` 를 따른다. OpenCode slot 이 approve 로 저장돼 매니저가
+// step 을 조용히 버리고 lease 만료까지 멈췄다(2026-11-02 ralf).
+test('team slot input rejects approve where the CLI cannot relay approvals; stored rows still read', () => {
+  const slot = (cli, permission_mode) => ({
+    manager_agent_id: 'mgr', cli, runtime_config: { strategy: 'single', permission_mode },
+  });
+  for (const d of CLI_CATALOG.filter((c) => TEAM_SLOT_CLIS.includes(c.id))) {
+    if (d.mission_approvals) {
+      assert.equal(missionApprovalProblem(slot(d.id, 'approve')), null, d.id);
+      assert.equal(normalizeTeamSlotSpec(slot(d.id, 'approve'), 'slot').runtime_config.permission_mode, 'approve');
+    } else {
+      assert.match(missionApprovalProblem(slot(d.id, 'approve')) ?? '', /"approve" is not available/, d.id);
+      assert.throws(() => normalizeTeamSlotSpec(slot(d.id, 'approve'), 'slot'), /choose "trusted"|Choose "trusted"/, d.id);
+    }
+    for (const tier of ['trusted', 'strict']) assert.equal(missionApprovalProblem(slot(d.id, tier)), null, `${d.id} ${tier}`);
+  }
+  assert.ok(CLI_CATALOG.some((d) => d.id === 'opencode' && !d.mission_approvals));
+
+  // 읽기는 막지 않는다 — 고치려면 먼저 읽혀야 한다. 고칠 때(merge)는 같은 규칙을 지난다.
+  const stored = parseTeamSlotSpec(slot('opencode', 'approve'));
+  assert.equal(stored?.runtime_config.permission_mode, 'approve');
+  assert.throws(() => mergeTeamSlotSpec(stored, { model: 'opencode-go/glm-5.3' }, 'slot'), /"approve" is not available/);
+  assert.equal(mergeTeamSlotSpec(stored, { runtime_config: { strategy: 'single', permission_mode: 'trusted' } }, 'slot').runtime_config.permission_mode, 'trusted');
+});
+
 // ─── 3. fixture descriptor 하나로 모든 표가 따라온다 ─────────────────────
 
 const FIXTURE = {
@@ -325,6 +350,7 @@ const FIXTURE = {
   model_selectable: true,
   runtime_config: { profiles: false, child_limits: true },
   updatable: true,
+  mission_approvals: false,
 };
 
 test('appending one descriptor to a catalog copy propagates to every derived table', () => {

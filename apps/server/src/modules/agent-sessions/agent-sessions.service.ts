@@ -23,6 +23,7 @@ import {
   ACP_SESSION_CLIS,
   AGENT_SESSION_COMMANDS_MAX,
   AGENT_SESSION_CONFIG_OPTIONS_MAX,
+  AGENT_SESSION_CONFIG_OPTION_VALUES_MAX,
   AGENT_SESSION_EVENT_BATCH_MAX,
   AGENT_SESSION_EVENT_PAYLOAD_MAX_CHARS,
   AGENT_SESSION_EVENT_TYPES,
@@ -268,7 +269,7 @@ function normalizeConfigOptions(input: unknown): AgentSessionConfigOption[] {
     const configId = str(r.config_id, CONFIG_ID_MAX);
     if (!configId) continue;
     const options = Array.isArray(r.options)
-      ? r.options.slice(0, 200).map((o: any) => ({
+      ? r.options.slice(0, AGENT_SESSION_CONFIG_OPTION_VALUES_MAX).map((o: any) => ({
         value: str(o?.value, 256),
         name: str(o?.name, 200) || str(o?.value, 256),
         ...(typeof o?.description === 'string' ? { description: o.description.slice(0, 1000) } : {}),

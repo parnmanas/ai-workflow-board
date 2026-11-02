@@ -8,7 +8,7 @@ import { runtimeIdentityKey } from '../dist/common/runtime-spec.js';
 // where the mission's one project lives in /work/app.
 const PROJECT_FOLDER = '/work/app';
 const slot = (model = null) => ({ manager_agent_id: 'host-1', cli: 'claude', credential_id: 'credential-1', model,
-  runtime_config: { strategy: 'single', permission_mode: 'approve' } });
+  runtime_config: { strategy: 'single', permission_mode: 'trusted' } });
 const exec = (spec, dir, scope = 'shared') => ({ ...spec, working_dir: dir, folder_scope: scope, cli_runtime_profile: null });
 
 function fixture(provision) {

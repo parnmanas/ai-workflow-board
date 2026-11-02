@@ -120,6 +120,9 @@ interface RuntimeConfigFieldsProps {
    *  `[]` = Host는 리포트했지만 named profile이 없음 — 역시 자유 입력 폴백.
    *  선택된 Runtime Host가 바뀔 때마다 다시 파생시켜 목록을 최신으로 유지할 것. */
   namedProfiles?: string[];
+  /** false = 이 자리에서 `approve` 를 실행할 수 없다(미션 slot 의 카탈로그 `mission_approvals`).
+   *  고를 수 없게 하고, 이미 저장된 approve 는 경고와 함께 보여 준다. 기본 true. */
+  approveAvailable?: boolean;
 }
 
 export default function RuntimeConfigFields({
@@ -130,6 +133,7 @@ export default function RuntimeConfigFields({
   showRuntime = true,
   namedProfiles,
   permissionTiers,
+  approveAvailable = true,
 }: RuntimeConfigFieldsProps) {
   useLocale();
   const catalog = useCliCatalog();
@@ -139,8 +143,8 @@ export default function RuntimeConfigFields({
   const approveUnsupported =
     value.permissionMode === 'approve'
     && !!value.runtime
-    && !!permissionTiers?.[value.runtime]
-    && permissionTiers[value.runtime]!.approve !== 'native';
+    && (!approveAvailable
+      || (!!permissionTiers?.[value.runtime] && permissionTiers[value.runtime]!.approve !== 'native'));
   const available = availableRuntimeIds
     ? new Set(availableRuntimeIds)
     : null;
@@ -190,7 +194,10 @@ export default function RuntimeConfigFields({
         options={[
           { value: '', label: value.runtime ? translate('Select a permission mode') : translate('Select a runtime first') },
           { value: 'strict', label: translate('Strict — deny unapproved actions') },
-          { value: 'approve', label: translate('Approve — ask through AWB') },
+          ...(approveAvailable ? [{ value: 'approve', label: translate('Approve — ask through AWB') }]
+            : value.permissionMode === 'approve'
+              ? [{ value: 'approve', label: translate('{0} (unavailable)', { 0: translate('Approve — ask through AWB') }), disabled: true }]
+              : []),
           { value: 'trusted', label: translate('Trusted — pre-authorized scope') },
         ]}
         onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {

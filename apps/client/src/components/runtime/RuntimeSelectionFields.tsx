@@ -31,7 +31,7 @@ export function applyAgentTemplate(template: AgentTemplate): RuntimeSelectionVal
 }
 
 /** Shared by templates, sessions, board/chat declarations and team slots. */
-export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, idPrefix, modelConfigId }: {
+export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, idPrefix, modelConfigId, approveAvailable }: {
   value: RuntimeSelectionValue;
   onChange(value: RuntimeSelectionValue, source?: 'template' | 'host' | 'cli'): void;
   hosts: RuntimeSelectionHost[];
@@ -40,6 +40,8 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
   session?: boolean;
   idPrefix?: string;
   modelConfigId?: string;
+  /** Whether the `approve` tier can run for a CLI in this place (team slots: catalog `mission_approvals`). */
+  approveAvailable?: (cli: string) => boolean;
 }) {
   useLocale();
   const catalog = useCliCatalog();
@@ -116,6 +118,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
         runtime_config: emptyRuntimeSelection().runtime_config, model: null, effort: null }, 'cli')} />
       {!session && <RuntimeConfigFields showRuntime={false}
         value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)} disabled={disabled || !value.host_id}
+        approveAvailable={approveAvailable && value.cli ? approveAvailable(value.cli) : true}
         onChange={(selection) => {
           // Keep template-specific extra settings while editing the modeled controls.
           const { strategy, permission_mode, profile, max_children, max_iterations, ...extra } = value.runtime_config;

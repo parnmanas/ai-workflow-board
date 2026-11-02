@@ -173,7 +173,26 @@ function requireObject(input: unknown, label: string, expected: string): Record<
  * honoured a folder after this change.
  */
 export function normalizeTeamSlotSpec(input: unknown, label: string): TeamSlotSpec {
-  return normalizeSlotCore(requireObject(input, label, 'manager_agent_id, cli'), label);
+  const spec = normalizeSlotCore(requireObject(input, label, 'manager_agent_id, cli'), label);
+  const approval = missionApprovalProblem(spec);
+  if (approval) fail(label, approval);
+  return spec;
+}
+
+/**
+ * `approve` 는 실행 중 권한 요청을 AWB 로 올릴 수 있는 CLI(카탈로그 `mission_approvals`)에서만
+ * 성립한다. 다른 CLI 는 매니저가 그 등급의 실행을 거부하고 작업 지시를 버린다 — 예전엔 저장이
+ * 통과해 step 이 lease 만료(1시간 넘게)까지 아무 소식 없이 멈췄다(2026-11-02 ralf opencode).
+ * 입력 검증 · 미션 시작 · 디스패치가 이 문장으로 막는다. 저장된 행을 읽는 경로(`parse*`)에서는
+ * 부르지 않는다 — 읽혀야 고칠 수 있다.
+ */
+export function missionApprovalProblem(spec: Pick<TeamSlotSpec, 'cli' | 'runtime_config'>): string | null {
+  if (spec.runtime_config?.permission_mode !== 'approve') return null;
+  const cli = cliDescriptor(spec.cli);
+  if (cli?.mission_approvals) return null;
+  return `permission tier "approve" is not available for ${cli?.label ?? spec.cli} — it cannot raise its ` +
+    `tool-permission requests to AWB, so the Runtime Host refuses to run it. Choose "trusted" (runs without ` +
+    `asking) or "strict" (refuses anything that needs permission) for this slot.`;
 }
 
 /**
@@ -186,7 +205,7 @@ export function parseTeamSlotSpec(value: unknown): TeamSlotSpec | null {
   const candidate = decodeStored(value);
   if (!candidate) return null;
   try {
-    return normalizeTeamSlotSpec(candidate, 'spec');
+    return normalizeSlotCore(requireObject(candidate, 'spec', 'manager_agent_id, cli'), 'spec');
   } catch {
     return null;
   }

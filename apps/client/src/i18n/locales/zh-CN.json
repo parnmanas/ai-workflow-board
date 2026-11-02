@@ -1961,6 +1961,7 @@
   "Pick a voice…": "选择一个声音...",
   "Pick a volume to browse. Use the breadcrumbs above to drill in once a drive is open.": "选取一个音量,浏览. 使用上面的面包碎片在驱动器开放后钻进.",
   "Pick an execution strategy and a permission tier.": "选择执行策略和许可级别.",
+  "Approve is not available for {0} in a mission — it cannot ask for permission through AWB. Pick Trusted or Strict.": "任务中 {0} 无法使用 Approve — 它无法通过 AWB 请求权限。请选择 Trusted 或 Strict。",
   "Pick at least one project — members work in its folder on their own host.": "请至少选择一个项目，成员将在各自主机的对应文件夹中工作。",
   "Pick working directory on manager host": "在主管主机上选择工作目录",
   "Pin latest": "固定到最新版本",

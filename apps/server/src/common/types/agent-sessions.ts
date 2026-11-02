@@ -168,6 +168,13 @@ export interface AgentSessionAuth {
 }
 
 export const AGENT_SESSION_CONFIG_OPTIONS_MAX = 32;
+/**
+ * 설정 하나(예: model)의 선택지 상한 — 크기 방어선이지 목록을 다듬는 곳이 아니다.
+ * OpenCode 는 로그인한 provider 마다 모델을 전부 싣는다. 200 으로 자르던 동안 provider 넷인
+ * 호스트(212개)에서 맨 뒤 provider(opencode-go)의 모델이 조용히 사라졌다(2026-11-02 ralf,
+ * `opencode-go/muse-spark-1.3-contributor`).
+ */
+export const AGENT_SESSION_CONFIG_OPTION_VALUES_MAX = 1000;
 export const AGENT_SESSION_COMMANDS_MAX = 200;
 
 /** 장비의 CLI 홈에서 읽은 세션 한 줄. */

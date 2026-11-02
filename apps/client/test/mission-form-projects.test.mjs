@@ -542,6 +542,9 @@ test('임시 멤버도 커버리지를 보여 주고 시작을 막는다 — "Se
   assert.ok(hostSelect, '임시 멤버 폼에 Runtime Host 선택이 있다');
   change(hostSelect, RAGNAR);
   await flush();
+  // A host change resets the tier; where approve cannot run in a mission it is left for the operator to pick.
+  change(field(container, 'Permission mode *', 'select'), 'trusted');
+  await flush();
   click(buttonIn(container, 'Add to this mission'));
   await flush();
 

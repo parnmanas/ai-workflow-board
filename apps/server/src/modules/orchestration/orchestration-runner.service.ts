@@ -120,6 +120,7 @@ import {
   TeamAgentSpec,
   TeamSlotSpec,
   normalizeMemberFolderScope,
+  missionApprovalProblem,
   parseTeamAgentSpec,
   parseTeamSlotSpec,
 } from '../../common/orchestration-member-spec';
@@ -2625,6 +2626,10 @@ export class OrchestrationRunnerService {
         `step "${step.step_key}" has no runtime to run on (no slot in a project folder) — reassign it`,
       );
     }
+    // 이 검사가 생기기 전에 시작한 미션은 그런 실행 스냅샷을 들고 있다. 보내면 매니저가 버리고 step 은
+    // lease 가 끝날 때까지 소식 없이 멈춘다 — 지금 사유와 함께 실패시켜 오케스트레이터가 다른 slot 에 맡기게 한다.
+    const approval = missionApprovalProblem(execSpec);
+    if (approval) throw orchestrationError(409, approval);
     const stepHostId = execSpec.manager_agent_id;
     const stepHostName = (await this.hostNames([stepHostId])).get(stepHostId) ?? '';
     const agentLabel = slot?.name ?? slotDisplayName(stepHostName, legacyRow?.role_label ?? '', execSpec.cli);
@@ -3614,6 +3619,11 @@ export class OrchestrationRunnerService {
         `team "${team.name}" has no members available for this mission — every member is excluded ` +
           `and no ad-hoc member was added. Include at least one member or add an ad-hoc member.`,
       );
+    }
+    // 저장 검증이 생기기 전에 저장된 slot 도 여기서 걸린다 — 시작해도 그 slot 의 일은 매니저가 버린다.
+    for (const slot of [orchestrator, ...members]) {
+      const problem = missionApprovalProblem(slot.spec);
+      if (problem) throw orchestrationError(409, `team "${team.name}" slot ${slot.name}: ${problem}`);
     }
     const resolved = resolveMissionRoster({
       orchestrator,

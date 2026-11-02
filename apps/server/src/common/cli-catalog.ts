@@ -106,6 +106,13 @@ export interface CliDescriptor {
   };
   /** 매니저가 `update_cli` 로 갱신할 수 있는가(custom 은 아니다). */
   updatable: boolean;
+  /**
+   * 미션 방에서 `approve` 등급으로 실행할 수 있는가 — 매니저가 실행 중 권한 요청을 AWB 로
+   * 올릴 수 있는 CLI 만 true 다. 나머지는 매니저가 approve 실행을 거부하고 작업 지시를 버리므로
+   * 팀 slot 에 그 조합을 저장하지 못하게 한다(`missionApprovalProblem`). 매니저 사실과의 일치는
+   * agent-manager 의 cli-catalog-contract 테스트가 강제한다.
+   */
+  mission_approvals: boolean;
 }
 
 const NO_SESSIONS = { acp: false, backend_profile: false } as const;
@@ -171,6 +178,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     // DeepSeek 는 Claude Code 바이너리로 DeepSeek 의 Anthropic 호환 endpoint 에
@@ -201,6 +209,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'codex',
@@ -243,6 +252,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     id: 'antigravity',
@@ -277,6 +287,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     // pi 는 credential 개념이 아예 없다(다른 어댑터는 최소한 선택적 per-agent credential 을 받는다).
@@ -292,6 +303,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     // opencode 는 provider 단위로 로그인한다(openai / github-copilot / anthropic …).
@@ -345,6 +357,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: true,
+    mission_approvals: false,
   },
   {
     // hermes 는 ACP 네이티브 런타임 — delegated/swarm 협업과 profile /
@@ -361,6 +374,7 @@ const CATALOG = [
     model_selectable: false,
     runtime_config: { profiles: true, child_limits: true },
     updatable: true,
+    mission_approvals: true,
   },
   {
     // custom 은 유효한 정체성이지만 매니저가 자동 spawn 을 거부한다(운영자가 launch script 를 준다).
@@ -376,6 +390,7 @@ const CATALOG = [
     model_selectable: true,
     runtime_config: NO_RUNTIME_KNOBS,
     updatable: false,
+    mission_approvals: false,
   },
 ] as const satisfies readonly CliDescriptor[];
 

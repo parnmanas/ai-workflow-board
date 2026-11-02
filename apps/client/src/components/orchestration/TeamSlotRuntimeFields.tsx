@@ -11,6 +11,7 @@ import type {
   OrchestrationSlotSpecInput,
 } from '../../types';
 import RuntimeConnectionFields from '../runtime/RuntimeConnectionFields';
+import { cliLabel, cliMissionApprovals } from '../../cli/catalog';
 import {
   EMPTY_RUNTIME_SELECTION,
   buildRuntimeConfig,
@@ -82,6 +83,10 @@ export function slotDraftProblem(draft: SlotDraft): string | null {
   if (!draft.runtime.strategy || !draft.runtime.permissionMode) {
     return translate('Pick an execution strategy and a permission tier.');
   }
+  if (draft.runtime.permissionMode === 'approve' && !cliMissionApprovals(draft.runtime.runtime)) {
+    return translate('Approve is not available for {0} in a mission — it cannot ask for permission through AWB. Pick Trusted or Strict.',
+      { 0: cliLabel(draft.runtime.runtime) });
+  }
   return null;
 }
 
@@ -119,11 +124,20 @@ export default function TeamSlotRuntimeFields({
     <>
       <RuntimeSelectionFields
         value={{ host_id: value.manager_agent_id, cli, model: value.model || null, effort: value.effort || null,
-          runtime_config: { ...(buildRuntimeConfig(value.runtime) || { strategy: 'single', permission_mode: 'approve' }), extra: value.extra } }}
+          runtime_config: { ...(buildRuntimeConfig(value.runtime) || {
+            strategy: value.runtime.strategy || 'single',
+            // An unpicked tier stays unpicked where approve cannot run; elsewhere the shared default shows.
+            permission_mode: value.runtime.permissionMode || (cli && !cliMissionApprovals(cli) ? '' : 'approve'),
+          }), extra: value.extra } }}
         hosts={hosts.map((h) => ({ id: h.manager_agent_id, name: h.manager_name, clis: h.clis }))}
         disabled={disabled}
-        onChange={(next) => {
-          patch({ manager_agent_id: next.host_id, runtime: runtimeSelectionFromAgent(next.cli, next.runtime_config as any),
+        approveAvailable={cliMissionApprovals}
+        onChange={(next, source) => {
+          const runtime = runtimeSelectionFromAgent(next.cli, next.runtime_config as any);
+          // Picking a host, CLI or template resets the tier to the shared default (approve). Where that
+          // tier cannot run, leave it unpicked so the operator chooses Trusted or Strict on purpose.
+          if (source && runtime.permissionMode === 'approve' && !cliMissionApprovals(next.cli)) runtime.permissionMode = '';
+          patch({ manager_agent_id: next.host_id, runtime,
             model: next.model || '', effort: next.effort || '', extra: next.runtime_config.extra,
             ...(next.host_id !== value.manager_agent_id ? { credential_id: '' } : {}),
             ...(next.cli !== cli ? { credential_id: '', cli_runtime_profile: '' } : {}),

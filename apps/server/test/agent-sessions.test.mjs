@@ -985,6 +985,62 @@ test('세션 CLI 설정: ACP 보고가 있으면 하트비트 모델을 덧붙�
   ], 'the exact ACP report is used; inventory-only models are excluded');
 });
 
+// OpenCode 는 로그인한 provider 마다 모델을 전부 싣는다. 선택지를 200 개로 자르던 동안 provider 넷인
+// ralf(212개)에서 맨 뒤 provider 의 모델이 세션 · 새 세션 · 팀 슬롯 목록에서 함께 사라졌다.
+test('세션 설정: provider 가 많은 OpenCode 의 긴 모델 목록을 자르지 않는다', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService } = modules;
+  const ds = app.get(getDataSourceToken());
+  const base = `http://localhost:${port}`;
+
+  const ws = await createAccount(app, getDataSourceToken, 'opencode-long-models');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner', role: 'admin' });
+  const token = app.get(AuthService).createSession(owner.id);
+  const headers = { Authorization: `Bearer ${token}`, 'X-Account-Id': ws.id, 'Content-Type': 'application/json' };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder', type: 'opencode' });
+  const managerId = agent.manager_agent_id;
+  const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
+  await ds.getRepository('RuntimeHost').update({ id: managerId }, { name: 'ralf' });
+  assert.ok((await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-long-models', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ralf',
+      plugin_version: 'test', cli: 'opencode', cli_adapters: ['opencode'], acp_session_clis: ['opencode'],
+      pid: 1, started_at: new Date().toISOString(),
+    }),
+  })).status < 300);
+
+  const providers = [['cloudflare-ai-gateway', 74], ['opencode', 80], ['github-copilot', 28], ['opencode-go', 30]];
+  const models = providers.flatMap(([provider, count]) =>
+    Array.from({ length: count }, (_, i) => ({ value: `${provider}/model-${i}`, name: `${provider}/Model ${i}` })));
+  const wanted = 'opencode-go/model-29';
+  assert.equal(models.at(-1).value, wanted);
+
+  const sid = 'ses_long_models';
+  const prompt = await call(`${base}/api/agent-sessions/hosts/${managerId}/opencode/sessions/${sid}/prompt`, {
+    method: 'POST', headers, body: JSON.stringify({ text: 'hi' }),
+  });
+  assert.equal(prompt.status, 202, prompt.text);
+  const relayed = await call(`${base}/api/agent/sessions/${managerId}/opencode/${sid}/events`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({ manager_id: managerId, events: [], state: { status: 'ready', reason: 'opened', config_options: [
+      { config_id: 'model', name: 'Model', category: 'model', type: 'select', current_value: wanted, options: models },
+    ] } }),
+  });
+  assert.equal(relayed.status, 200, relayed.text);
+  const live = relayed.body.live.config_options.find((o) => o.config_id === 'model');
+  assert.equal(live.options.length, models.length, 'the session picker keeps every reported model');
+  assert.equal(live.options.at(-1).value, wanted);
+
+  // 새 세션 모달 · 팀 슬롯이 읽는 쪽(HostModelsService)에도 같은 목록이 간다.
+  const settings = await call(`${base}/api/agent-sessions/hosts/${managerId}/opencode/settings`, { headers });
+  assert.equal(settings.status, 200, settings.text);
+  const known = settings.body.known_config_options.find((o) => o.category === 'model');
+  assert.equal(known.options.length, models.length);
+  assert.ok(known.options.some((o) => o.value === wanted));
+});
+
 // ─── 서버 재시작: 세션을 읽는 것이 driver 를 되찾는다 ────────────────────────────────
 //
 // driver 는 메모리에만 있다. 서버가 재시작하면(배포 push 한 번이면 일어난다) 사라지고, 매니저가
