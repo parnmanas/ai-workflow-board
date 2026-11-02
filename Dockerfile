@@ -12,6 +12,7 @@ WORKDIR /app
 
 # Copy root package files
 COPY package.json package-lock.json* turbo.json ./
+COPY tools/minimatch-compat/ tools/minimatch-compat/
 
 # Copy workspace package.json files
 COPY apps/server/package.json apps/server/
@@ -54,6 +55,8 @@ COPY --from=deps /app/node_modules ./node_modules
 # 아래 `COPY . .` 로는 오지 않는다).
 COPY --from=deps /app/apps/client/node_modules ./apps/client/node_modules
 COPY --from=deps /app/package-lock.json ./
+# The webpack compatibility adapter has its own patched minimatch dependency.
+COPY --from=deps /app/tools/minimatch-compat ./tools/minimatch-compat
 
 # Copy all source files
 COPY . .
@@ -83,6 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git wget ca-cer
 
 # Copy root package files for workspace resolution
 COPY package.json package-lock.json* turbo.json ./
+COPY tools/minimatch-compat/ tools/minimatch-compat/
 COPY apps/server/package.json apps/server/
 
 # Copy server build output

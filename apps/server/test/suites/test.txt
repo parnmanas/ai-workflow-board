@@ -110,6 +110,7 @@ test/git-credential-resolution.test.mjs
 test/git-repo-cache-listtree-blobless-degrade.test.mjs
 test/github-connector-credential-completeness.test.mjs
 test/github-sync-credential.test.mjs
+test/glob-dependency-compat.test.mjs
 test/hard-budget-config.test.mjs
 test/host-models-single-source.test.mjs
 test/host-models.test.mjs

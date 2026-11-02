@@ -44,7 +44,12 @@
       "picomatch": "^4.0.4"
     },
     "body-parser": "^2.4.0",
-    "fast-uri": "^3.1.9"
+    "fast-uri": "^3.1.9",
+    "glob": "^14.0.3",
+    "minimatch": "^11.0.4",
+    "fork-ts-checker-webpack-plugin": {
+      "minimatch": "file:../../tools/minimatch-compat"
+    }
   },
   "scarfSettings": {
     "enabled": false
