@@ -149,11 +149,30 @@ test('dockerfileInstallLines 는 전역 설치를 제외하고 주석 줄을 세
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LOCK = JSON.parse(fs.readFileSync(LOCKFILE, 'utf8'));
-// account 링크(`apps/*`)는 registry 에서 오지 않으므로 resolved/integrity 가
-// 없는 게 정상이다. 그 외 전부가 검사 대상.
+// Workspace 소스와 명시적으로 검증한 로컬 어댑터는 registry tarball이 아니다.
+// 어댑터의 node_modules 아래 외부 의존성은 그대로 검사한다.
+const LOCAL_ADAPTER = 'tools/minimatch-compat';
 const REGISTRY_ENTRIES = Object.entries(LOCK.packages ?? {}).filter(
-  ([name, meta]) => name !== '' && !meta.link && !name.startsWith('apps/'),
+  ([name, meta]) => name !== '' && !meta.link && !name.startsWith('apps/') && name !== LOCAL_ADAPTER,
 );
+
+test('local minimatch adapter is private repository source with only the patched registry dependency', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, LOCAL_ADAPTER, 'package.json'), 'utf8'));
+  assert.deepEqual(manifest, {
+    name: '@awb/minimatch-compat',
+    version: '1.0.0',
+    private: true,
+    main: 'index.cjs',
+    dependencies: { minimatch: '^11.0.4' },
+  });
+  assert.deepEqual(LOCK.packages[LOCAL_ADAPTER], {
+    name: manifest.name,
+    version: manifest.version,
+    dev: true,
+    dependencies: manifest.dependencies,
+  });
+  assert.ok(REGISTRY_ENTRIES.some(([name]) => name === `${LOCAL_ADAPTER}/node_modules/minimatch`));
+});
 
 test('guard actually has lockfile entries to scan', () => {
   assert.ok(

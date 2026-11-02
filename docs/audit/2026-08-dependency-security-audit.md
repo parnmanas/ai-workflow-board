@@ -254,14 +254,23 @@ RUN npm install --omit=dev --workspace=server
 
 1. 스캔 대상이 실제로 존재하는지 자체 검증 (가드가 죽은 채 초록불 방지)
 2. `Dockerfile` 에 의존성 설치용 `npm install` 0건 + `npm ci` 최소 2회
-3. lockfile 전 엔트리가 `https://registry.npmjs.org/` 에서 resolve
-4. lockfile 전 엔트리가 `integrity` 해시 보유
+3. lockfile 외부 패키지 엔트리가 `https://registry.npmjs.org/` 에서 resolve
+4. lockfile 외부 패키지 엔트리가 `integrity` 해시 보유
 5. install script 보유 패키지가 허용 목록(`esbuild`/`fsevents`/`@scarf/scarf`) 밖으로 안 늘어남
 6. 루트 `package.json` 의 scarf opt-out 유지
 
 단언 6개 각각에 위반을 임시로 심어 **실제로 실패하는 것까지 확인**했다
 (Dockerfile 되돌리기 / scarfSettings 제거 / `resolved` 를 `git+ssh://` 로 변경 /
 `integrity` 제거 / `hasInstallScript` 추가 / lockfile 엔트리 절단).
+
+2026-11-02 보완: `tools/minimatch-compat`는 취약 minimatch를 패치 버전으로
+교체하면서 webpack consumer의 함수형 API를 유지하는 저장소 소스다.
+워크스페이스 소스와 마찬가지로 외부 tarball이 아니므로 registry URL과
+tarball 해시가 없다. 이 정확한 경로만 외부 패키지 검사에서 제외하고,
+private manifest 및 lockfile 메타데이터(패치 minimatch 의존성 하나, 설치
+스크립트 없음)를 별도로 고정한다. `tools/` 전체를 제외하지 않으며 그 아래
+외부 minimatch는 기존 URL·integrity·install-script 검사를 모두 받는다.
+어댑터 자체의 무결성 경계는 앱 소스와 같은 Git 커밋과 코드 리뷰다.
 
 #### 미조치 — 운영자 승인이 필요한 항목 (배포 브랜치)
 
