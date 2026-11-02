@@ -26,8 +26,10 @@ import { OrchestrationApproval } from '../dist/entities/OrchestrationApproval.js
 import { OrchestrationMissionService, countSteps } from '../dist/modules/orchestration/orchestration-mission.service.js';
 import { OrchestrationApprovalService } from '../dist/modules/orchestration/orchestration-approval.service.js';
 import {
+  approvalHostProblem,
   approvalRouteFor,
   approvalWireView,
+  MANAGER_CAPABILITY_MISSION_APPROVALS,
   orchestratorTrust,
   renderApprovalWakePrompt,
   summarizeApprovalInput,
@@ -217,6 +219,23 @@ describe('routing rules (pure)', () => {
     for (const needle of ['appr-1', 'decide_orchestration_approval', '`allow`', '`allow_session`', '`deny`', '`escalate`', 'npm test']) {
       assert.ok(text.includes(needle), `wake prompt is missing ${needle}`);
     }
+  });
+
+  it('an approve slot needs a host whose running manager relays approvals', () => {
+    const approve = { runtime_config: { permission_mode: 'approve' } };
+    const old = [{ plugin_version: '1.6.329', manager_capabilities: ['context_window_clamp', 'cli_memory'] }];
+    const fresh = [{ plugin_version: '1.6.333', manager_capabilities: ['cli_memory', MANAGER_CAPABILITY_MISSION_APPROVALS] }];
+    // 옛 매니저는 approve 실행을 거부하고 작업 지시를 버린다 — 보내기 전에 사유와 함께 막는다.
+    const problem = approvalHostProblem(approve, 'ralf', old);
+    assert.match(problem ?? '', /ralf runs agent-manager 1\.6\.329/);
+    assert.match(problem ?? '', /update the agent-manager/);
+    assert.equal(approvalHostProblem(approve, 'ralf', fresh), null);
+    // 두 프로세스 중 하나라도 옛 빌드면 어느 쪽이 받을지 모른다.
+    assert.ok(approvalHostProblem(approve, 'ralf', [...fresh, ...old]));
+    // 연결된 매니저가 없으면 근거가 없다 — 막지 않는다(디스패치는 매니저가 붙을 때 다시 돈다).
+    assert.equal(approvalHostProblem(approve, 'ralf', []), null);
+    assert.equal(approvalHostProblem({ runtime_config: { permission_mode: 'trusted' } }, 'ralf', old), null);
+    assert.equal(MANAGER_CAPABILITY_MISSION_APPROVALS, 'mission_approvals', 'must match the agent-manager flag');
   });
 
   it('only a trusted orchestrator is briefed that members will ask it', () => {

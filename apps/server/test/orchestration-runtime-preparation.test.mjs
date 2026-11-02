@@ -11,7 +11,7 @@ const slot = (model = null) => ({ manager_agent_id: 'host-1', cli: 'claude', cre
   runtime_config: { strategy: 'single', permission_mode: 'trusted' } });
 const exec = (spec, dir, scope = 'shared') => ({ ...spec, working_dir: dir, folder_scope: scope, cli_runtime_profile: null });
 
-function fixture(provision) {
+function fixture(provision, registry) {
   const team = { id: 'team', name: 'Team', enabled: 1, account_id: 'account', orchestrator_agent_id: null,
     orchestrator_spec: slot() };
   // The orchestrator the mission room already has — kept across a reopen.
@@ -44,6 +44,7 @@ function fixture(provision) {
     { requireMission: async () => mission, listSteps: async () => [], recordEvent: async () => {} },
     teams, {}, { warn() {}, info() {} }, undefined, undefined, projects,
     { provisionSlotIdentity: provision },
+    registry,
   );
   runner.postToRoom = async () => { events.push('dispatch'); };
   return { runner, mission, team, members, events };
@@ -164,4 +165,28 @@ test('a mission with no project cannot start', async () => {
   mission.room_id = null;
   mission.projects = null;
   await assert.rejects(runner.startMission(mission.id, mission.account_id, human), /names no project/);
+});
+
+// 실행 승인(docs/orchestration.md "실행 승인") — approve slot 은 그 호스트에서 지금 도는 매니저가 승인을
+// 중계할 줄 알아야 한다. 옛 매니저는 approve 실행을 거부하고 작업 지시를 버려 step 이 lease 만료까지 멈춘다.
+test('an approve slot on a host whose running manager cannot relay approvals is refused before anything starts', async () => {
+  const calls = [];
+  const instances = [{ plugin_version: '1.6.329', manager_capabilities: ['context_window_clamp', 'cli_memory'] }];
+  const registry = { listForAgent: (id) => (id === 'host-1' ? instances : []) };
+  const { runner, mission, members, events } = fixture(async (runtime) => { calls.push(runtime); return { ok: true }; }, registry);
+  members[0].spec = { ...members[0].spec, runtime_config: { strategy: 'single', permission_mode: 'approve' } };
+  mission.status = 'draft';
+  mission.room_id = null;
+  await assert.rejects(
+    runner.startMission(mission.id, mission.account_id, human),
+    (e) => e.status === 409 && /runs agent-manager 1\.6\.329/.test(e.message) && /update the agent-manager/.test(e.message),
+  );
+  assert.equal(calls.length, 0, 'nothing is prepared on the hosts');
+  assert.ok(!events.includes('dispatch'));
+  assert.equal(mission.status, 'draft');
+
+  // 매니저를 올리면(플래그를 광고하면) 같은 미션이 시작된다.
+  instances[0] = { plugin_version: '1.6.333', manager_capabilities: ['cli_memory', 'mission_approvals'] };
+  await runner.startMission(mission.id, mission.account_id, human);
+  assert.equal(mission.status, 'planning');
 });

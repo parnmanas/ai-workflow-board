@@ -14,7 +14,33 @@
  */
 
 import { parseTeamAgentSpec } from '../../common/orchestration-member-spec';
+import { evaluateManagerCapability, type ManagerCapabilitySnapshot } from '../../common/manager-capability-gate';
 import { readRuntimeRoster } from './orchestration-roster';
+
+/**
+ * 매니저 빌드가 미션의 승인 요청을 중계한다는 하트비트 플래그. agent-manager
+ * `MANAGER_CAPABILITY_MISSION_APPROVALS`(runtime-profiles.ts)와 같은 문자열이어야 한다.
+ */
+export const MANAGER_CAPABILITY_MISSION_APPROVALS = 'mission_approvals';
+
+/**
+ * `approve` slot 을 이 호스트에서 돌릴 수 있는가. CLI 가 되는지는 카탈로그(`missionApprovalProblem`)가,
+ * 그 호스트에서 **지금 도는 매니저**가 중계할 줄 아는지는 이 함수가 본다 — 옛 매니저(1.6.331 이하)는
+ * 미션 방에서도 approve 실행을 거부하고 작업 지시를 버려 step 이 lease 만료까지 멈춘다. 연결된
+ * 매니저가 없으면(오프라인) 판단할 근거가 없으므로 막지 않는다(`evaluateManagerCapability` 규칙).
+ */
+export function approvalHostProblem(
+  spec: { runtime_config?: { permission_mode?: string | null } | null },
+  hostLabel: string,
+  instances: ManagerCapabilitySnapshot[],
+): string | null {
+  if (spec.runtime_config?.permission_mode !== 'approve') return null;
+  if (evaluateManagerCapability(instances, MANAGER_CAPABILITY_MISSION_APPROVALS).ok) return null;
+  const versions = [...new Set(instances.map((i) => i.plugin_version || 'unknown'))].join(', ');
+  return `permission tier "approve" needs the Runtime Host to relay tool-permission requests to AWB, but ` +
+    `${hostLabel || 'its host'} runs agent-manager ${versions}, which cannot — update the agent-manager on that ` +
+    `host (Runtime Hosts → Update), or choose "trusted" or "strict" for this slot.`;
+}
 
 export const APPROVAL_STATUSES = ['pending', 'approved', 'denied', 'cancelled'] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];

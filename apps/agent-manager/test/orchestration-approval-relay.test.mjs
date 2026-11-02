@@ -17,6 +17,7 @@ import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
 import { ClaudeCliAdapter } from '../dist/lib/cli-adapters/claude.js';
 import { resolveEffectivePermissionPolicy } from '../dist/lib/permission-policy.js';
 import { acpApprovalRelay, createOrchestrationApprovalBridge } from '../dist/lib/orchestration-approval-bridge.js';
+import { MANAGER_CAPABILITIES } from '../dist/lib/runtime-profiles.js';
 
 const fixtureRoot = join(process.cwd(), '.test-approval-relay');
 const config = {
@@ -54,6 +55,11 @@ function agentContext(cwd, permission_mode) {
     runtime_config: { strategy: 'single', permission_mode },
   };
 }
+
+test('this build tells the server it relays mission approvals', () => {
+  // 서버는 이 플래그가 없는 호스트에 approve slot 을 보내지 않는다(옛 매니저는 그 실행을 버린다).
+  assert.ok(MANAGER_CAPABILITIES.includes('mission_approvals'));
+});
 
 // ── Claude stdio protocol (adapter) ──────────────────────────────────────────
 

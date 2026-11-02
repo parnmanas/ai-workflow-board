@@ -412,10 +412,16 @@ export const MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE = 'acp_adapter_update';
  *  메모리 화면에 열 수 있는 호스트로 내고, 나머지는 "매니저 업데이트 필요" 로 보여 준다. 값은 서버
  *  `MANAGER_CAPABILITY_CLI_MEMORY`(common/types/cli-memory.ts)와 같아야 한다. */
 export const MANAGER_CAPABILITY_CLI_MEMORY = 'cli_memory';
+/** 이 빌드는 미션 방의 `approve` 세션 권한 요청을 AWB 로 올린다(docs/orchestration.md "실행 승인",
+ *  orchestration-approval-bridge.ts). 서버는 이 플래그가 없는 호스트에 approve slot 을 보내지 않는다 —
+ *  옛 매니저는 그 실행을 거부해 step 이 lease 만료까지 소식 없이 멈춘다. 값은 서버
+ *  `MANAGER_CAPABILITY_MISSION_APPROVALS`(modules/orchestration/orchestration-approval.ts)와 같아야 한다. */
+export const MANAGER_CAPABILITY_MISSION_APPROVALS = 'mission_approvals';
 export const MANAGER_CAPABILITIES: readonly string[] = [
   MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP,
   MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE,
   MANAGER_CAPABILITY_CLI_MEMORY,
+  MANAGER_CAPABILITY_MISSION_APPROVALS,
 ];
 
 /** 티켓 ee26302d(faa32380 감사 후속) — 이 문턱 미만 context_window 를 가진

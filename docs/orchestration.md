@@ -1064,6 +1064,12 @@ deepseek · hermes). codex·opencode·pi·antigravity 는 실행 중 권한 요�
 `trusted` 또는 `strict` 로 정할 것. 카탈로그 값과 매니저 사실(`native_approvals` 또는 stdio 권한 요청을 지원하는
 persistent 세션)의 일치는 agent-manager 의 `cli-catalog-contract` 테스트가 강제한다.
 
+**옛 매니저** — CLI 가 되더라도 그 호스트에서 **지금 도는** 매니저가 이 중계를 모르는 빌드(1.6.331 이하)면
+같은 식으로 멈춘다. 매니저는 하트비트 `manager_capabilities` 에 `mission_approvals` 를 싣고, 미션 시작·다시
+열기와 step 디스패치가 approve slot 의 호스트에 그 플래그가 없으면 "그 호스트의 agent-manager 를
+업데이트하라" 는 사유로 막는다(`approvalHostProblem`). 연결된 매니저가 없으면(오프라인) 판단 근거가 없으므로
+막지 않는다.
+
 기록은 `orchestration_approvals`(엔티티 `OrchestrationApproval`)와 타임라인 이벤트
 `approval_requested` / `approval_escalated` / `approval_notified` / `approval_decided` / `approval_cancelled`
 다. 구현: `orchestration-approval.ts`(규칙) · `orchestration-approval.service.ts` ·

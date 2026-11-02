@@ -125,6 +125,8 @@ import {
   parseTeamSlotSpec,
 } from '../../common/orchestration-member-spec';
 import { callerHoldsId } from '../mcp/shared/session-auth';
+import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { approvalHostProblem } from './orchestration-approval';
 import { buildRunProvision } from '../../common/run-workspace-resolver';
 import { ProjectsService } from '../projects/projects.service';
 import { MissionProject, loadMissionProjects, projectFolderForHost, readMissionProjects } from './orchestration-project';
@@ -205,6 +207,10 @@ export class OrchestrationRunnerService {
     // 역시 맨 뒤 — 미션 시작 시 effective roster 의 credential materialization
     // (아래 provisionMissionRoster). 스텁 생성자는 비워 두면 훅이 조용히 건너뛴다.
     private readonly commands?: AgentManagerCommandService,
+    // 역시 맨 뒤 — 실행 승인(docs/orchestration.md "실행 승인")의 호스트 판정. approve slot 을 승인을
+    // 중계하지 못하는 옛 매니저에 보내지 않으려고 하트비트 `manager_capabilities` 를 읽는다. @Global 이라
+    // 모듈 배선이 필요 없고, 스텁 생성자는 비워 두면 판정을 건너뛴다.
+    private readonly registry?: InstanceRegistryService,
   ) {}
 
   /** Run `fn` with exclusive access to this mission's state machine. */
@@ -2632,6 +2638,9 @@ export class OrchestrationRunnerService {
     if (approval) throw orchestrationError(409, approval);
     const stepHostId = execSpec.manager_agent_id;
     const stepHostName = (await this.hostNames([stepHostId])).get(stepHostId) ?? '';
+    // 카탈로그가 되는 CLI 여도 그 호스트의 매니저가 승인을 중계하지 못하는 빌드면 같은 식으로 멈춘다.
+    const hostApproval = approvalHostProblem(execSpec, stepHostName, this.registry?.listForAgent(stepHostId) ?? []);
+    if (hostApproval) throw orchestrationError(409, hostApproval);
     const agentLabel = slot?.name ?? slotDisplayName(stepHostName, legacyRow?.role_label ?? '', execSpec.cli);
 
     const team = await this.teamRepo.findOne({ where: { id: mission.team_id } });
@@ -3622,7 +3631,12 @@ export class OrchestrationRunnerService {
     }
     // 저장 검증이 생기기 전에 저장된 slot 도 여기서 걸린다 — 시작해도 그 slot 의 일은 매니저가 버린다.
     for (const slot of [orchestrator, ...members]) {
-      const problem = missionApprovalProblem(slot.spec);
+      const problem = missionApprovalProblem(slot.spec)
+        ?? approvalHostProblem(
+          slot.spec,
+          hostName(slot.spec.manager_agent_id),
+          this.registry?.listForAgent(slot.spec.manager_agent_id) ?? [],
+        );
       if (problem) throw orchestrationError(409, `team "${team.name}" slot ${slot.name}: ${problem}`);
     }
     const resolved = resolveMissionRoster({
