@@ -340,6 +340,90 @@ test('claude history: 보관 통로가 없으면 이미지를 건너뛰고 나�
   assert.ok(history.events.some((e) => e.type === 'tool_update'));
 });
 
+// 컨텍스트가 차면 Claude Code 가 앞 대화를 요약해 user 행(`isCompactSummary`)으로 남긴다 — 모델에게 넘기는 글이라
+// 사람이 친 말이 아니다. 예전에는 "This session is being continued …" 전문이 사용자 말풍선으로 나오고 턴이 갈렸다
+// (실측 2026-11-03). 이제 라이브 어댑터와 같은 `Compact conversation` 카드로 접는다.
+async function seedClaudeSession(home, id, rows) {
+  const dir = join(home.claudeHome, 'projects', '-tmp-work-compact');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${id}.jsonl`), jsonl(rows.map((r) => ({ sessionId: id, cwd: '/tmp/work/compact', ...r }))));
+}
+
+test('claude history: 압축 요약은 사용자 프롬프트가 아니라 같은 턴의 Compact conversation 카드다', async (t) => {
+  const home = await seedHome(t);
+  const id = '11111111-2222-4333-8444-777777777777';
+  const ts = (s) => `2026-11-03T00:00:${String(s).padStart(2, '0')}.000Z`;
+  const body = [
+    '1. Primary Request: refactor the session store.',
+    '2. Quoted notice: "',
+    'If you need specific details from before compaction" was discussed — a quotation must not cut the summary.',
+    '3. Next step: split the reader.',
+  ].join('\n');
+  const summary = [
+    'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
+    '',
+    'Summary:',
+    body,
+    '',
+    'If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/u/.claude/projects/x/abc.jsonl',
+    'Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary.',
+    '',
+    'The messages after this summary are the most recent messages from before compaction, kept verbatim.',
+  ].join('\n');
+  await seedClaudeSession(home, id, [
+    { type: 'user', uuid: 'u1', promptId: 'p1', timestamp: ts(1), message: { role: 'user', content: 'Refactor the session store' } },
+    { type: 'assistant', uuid: 'a1', timestamp: ts(2), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'store.ts' } }] } },
+    { type: 'user', uuid: 'u2', promptId: 'p1', timestamp: ts(3), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'export class Store {}' }] } },
+    { type: 'system', subtype: 'compact_boundary', uuid: 'b1', timestamp: ts(4), compactMetadata: { trigger: 'auto', preTokens: 967042, postTokens: 14482, durationMs: 96174, preservedMessages: { uuids: ['u1'] } } },
+    { type: 'attachment', uuid: 'att1', timestamp: ts(4) },
+    { type: 'user', uuid: 's1', promptId: 'p1', isCompactSummary: true, isVisibleInTranscriptOnly: true, timestamp: ts(5), message: { role: 'user', content: summary } },
+    { type: 'assistant', uuid: 'a2', timestamp: ts(6), message: { role: 'assistant', content: [{ type: 'text', text: 'Picking up the refactor.' }] } },
+    { type: 'user', uuid: 'u3', promptId: 'p2', timestamp: ts(7), message: { role: 'user', content: 'thanks' } },
+  ]);
+  const store = new AgentSessionStore(home);
+  const history = await store.readHistory('claude', id);
+  assert.deepEqual(history.events.filter((e) => e.type === 'user_prompt').map((e) => e.payload.text), ['Refactor the session store', 'thanks']);
+  const card = history.events.find((e) => e.type === 'tool_call' && e.payload.tool_call_id === 'b1');
+  assert.deepEqual(
+    { title: card.payload.title, kind: card.payload.kind, input: card.payload.input, turn: card.turn_id },
+    { title: 'Compact conversation', kind: 'think', input: { trigger: 'automatic', preTokens: 967042, postTokens: 14482, durationMs: 96174 }, turn: 'u1' },
+    '라이브 카드와 같은 제목·kind, 압축 사실은 입력, 턴은 압축을 부른 프롬프트의 것',
+  );
+  const update = history.events.find((e) => e.type === 'tool_update' && e.payload.tool_call_id === 'b1');
+  assert.equal(update.payload.status, 'completed');
+  assert.equal(update.payload.output, body, '머리말과 모델용 지시문을 떼고 요약 본문만 — 본문 안의 인용은 남는다');
+  const after = history.events.find((e) => e.type === 'text' && e.payload.text === 'Picking up the refactor.');
+  assert.equal(after.turn_id, 'u1', '압축 뒤 이어진 답은 같은 턴');
+  assert.equal(history.session.title, 'Refactor the session store');
+});
+
+test('claude history: 모델에게만 보낸 isMeta 글은 그리지 않고, 모델이 말을 마친 뒤 온 것이면 턴만 나눈다', async (t) => {
+  const home = await seedHome(t);
+  const id = '11111111-2222-4333-8444-888888888888';
+  const ts = (s) => `2026-11-03T00:01:${String(s).padStart(2, '0')}.000Z`;
+  await seedClaudeSession(home, id, [
+    { type: 'user', uuid: 'm0', isMeta: true, timestamp: ts(0), message: { role: 'user', content: 'Continue from where you left off.' } },
+    { type: 'user', uuid: 'u1', timestamp: ts(1), message: { role: 'user', content: 'Check the login page screenshot' } },
+    { type: 'assistant', uuid: 'a1', timestamp: ts(2), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_s', name: 'Read', input: { file_path: 'shot.png' } }] } },
+    { type: 'user', uuid: 'u2', timestamp: ts(3), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_s', content: 'ok' }] } },
+    { type: 'user', uuid: 'm1', isMeta: true, timestamp: ts(4), message: { role: 'user', content: [{ type: 'text', text: '[Image: original 1080x2400, displayed at 900x2000. Multiply coordinates by 1.2 to map to original image.]' }] } },
+    { type: 'assistant', uuid: 'a2', timestamp: ts(5), message: { role: 'assistant', content: [{ type: 'text', text: 'The button is misaligned.' }] } },
+    { type: 'user', uuid: 'm2', isMeta: true, timestamp: ts(6), message: { role: 'user', content: 'Another Claude session sent a message: <cross-session-message from="uds:/tmp/x.sock">ping</cross-session-message>' } },
+    { type: 'assistant', uuid: 'a3', timestamp: ts(7), message: { role: 'assistant', content: [{ type: 'text', text: 'Replied to the other session.' }] } },
+  ]);
+  const store = new AgentSessionStore(home);
+  const history = await store.readHistory('claude', id);
+  assert.deepEqual(history.events.filter((e) => e.type === 'user_prompt').map((e) => e.payload.text), ['Check the login page screenshot']);
+  const shown = JSON.stringify(history.events);
+  for (const hidden of ['Continue from where you left off', '[Image: original', 'Another Claude session']) {
+    assert.equal(shown.includes(hidden), false, `${hidden} 는 사람이 친 말이 아니다`);
+  }
+  const turnOf = (text) => history.events.find((e) => e.type === 'text' && e.payload.text === text).turn_id;
+  assert.equal(turnOf('The button is misaligned.'), 'u1', 'tool 결과 뒤의 주석은 턴을 가르지 않는다');
+  assert.equal(turnOf('Replied to the other session.'), 'm2', '답을 마친 뒤 온 글은 새 턴 — 앞 답과 한 말풍선으로 붙지 않게');
+  assert.equal((await store.listSessions('claude')).find((s) => s.session_id === id).title, 'Check the login page screenshot');
+});
+
 test('runner 가 기록 이미지 통로를 건다 — 기록에서 읽은 이미지를 image RPC 로 다시 받을 수 있다', async (t) => {
   const { AgentSessionRunner } = await import('../dist/lib/agent-session-runner.js');
   const home = await seedHome(t);

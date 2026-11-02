@@ -184,7 +184,10 @@ credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using
   `common/host-rpc-status.ts`. 화면은 그래도 가려진 응답을 받으면 본문 대신 상태 코드를 말한다(`api.ts` `apiErrorMessage`).
   open 타임아웃은 120s다. 배포 환경의 프록시 제한이 먼저 걸리면 서버 응답 대신 524를 받을 수 있다.
 - **매니저 `agent-session-store.ts`** — CLI 홈 리더. Claude: `projects/*/*.jsonl` (`agent-*.jsonl` 서브에이전트 파일과
-  프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Codex: `sessions/**/rollout-*.jsonl`
+  프롬프트 없는 빈 세션 제외, `custom-title` 우선, sidechain 행 제외). Claude Code 가 모델에게만 보낸 user 행은
+  사람이 친 말이 아니다 — `isMeta`(이미지 주석·skill 본문·hook 피드백·다른 세션의 메시지)는 그리지 않고, 컨텍스트 압축
+  요약(`isCompactSummary`, "This session is being continued …")은 라이브 어댑터와 같은 `Compact conversation`
+  카드(입력: `compact_boundary` 의 압축 사실, 출력: 머리말·지시문을 뗀 요약)로 접는다. Codex: `sessions/**/rollout-*.jsonl`
   (`session_meta` → id/cwd, developer/environment_context 메시지는 제목에서 제외). 기록은 같은 파일을 트랜스크립트
   이벤트(`user_prompt / text / reasoning / tool_call / tool_update / turn`)로 접는다. opencode 는 파일이 아니라
   **SQLite**(`~/.local/share/opencode/opencode.db`, WAL)에 세션을 넣으므로 그 파일을 직접 열지 않고 opencode 자신의

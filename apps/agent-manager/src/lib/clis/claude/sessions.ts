@@ -46,6 +46,46 @@ export function claudeUsageFromMessage(message: Record<string, any> | null): Ses
   });
 }
 
+/**
+ * 압축(compaction) 카드의 제목·kind — 라이브 어댑터(claude-agent-acp)가 보내는 카드와 같게 해서, 진행 중에 본
+ * 카드가 기록을 다시 읽어도 같은 카드로 남는다.
+ */
+const COMPACTION_TITLE = 'Compact conversation';
+const COMPACT_SUMMARY_PREAMBLE = /^\s*This session is being continued from a previous conversation[^\n]*\n+Summary:[ \t]*\r?\n/;
+const COMPACT_SUMMARY_TRAILERS = [
+  '\nIf you need specific details from before compaction',
+  '\nContinue the conversation from where it left off',
+];
+
+/**
+ * 압축 요약(`isCompactSummary`)에서 모델에게 하는 말을 떼고 요약 본문만 남긴다. 기록은 요약을 머리말
+ * ("This session is being continued … Summary:")과 꼬리(원본 기록 경로 안내, "Continue the conversation …" 지시,
+ * 보존한 메시지 안내)로 감싼다. 꼬리는 **마지막** 등장에서 자른다 — 요약이 이 문구를 인용해도 본문이 잘리지 않게.
+ * 모르는 틀이면 그대로 둔다(요약을 잃는 것보다 지시문이 남는 편이 낫다).
+ */
+function compactSummaryText(raw: string): string {
+  let text = raw.replace(COMPACT_SUMMARY_PREAMBLE, '');
+  for (const marker of COMPACT_SUMMARY_TRAILERS) {
+    const at = text.lastIndexOf(marker);
+    if (at >= 0) {
+      text = text.slice(0, at);
+      break;
+    }
+  }
+  return text.trim();
+}
+
+/** `compact_boundary.compactMetadata` 중 카드에 보일 사실 — 이름은 라이브 카드 출력과 같다. */
+function compactionFacts(meta: unknown): Record<string, unknown> | null {
+  if (!isRecord(meta)) return null;
+  const facts: Record<string, unknown> = {};
+  if (typeof meta.trigger === 'string') facts.trigger = meta.trigger === 'auto' ? 'automatic' : meta.trigger;
+  for (const key of ['preTokens', 'postTokens', 'durationMs']) {
+    if (typeof meta[key] === 'number') facts[key] = meta[key];
+  }
+  return Object.keys(facts).length ? facts : null;
+}
+
 /** Claude 툴 이름 → ACP 툴 kind 근사치. */
 export function claudeToolKind(name: string): string {
   switch (name) {
@@ -74,7 +114,7 @@ async function claudeMeta(path: string, size: number): Promise<{ sessionId: stri
     if (!createdAt && typeof rec.timestamp === 'string') createdAt = rec.timestamp;
     if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') customTitle = rec.customTitle;
     if (rec.type === 'summary' && typeof rec.summary === 'string' && !customTitle) customTitle = rec.summary;
-    if (!firstPrompt && rec.type === 'user' && !rec.isSidechain && isRecord(rec.message)) {
+    if (!firstPrompt && rec.type === 'user' && !rec.isSidechain && !rec.isMeta && !rec.isCompactSummary && isRecord(rec.message)) {
       const text = stripDirectWorkPolicy(textOfBlocks(rec.message.content));
       if (text && !isSyntheticPrompt(text)) firstPrompt = text;
     }
@@ -222,19 +262,48 @@ export const claudeSessionStore: CliSessionStoreDriver = {
         ...(toolCallId ? { tool_call_id: toolCallId } : {}),
       }, ts);
     };
+    // 바로 앞 대화 행의 역할 — 모델에게만 보낸 글(isMeta)이 모델이 말을 마친 뒤에 왔는지 가린다.
+    let lastRole = '';
+    // 압축 경계(`compact_boundary`)의 사실 — 뒤따르는 요약 행이 카드에 싣는다.
+    let compaction: { id: string; facts: Record<string, unknown> | null } | null = null;
     for await (const rec of readJsonlRecords(path)) {
       if (!cwd && typeof rec.cwd === 'string') cwd = rec.cwd;
       if (!createdAt && typeof rec.timestamp === 'string') createdAt = rec.timestamp;
       if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') { title = rec.customTitle; continue; }
       if (rec.type === 'summary' && typeof rec.summary === 'string' && !title) { title = rec.summary; continue; }
       if (rec.isSidechain) continue;
+      if (rec.type === 'system' && rec.subtype === 'compact_boundary') {
+        compaction = { id: typeof rec.uuid === 'string' ? rec.uuid : '', facts: compactionFacts(rec.compactMetadata) };
+        continue;
+      }
       const message = isRecord(rec.message) ? rec.message : null;
       if (!message) continue;
       const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
+      const afterAssistant = lastRole === 'assistant';
+      lastRole = typeof rec.type === 'string' ? rec.type : '';
+      if (rec.type === 'user' && rec.isCompactSummary === true) {
+        // 컨텍스트가 차서 Claude Code 가 앞 대화를 요약한 것 — 이후 모델은 이 요약만 본다. 모델에게 넘기느라 user 행으로
+        // 남지만 사람이 친 말이 아니다. 예전에는 "This session is being continued …" 전문이 사용자 말풍선으로 나오고
+        // 그 자리에서 턴이 갈렸다. 라이브와 같은 카드로 그린다(입력: 압축 사실, 출력: 요약). 턴은 그대로 잇는다.
+        const id = compaction?.id || (typeof rec.uuid === 'string' ? rec.uuid : '') || `compact-${events.total}`;
+        const summary = compactSummaryText(textOfBlocks(message.content));
+        push('tool_call', { tool_call_id: id, title: COMPACTION_TITLE, kind: 'think', ...(compaction?.facts ? { input: compaction.facts } : {}) }, ts);
+        push('tool_update', { tool_call_id: id, status: 'completed', ...(summary ? { output: summary } : {}) }, ts);
+        compaction = null;
+        continue;
+      }
       if (rec.type === 'user') {
+        // Claude Code 가 모델에게만 보낸 글(`isMeta` — 이미지 주석, skill 본문, hook 피드백, 다른 세션의 메시지,
+        // "Continue from where you left off.")은 CLI 화면처럼 그리지 않는다. 사람이 친 말로 보이면 안 된다.
+        // 모델이 말을 마친 뒤에 온 것이면 그 뒤의 답은 새 턴이다 — 같은 턴에 두면 앞 답과 한 말풍선으로 붙는다.
+        const meta = rec.isMeta === true;
+        if (meta && afterAssistant) {
+          flushUsage();
+          turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
+        }
         const content = typeof message.content === 'string' ? stripDirectWorkPolicy(message.content) : message.content;
         if (typeof content === 'string') {
-          if (isSyntheticPrompt(content)) continue;
+          if (meta || isSyntheticPrompt(content)) continue;
           flushUsage(); // 이전 턴의 합계를 새 프롬프트 앞에 남긴다
           turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
           if (!firstPrompt) firstPrompt = content;
@@ -246,7 +315,7 @@ export const claudeSessionStore: CliSessionStoreDriver = {
           if (!isRecord(block)) continue;
           if (block.type === 'text' && typeof block.text === 'string') {
             const text = stripDirectWorkPolicy(block.text);
-            if (isSyntheticPrompt(text)) continue;
+            if (meta || isSyntheticPrompt(text)) continue;
             flushUsage();
             turnId = typeof rec.uuid === 'string' ? rec.uuid : `${events.total}`;
             if (!firstPrompt) firstPrompt = text;
