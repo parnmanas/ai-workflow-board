@@ -57,7 +57,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 import { deployBranches } from './audit-ci-branch-coverage.mjs';
-import { auditLockfile, formatFindings } from './audit-lockfile-advisories.mjs';
+// fetchDepthArgs 는 audit-lockfile-advisories 의 기준(base) 확보도 쓴다 — 거기 하나만 둔다.
+import { auditLockfile, fetchDepthArgs, formatFindings } from './audit-lockfile-advisories.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_LEVEL = 'moderate';
@@ -83,33 +84,6 @@ export function remoteBranchExists(branch, cwd = root) {
     return out.trim().length > 0;
   } catch {
     return null;
-  }
-}
-
-/**
- * `git fetch` 에 붙일 depth 인자. 이미 shallow 인 저장소에서만 `--depth=1` 을 쓴다.
- *
- * CI 의 actions/checkout 은 기본이 `fetch-depth: 1` 이라 늘 shallow 다 — 거기선
- * depth 를 유지하는 게 맞다(받아올 게 tip 하나뿐이다). 그런데 배포 대상이 `main`
- * 으로 바뀐 뒤(ticket 128d62cd)부터는 이 스크립트를 **개발자의 완전한 클론에서**
- * 돌리는 일이 생긴다. 거기에 `--depth=1` 을 쓰면 .git/shallow 가 생기면서 로컬
- * 이력이 커밋 하나로 잘린다 — merge-base·rebase·is-ancestor 가 전부 거짓말을
- * 시작하고, 되돌리려면 `git fetch --unshallow` 로 전부 다시 받아야 한다.
- * 감사 가드가 감사 대상 저장소를 훼손하면 안 된다.
- *
- * 판정 불가(저장소가 아님 등)면 depth 를 붙이지 않는다 — 어차피 뒤이은 fetch 가
- * 실패할 상황이고, 확신 없이 이력을 자르는 쪽보다 안전하다.
- */
-export function fetchDepthArgs(cwd = root) {
-  try {
-    const out = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: 'pipe',
-    }).trim();
-    return out === 'true' ? ['--depth=1'] : [];
-  } catch {
-    return [];
   }
 }
 

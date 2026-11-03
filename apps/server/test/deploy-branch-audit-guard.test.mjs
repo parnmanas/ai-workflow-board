@@ -40,8 +40,9 @@ import {
   remoteBranchExists,
   repoSlugFromRemote,
   lastDeployedSha,
-  fetchDepthArgs,
 } from '../../../scripts/audit-deploy-branch-deps.mjs';
+// 기준(base) lockfile 확보도 같은 함수를 쓰므로 공용 라이브러리에 하나만 둔다.
+import { fetchDepthArgs } from '../../../scripts/audit-lockfile-advisories.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts/audit-deploy-branch-deps.mjs');

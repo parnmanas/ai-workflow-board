@@ -62,11 +62,35 @@
  * 같은 이유로 **읽어낸 패키지가 0개면 실패**한다. 파서가 조용히 망가졌을 때 "검사할
  * 대상이 없어 통과" 하는 게 이 스크립트의 유일한 무증상 실패 모드라서다.
  *
+ * ── 기준(base) 대비 판정 — push 는 "이 변경이 들인 것" 만 실패시킨다 ──
+ *
+ * advisory 는 우리 커밋과 무관하게 공개된다. 그런데 이 게이트가 push 마다 lockfile 전체를
+ * 판정하던 동안, advisory 공개 하나가 그 뒤의 **모든 push 를 red** 로 만들었다 — 의존성을
+ * 한 줄도 건드리지 않은 커밋까지. 2026-10-22 ~ 11-02 에만 네 번이다(ip-address ·
+ * body-parser/multer/undici/zod · @hono/node-server · glob/minimatch). 예: run 41422645526 은
+ * opencode 모델 목록 수정(872dc0b3)이었는데 glob/minimatch advisory 로 실패했다.
+ *
+ * 그 red 는 아무것도 막지 않았다 — main 은 직접 push 이고 배포·발행은 CI 를 기다리지 않는다.
+ * 남는 것은 신호인데, 그 신호가 **커밋을 잘못 지목**했다: "이 커밋이 깨졌다" 로 읽히지만 고칠
+ * 것은 그 커밋이 아니라 의존성이다. 시간축 advisory 를 잡는 자리는 따로 있다 — ci.yml 의
+ * 매일 cron(정기 재감사 — 2026-08-21 감사가 바로 이 축 때문에 만들었다).
+ *
+ * 그래서 `--base` 가 주어지면 판정을 둘로 가른다:
+ *   - 기준 lockfile 에 없던 name@version(= 이 변경이 들인 버전)에 걸린 advisory → 실패.
+ *   - 기준에도 있던 버전에 걸린 advisory → 경고(GitHub annotation). run 은 통과한다.
+ * 기준이 없으면(schedule · 로컬 실행 · 기준을 못 읽음) 예전 그대로 전부 실패다. 기준을 못
+ * 구했을 때 약한 쪽으로 떨어지지 않는다 — fail-closed 는 여기서도 같다.
+ *
+ * 들인 버전의 판정도 엔드포인트에 맡긴다(semver 를 직접 풀지 않는다 — GitHub 축 주석 참조).
+ * 전체 질의에서 걸린 패키지 가운데 들인 버전이 있는 것만, 그 버전으로 한 번 더 묻는다.
+ * 걸린 패키지가 없거나 들인 버전이 없으면 추가 질의는 없다 — 거의 모든 push 가 그렇다.
+ *
  * 라이브러리로도 쓰인다 — audit-deploy-branch-deps.mjs / audit-published-deps.mjs 가
  * 각자 확보한 lockfile 을 여기 넘긴다. 그 두 곳도 `npm audit` 을 쓰고 있었으므로 같은
  * 결함을 그대로 갖고 있었다(schedule 전용이라 병합을 막지 않았을 뿐이다).
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -449,19 +473,12 @@ export async function fetchGithubAdvisories(byName, options = {}) {
 }
 
 /**
- * lockfile 객체 하나를 감사한다. `{ findings, packageCount, versionCount }` 를 돌려주고,
- * 취약점 유무는 호출부가 `findings.length` 로 판단한다.
+ * 이름→버전 집합 하나를 감사한다. `{ source, findings }`.
  *
- * 패키지를 하나도 못 읽으면 throw 한다 — 침묵 통과 방지.
+ * 빈 집합을 거르지 않는다 — 그 판정은 호출부 몫이다. lockfile 전체가 비면 파서 고장이지만,
+ * "이 변경이 들인 버전" 이 비는 것은 정상이다.
  */
-export async function auditLockfile(lock, { level = DEFAULT_AUDIT_LEVEL, ...fetchOptions } = {}) {
-  const byName = lockfilePackages(lock);
-  if (byName.size === 0) {
-    throw new Error(
-      'lockfile 에서 레지스트리 패키지를 하나도 읽지 못했다 — 파서가 깨졌거나 lockfile 이 비었다',
-    );
-  }
-
+async function auditPackages(byName, { level, ...fetchOptions }) {
   // npm 을 먼저 본다 — `npm audit` 과 같은 출처라 판정이 그대로 이어진다.
   // 실패하면 GitHub 축으로 넘어간다. 둘 다 실패해야 실패다 (fail-closed).
   let report;
@@ -487,12 +504,224 @@ export async function auditLockfile(lock, { level = DEFAULT_AUDIT_LEVEL, ...fetc
     }
   }
 
-  return {
+  return { source, findings: collectFindings(report, byName, level) };
+}
+
+/**
+ * head 에는 있고 base 에는 없는 name@version — "이 변경이 lockfile 에 들인 버전" 이다.
+ *
+ * 패키지 이름이 아니라 버전 쌍으로 센다. 이미 취약한 패키지를 아직 취약한 다른 버전으로
+ * 옮기는 것(덜 된 수정)도 그 변경이 들인 취약 버전이다 — 이름 단위로 세면 그 경우가 빠진다.
+ * 반대로 이미 있던 버전이 다른 경로에 한 벌 더 깔리는 것은 새 버전이 아니다.
+ */
+export function introducedPackages(head, base) {
+  const added = new Map();
+  for (const [name, versions] of head) {
+    for (const version of versions) {
+      if (base.get(name)?.has(version)) continue;
+      if (!added.has(name)) added.set(name, new Set());
+      added.get(name).add(version);
+    }
+  }
+  return added;
+}
+
+const versionTotal = (byName) => [...byName.values()].reduce((n, s) => n + s.size, 0);
+
+/**
+ * lockfile 객체 하나를 감사한다. `{ source, findings, packageCount, versionCount, introduced }`
+ * 를 돌려주고, 그중 무엇이 실패인지는 `gateFindings()` 가 정한다.
+ *
+ * `baseLock` 을 주면 `introduced` 에 그 기준 대비 들인 버전의 판정(`{ source, findings,
+ * packageCount, versionCount }`)을 싣는다. 안 주면 `introduced` 는 null — 기준 없음이다.
+ *
+ * 패키지를 하나도 못 읽으면 throw 한다 — 침묵 통과 방지.
+ */
+export async function auditLockfile(
+  lock,
+  { level = DEFAULT_AUDIT_LEVEL, baseLock, ...fetchOptions } = {},
+) {
+  const byName = lockfilePackages(lock);
+  if (byName.size === 0) {
+    throw new Error(
+      'lockfile 에서 레지스트리 패키지를 하나도 읽지 못했다 — 파서가 깨졌거나 lockfile 이 비었다',
+    );
+  }
+
+  const { source, findings } = await auditPackages(byName, { level, ...fetchOptions });
+  const result = {
     source,
-    findings: collectFindings(report, byName, level),
+    findings,
     packageCount: byName.size,
-    versionCount: [...byName.values()].reduce((n, s) => n + s.size, 0),
+    versionCount: versionTotal(byName),
+    introduced: null,
   };
+  if (baseLock == null) return result;
+
+  const added = introducedPackages(byName, lockfilePackages(baseLock));
+  // 전체 질의가 어떤 패키지에 아무것도 돌려주지 않았다면 그 패키지의 어느 버전도 — 들인
+  // 버전도 그 질의에 들어 있었다 — 문턱 이상 advisory 에 걸리지 않은 것이다. 그래서 걸린
+  // 패키지의 들인 버전만 다시 묻는다.
+  const flagged = new Set(findings.map((f) => f.name));
+  const suspects = new Map([...added].filter(([name]) => flagged.has(name)));
+  const recheck =
+    suspects.size === 0
+      ? { source: null, findings: [] }
+      : await auditPackages(suspects, { level, ...fetchOptions });
+  result.introduced = { ...recheck, packageCount: added.size, versionCount: versionTotal(added) };
+  return result;
+}
+
+/**
+ * 무엇이 이 run 을 실패시키는가 — `{ blocking, preexisting }`.
+ *
+ * 기준이 없으면 전부 blocking 이다(예전 동작). 기준이 있으면 이 변경이 들인 버전에 걸린
+ * 것만 blocking 이고, 기존 버전에만 걸린 나머지가 preexisting(경고)이다. blocking 은 다시
+ * 물은 결과 그대로다 — 첫 질의와 짝을 못 맞춰도(출처가 갈려 제목이 달라도) 들인 취약점이
+ * 경고로 새지 않는다. 짝 맞추기는 경고 목록에서 중복을 빼는 데만 쓴다.
+ */
+export function gateFindings({ findings, introduced }) {
+  if (!introduced) return { blocking: findings, preexisting: [] };
+  const key = (f) => `${f.name}\u0000${f.url || f.title}`;
+  const blocked = new Set(introduced.findings.map(key));
+  return {
+    blocking: introduced.findings,
+    preexisting: findings.filter((f) => !blocked.has(key(f))),
+  };
+}
+
+// ───────────────────────── 기준(base) 확보 ─────────────────────────
+
+/** `--base=github-event` — 기준을 GitHub 이벤트에서 고른다. ci.yml 이 쓰는 형태다. */
+export const BASE_FROM_GITHUB_EVENT = 'github-event';
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const NULL_SHA = /^0{40}$/;
+const BASE_FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * GitHub 이벤트에서 "이 run 이 lockfile 에 무엇을 들였나" 를 잴 기준을 고른다.
+ * `{ sha }` 나 `{ branch }` 를 돌려주고, 둘 다 없으면 기준 없음 — lockfile 전체가 실패
+ * 대상이다. `why` 는 로그에 그대로 찍는다.
+ *
+ *   push              이전 tip(`before`). 여러 커밋을 한 번에 밀어도 전부 범위에 든다 —
+ *                     HEAD^1 이면 마지막 커밋만 보여 앞 커밋이 들인 것을 놓친다.
+ *                     새 브랜치는 before 가 0…0 이라 기준이 없다.
+ *   pull_request      `pull_request.base.sha`. 체크아웃은 base 와의 병합 커밋이다.
+ *   workflow_dispatch 기본 브랜치의 지금 tip. 병합 전에 티켓 브랜치를 돌려 보는 경로라
+ *                     (ci.yml workflow_dispatch 주석) 질문은 "main 에 무엇을 더하는가" 다.
+ *   schedule          기준 없음 — 시간축 감사 자체다. 여기에 기준을 두면 기존 의존성에 새로
+ *                     공개된 advisory 를 실패로 잡는 곳이 하나도 남지 않는다.
+ *   그 밖             기준 없음.
+ */
+export function auditBaseFromGithubEvent(eventName, event) {
+  switch (eventName) {
+    case 'push': {
+      const before = event?.before;
+      if (typeof before === 'string' && FULL_SHA.test(before) && !NULL_SHA.test(before)) {
+        return { sha: before, why: `push 이전 tip ${before.slice(0, 8)}` };
+      }
+      return { why: 'push 에 이전 tip 이 없다 — 새 브랜치' };
+    }
+    case 'pull_request': {
+      const sha = event?.pull_request?.base?.sha;
+      if (typeof sha === 'string' && FULL_SHA.test(sha)) {
+        return { sha, why: `PR base ${sha.slice(0, 8)}` };
+      }
+      return { why: 'PR 이벤트에 base sha 가 없다' };
+    }
+    case 'workflow_dispatch': {
+      const branch = event?.repository?.default_branch;
+      // git 인자로 넘기므로 옵션처럼 보이는 값은 받지 않는다.
+      if (typeof branch === 'string' && branch && !branch.startsWith('-')) {
+        return { branch, why: `기본 브랜치 ${branch} 의 지금 tip` };
+      }
+      return { why: 'dispatch 이벤트에 기본 브랜치가 없다' };
+    }
+    case 'schedule':
+      return { why: 'schedule — 시간축 감사' };
+    default:
+      return { why: `${eventName || 'GitHub 이벤트 없음'} — 기준을 두지 않는 실행` };
+  }
+}
+
+/**
+ * `git fetch` 에 붙일 depth 인자. 이미 shallow 인 저장소에서만 `--depth=1` 을 쓴다.
+ *
+ * CI 의 actions/checkout 은 기본이 `fetch-depth: 1` 이라 늘 shallow 다 — 거기선
+ * depth 를 유지하는 게 맞다(받아올 게 커밋 하나뿐이다). 그런데 이 계열 스크립트는
+ * **개발자의 완전한 클론에서도** 돈다(배포 대상이 `main` 으로 바뀐 뒤 — ticket
+ * 128d62cd — audit-deploy-branch-deps 가 그렇게 됐다). 거기에 `--depth=1` 을 쓰면
+ * .git/shallow 가 생기면서 로컬 이력이 커밋 하나로 잘린다 — merge-base·rebase·
+ * is-ancestor 가 전부 거짓말을 시작하고, 되돌리려면 `git fetch --unshallow` 로 전부
+ * 다시 받아야 한다. 감사 가드가 감사 대상 저장소를 훼손하면 안 된다.
+ *
+ * 판정 불가(저장소가 아님 등)면 depth 를 붙이지 않는다 — 어차피 뒤이은 fetch 가
+ * 실패할 상황이고, 확신 없이 이력을 자르는 쪽보다 안전하다.
+ */
+export function fetchDepthArgs(cwd = root, exec = execFileSync) {
+  try {
+    const out = String(
+      exec('git', ['rev-parse', '--is-shallow-repository'], { cwd, encoding: 'utf8', stdio: 'pipe' }),
+    ).trim();
+    return out === 'true' ? ['--depth=1'] : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 기준의 package-lock.json 내용. 못 읽으면 null — 호출부는 전체 게이트로 떨어진다.
+ *
+ *   { sha }    가져와 본 뒤 그 sha 로 읽는다. 가져오기가 실패해도 이미 로컬에 있으면(완전한
+ *              클론) 그대로 읽는다 — 정확한 커밋이라 상관없다.
+ *   { branch } 가져오기가 **성공했을 때만** FETCH_HEAD 를 읽는다. 실패했는데 읽으면
+ *              actions/checkout 이 남긴 FETCH_HEAD — 지금 커밋 자신 — 가 기준이 되고, 들인
+ *              버전이 0개가 돼 이 변경이 들인 취약점까지 경고로 내려간다. 조용한 통과다.
+ *   { ref }    가져오지 않고 로컬 ref 로 읽는다(`--base=origin/main` 같은 로컬 실행).
+ */
+export function readBaseLockfile(base, { exec = execFileSync, cwd = root } = {}) {
+  const git = (args, extra = {}) =>
+    exec('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', maxBuffer: 64 * 1024 * 1024, ...extra });
+  const fetched = (target) => {
+    try {
+      // 멈춘 fetch 가 잡 시간 한도(6시간)까지 잡을 붙들지 않게 — 시간이 다 되면 못 가져온
+      // 것으로 보고 전체 게이트로 떨어진다.
+      git(['fetch', '--no-tags', ...fetchDepthArgs(cwd, exec), 'origin', target], {
+        timeout: BASE_FETCH_TIMEOUT_MS,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const show = (rev) => {
+    try {
+      return String(git(['show', `${rev}:package-lock.json`]));
+    } catch {
+      return null;
+    }
+  };
+
+  if (base.ref) return show(base.ref);
+  if (base.sha) {
+    fetched(base.sha);
+    return show(base.sha);
+  }
+  if (base.branch) return fetched(base.branch) ? show('FETCH_HEAD') : null;
+  return null;
+}
+
+/**
+ * GitHub Actions 워크플로 명령 한 줄(`::warning title=…::…`). Actions 밖에서는 null —
+ * 로컬 출력에는 잡음일 뿐이다. 값은 Actions 규칙대로 이스케이프한다: 안 하면 줄바꿈에서
+ * 메시지가 잘리고, 제목의 `:` `,` 가 속성 구분자로 읽힌다.
+ */
+export function workflowCommand(kind, title, message, env = process.env) {
+  if (env.GITHUB_ACTIONS !== 'true') return null;
+  const data = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  const property = (s) => data(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+  return `::${kind} title=${property(title)}::${data(message)}`;
 }
 
 /** findings 를 사람이 읽는 블록으로. */
@@ -508,7 +737,7 @@ export function formatFindings(findings) {
 }
 
 export function parseArgs(argv) {
-  const opts = { level: DEFAULT_AUDIT_LEVEL, lockfile: join(root, 'package-lock.json') };
+  const opts = { level: DEFAULT_AUDIT_LEVEL, lockfile: join(root, 'package-lock.json'), base: null };
   for (const arg of argv) {
     const level = /^--audit-level=(.+)$/.exec(arg);
     if (level) {
@@ -520,12 +749,77 @@ export function parseArgs(argv) {
       opts.lockfile = resolve(lockfile[1]);
       continue;
     }
+    const base = /^--base=(.*)$/.exec(arg);
+    if (base) {
+      // git 인자로 넘기므로 옵션처럼 보이는 값은 받지 않는다.
+      if (!base[1] || base[1].startsWith('-')) {
+        throw new Error(`--base 값이 올바르지 않다: '${base[1]}' (${BASE_FROM_GITHUB_EVENT} 또는 git ref)`);
+      }
+      opts.base = base[1];
+      continue;
+    }
     throw new Error(`알 수 없는 인자: ${arg}`);
   }
   if (!SEVERITY_ORDER.includes(opts.level)) {
     throw new Error(`알 수 없는 audit level: ${opts.level} (${SEVERITY_ORDER.join(', ')} 중 하나)`);
   }
   return opts;
+}
+
+/** GitHub Actions 이벤트 payload. 없거나 못 읽으면 null. */
+function readGithubEvent(path = process.env.GITHUB_EVENT_PATH) {
+  if (!path) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `--base` 를 기준 lockfile 로 푼다. 못 풀면 null — 전체 게이트다. 어느 쪽이든 왜 그렇게
+ * 판정하는지 한 줄 남긴다: 조용히 전체 게이트로 떨어지면 "의존성을 안 건드렸는데 왜 red
+ * 냐" 를 다시 처음부터 캐야 한다.
+ */
+function loadBaseLock(baseArg) {
+  const base =
+    baseArg === BASE_FROM_GITHUB_EVENT
+      ? auditBaseFromGithubEvent(process.env.GITHUB_EVENT_NAME, readGithubEvent())
+      : { ref: baseArg, why: `--base=${baseArg}` };
+  const whole = 'lockfile 전체를 실패 대상으로 판정한다';
+  if (!base.sha && !base.branch && !base.ref) {
+    console.log(`기준 없음 (${base.why}) — ${whole}.`);
+    return null;
+  }
+  let lock = null;
+  try {
+    const text = readBaseLockfile(base);
+    if (text != null) {
+      lock = JSON.parse(text);
+      lockfilePackages(lock); // packages 맵이 없으면 비교할 수 없다 — throw
+    }
+  } catch {
+    lock = null;
+  }
+  if (!lock) {
+    console.log(`기준(${base.why})의 lockfile 을 읽지 못했다 — ${whole}.`);
+    return null;
+  }
+  console.log(`기준: ${base.why} — 이 변경이 lockfile 에 들인 버전에 걸린 것만 실패시킨다.`);
+  return lock;
+}
+
+/** findings 하나마다 annotation 한 줄 — 로그를 열지 않아도 run 요약에 보인다. */
+function annotate(kind, title, findings) {
+  for (const f of findings) {
+    const line = workflowCommand(
+      kind,
+      title,
+      `[${f.severity}] ${f.name} ${f.installedVersions.join(', ')} — ${f.title}` +
+        (f.url ? ` (${f.url})` : ''),
+    );
+    if (line) console.log(line);
+  }
 }
 
 async function main() {
@@ -545,10 +839,13 @@ async function main() {
     process.exit(1);
   }
 
+  const baseLock = opts.base ? loadBaseLock(opts.base) : null;
+
   let result;
   try {
     result = await auditLockfile(lock, {
       level: opts.level,
+      baseLock,
       onRetry: (attempt, e, label) => console.log(`재시도 ${attempt} — ${label} 실패: ${e?.message ?? e}`),
       onSourceFallback: (e) =>
         console.log(
@@ -560,18 +857,39 @@ async function main() {
     process.exit(1);
   }
 
-  const { source, findings, packageCount, versionCount } = result;
+  const { source, packageCount, versionCount, introduced } = result;
+  const { blocking, preexisting } = gateFindings(result);
   const scope = `패키지 ${packageCount}개 / 버전 ${versionCount}개, 출처 ${source}`;
-  if (findings.length > 0) {
-    console.error(
-      `${opts.level} 이상 취약점 ${findings.length}건 (${scope}):\n` +
-        formatFindings(findings) +
-        `\n\`npm audit fix\` 는 금지 — 루트 overrides 를 날린다. 해당 의존성을 직접 올릴 것.`,
+  const fix = `\`npm audit fix\` 는 금지 — 루트 overrides 를 날린다. 해당 의존성을 직접 올릴 것.`;
+
+  if (preexisting.length > 0) {
+    annotate('warning', '기존 의존성의 advisory — 정기 감사가 실패로 잡는다', preexisting);
+    console.log(
+      `경고 — 이 변경 전부터 있던 버전에 ${opts.level} 이상 advisory ${preexisting.length}건 (${scope}):\n` +
+        formatFindings(preexisting) +
+        `\n이 변경이 들인 버전이 아니라 이것으로는 실패시키지 않는다 — 매일 정기 감사(schedule)가 실패로 잡는다.\n${fix}`,
     );
+  }
+
+  if (blocking.length > 0) {
+    annotate('error', introduced ? '이 변경이 들인 취약 버전' : '취약한 의존성', blocking);
+    const head = introduced
+      ? `이 변경이 들인 버전에 ${opts.level} 이상 취약점 ${blocking.length}건 ` +
+        `(들인 버전 ${introduced.versionCount}개 / 전체 ${scope})`
+      : `${opts.level} 이상 취약점 ${blocking.length}건 (${scope})`;
+    console.error(`${head}:\n` + formatFindings(blocking) + `\n${fix}`);
     process.exit(1);
   }
 
-  console.log(`ok   ${opts.level} 이상 취약점 0건 — ${scope}.`);
+  if (preexisting.length > 0) {
+    console.log(
+      `ok   이 변경이 들인 버전 ${introduced.versionCount}개에는 ${opts.level} 이상 취약점 0건 — ` +
+        `위 ${preexisting.length}건은 기존 버전의 advisory 라 경고로만 남긴다.`,
+    );
+    return;
+  }
+  const added = introduced ? `, 이 변경이 들인 버전 ${introduced.versionCount}개` : '';
+  console.log(`ok   ${opts.level} 이상 취약점 0건 — ${scope}${added}.`);
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

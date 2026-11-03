@@ -20,6 +20,11 @@
 //      전부 skipped 됐다(run 33823224505 실측). 순서는 주석으로만 지켜지지 않으므로
 //      "오프라인 가드보다 앞에 네트워크 스텝이 오면 실패" 를 여기서 강제한다.
 //
+//   3) **기준(base) 대비 판정** — push 마다 lockfile 전체를 판정하던 동안 advisory 공개
+//      하나가 의존성을 건드리지 않은 커밋까지 전부 red 로 만들었다(run 41422645526).
+//      push · PR 은 그 변경이 들인 버전에 걸린 것만 실패시키고, schedule 은 전체를 본다.
+//      기준을 못 구하면 전체로 떨어지는지, 들인 취약점이 경고로 새지 않는지를 단언한다.
+//
 // 앱 부팅도 서브프로세스도 없다 — 순수 로직 + 문자열 파싱이고, 네트워크는 전부
 // 주입한 fetch 로 대체한다. 매 `npm test` 에 싸다.
 
@@ -30,23 +35,29 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  BASE_FROM_GITHUB_EVENT,
   DEFAULT_ATTEMPTS,
   DEFAULT_BACKOFF_MS,
   DEFAULT_TIMEOUT_MS,
   GITHUB_AFFECTS_MAX_CHARS,
   SEVERITY_ORDER,
   affectsChunks,
+  auditBaseFromGithubEvent,
   candidateNames,
   fetchGithubAdvisories,
+  gateFindings,
   githubReportFor,
   atOrAboveLevel,
   auditLockfile,
   bulkPayload,
   collectFindings,
   fetchAdvisories,
+  introducedPackages,
   lockfilePackages,
   packageNameFromKey,
   parseArgs,
+  readBaseLockfile,
+  workflowCommand,
 } from '../../../scripts/audit-lockfile-advisories.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -546,6 +557,300 @@ test('두 출처가 모두 죽으면 통과가 아니라 실패다 (fail-closed)
   );
 });
 
+// ───────────── 기준(base) 대비 판정 — 이 변경이 들인 버전만 실패 ─────────────
+//
+// push 마다 lockfile 전체를 판정하던 동안, advisory 공개 하나가 의존성을 건드리지 않은
+// 커밋까지 전부 red 로 만들었다(run 41422645526 — opencode 모델 목록 수정 커밋이
+// glob/minimatch advisory 로 실패). 기준이 있으면 그 변경이 들인 버전에 걸린 것만
+// 실패시키고, 기존 버전의 advisory 는 경고로 내린다. 기준이 없으면(schedule) 전부다.
+
+/**
+ * name@version 쌍으로 lockfile 을 만든다. 같은 패키지의 여러 버전은 실제 lockfile 처럼
+ * 중첩 경로에 둔다 — 키의 마지막 `node_modules/` 뒤가 패키지명이다.
+ */
+const lockOf = (pairs) => ({
+  packages: Object.fromEntries(
+    pairs.map(([n, v]) => [`node_modules/host-${n}-${v}/node_modules/${n}`, reg(n, v)]),
+  ),
+});
+
+/**
+ * npm bulk 대역 — **보낸 버전에 걸리는** advisory 만 돌려준다(스크립트 헤더의 실측 동작).
+ * `vulnerable` 은 `{ 패키지명: [{ ...advisory, versions: [걸리는 버전] }] }`.
+ */
+function bulkStub(vulnerable) {
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    if (!url.includes('registry.npmjs.org')) throw new Error(`예상 못 한 조회: ${url}`);
+    const payload = JSON.parse(init.body);
+    sent.push(payload);
+    const body = {};
+    for (const [name, versions] of Object.entries(payload)) {
+      const hits = (vulnerable[name] ?? []).filter((a) => a.versions.some((v) => versions.includes(v)));
+      if (hits.length > 0) body[name] = hits.map(({ versions: _hit, ...rest }) => rest);
+    }
+    return { ok: true, status: 200, json: async () => body };
+  };
+  return { fetchImpl, sent };
+}
+
+const stale = { ...advisory('high', { url: 'https://example.test/stale' }), versions: ['1.0.0'] };
+const partial = {
+  ...advisory('moderate', { url: 'https://example.test/partial' }),
+  versions: ['1.0.0', '1.1.0'],
+};
+
+test('introducedPackages 는 기준에 없던 name@version 쌍만 고른다', () => {
+  const head = new Map([
+    ['kept', new Set(['1.0.0'])],
+    ['bumped', new Set(['1.0.0', '1.1.0'])],
+    ['fresh', new Set(['3.0.0'])],
+  ]);
+  const base = new Map([
+    ['kept', new Set(['1.0.0'])],
+    ['bumped', new Set(['1.0.0'])],
+    ['gone', new Set(['9.0.0'])],
+  ]);
+  assert.deepEqual(
+    [...introducedPackages(head, base)].map(([n, v]) => [n, [...v]]),
+    [
+      ['bumped', ['1.1.0']],
+      ['fresh', ['3.0.0']],
+    ],
+  );
+});
+
+test('lockfile 이 그대로인 변경은 들인 버전이 0개다 (거의 모든 push 의 경로)', () => {
+  const real = lockfilePackages(readRealLock());
+  assert.equal(introducedPackages(real, lockfilePackages(readRealLock())).size, 0);
+});
+
+test('의존성을 안 건드린 push 의 advisory 는 실패가 아니라 경고다 (run 41422645526 재현)', async () => {
+  const lock = lockOf([
+    ['glob', '1.0.0'],
+    ['minimatch', '1.0.0'],
+  ]);
+  const { fetchImpl, sent } = bulkStub({
+    glob: [{ ...stale, url: 'https://example.test/glob' }],
+    minimatch: [{ ...stale, url: 'https://example.test/minimatch' }],
+  });
+  const result = await auditLockfile(lock, { baseLock: lock, fetchImpl, attempts: 1 });
+  const { blocking, preexisting } = gateFindings(result);
+  assert.deepEqual(blocking, []);
+  assert.deepEqual(preexisting.map((f) => f.name), ['glob', 'minimatch']);
+  assert.equal(result.introduced.versionCount, 0);
+  assert.equal(sent.length, 1, '들인 버전이 없는데 다시 물었다');
+});
+
+test('기준이 있으면 들인 버전에 걸린 것만 실패다 — 덜 된 수정(취약 → 취약)도 들인 것이다', async () => {
+  const base = lockOf([
+    ['stale', '1.0.0'],
+    ['partial', '1.0.0'],
+    ['clean', '1.0.0'],
+  ]);
+  const head = lockOf([
+    ['stale', '1.0.0'], // 그대로 — 기존 버전에 advisory → 경고
+    ['partial', '1.1.0'], // 올렸지만 아직 취약 → 이 변경이 들인 취약 버전
+    ['clean', '2.0.0'], // 새 버전이지만 깨끗하다
+    ['added', '1.0.0'], // 새 패키지, 깨끗하다
+  ]);
+  const { fetchImpl, sent } = bulkStub({ stale: [stale], partial: [partial] });
+  const result = await auditLockfile(head, { baseLock: base, fetchImpl, attempts: 1 });
+
+  const { blocking, preexisting } = gateFindings(result);
+  assert.deepEqual(blocking.map((f) => [f.name, f.installedVersions]), [['partial', ['1.1.0']]]);
+  assert.deepEqual(preexisting.map((f) => f.name), ['stale']);
+  assert.equal(result.introduced.versionCount, 3);
+  // 다시 묻는 건 걸린 패키지의 들인 버전뿐이다 — 깨끗한 새 버전과 기존 버전은 싣지 않는다.
+  assert.deepEqual(sent[1], { partial: ['1.1.0'] });
+  assert.equal(sent.length, 2);
+});
+
+test('기준이 없으면 예전처럼 전부 실패 대상이다 (schedule · 로컬 실행)', async () => {
+  const head = lockOf([
+    ['stale', '1.0.0'],
+    ['partial', '1.1.0'],
+  ]);
+  const { fetchImpl, sent } = bulkStub({ stale: [stale], partial: [partial] });
+  const result = await auditLockfile(head, { fetchImpl, attempts: 1 });
+  assert.equal(result.introduced, null);
+  const { blocking, preexisting } = gateFindings(result);
+  assert.deepEqual(blocking.map((f) => f.name).sort(), ['partial', 'stale']);
+  assert.deepEqual(preexisting, []);
+  assert.equal(sent.length, 1);
+});
+
+test('들인 버전이 있어도 전체 질의가 깨끗하면 다시 묻지 않는다 (정상 경로의 비용)', async () => {
+  const { fetchImpl, sent } = bulkStub({});
+  const result = await auditLockfile(lockOf([['added', '1.0.0']]), {
+    baseLock: lockOf([['other', '1.0.0']]),
+    fetchImpl,
+    attempts: 1,
+  });
+  assert.deepEqual(result.introduced.findings, []);
+  assert.equal(result.introduced.versionCount, 1);
+  assert.equal(sent.length, 1);
+});
+
+test('들인 버전을 다시 묻다 두 출처가 모두 죽으면 통과가 아니라 실패다 (fail-closed)', async () => {
+  let npmCalls = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes('api.github.com')) throw new Error('github 503');
+    npmCalls += 1;
+    if (npmCalls > 1) throw new Error('npm timeout');
+    return { ok: true, status: 200, json: async () => ({ partial: [advisory('high')] }) };
+  };
+  await assert.rejects(
+    auditLockfile(lockOf([['partial', '1.1.0']]), {
+      baseLock: lockOf([['partial', '1.0.0']]),
+      fetchImpl,
+      attempts: 1,
+      backoffMs: () => 0,
+    }),
+    /두 곳이 모두 실패/,
+  );
+});
+
+test('gateFindings — 다시 물은 결과와 짝이 안 맞아도 들인 취약점은 경고로 새지 않는다', () => {
+  // 두 질의의 출처가 갈리면(npm ↔ GitHub) 같은 advisory 의 제목·주소가 다를 수 있다.
+  // 실패 여부는 다시 물은 결과가 정한다 — 짝 맞추기는 경고 목록의 중복 제거에만 쓴다.
+  const full = { name: 'p', severity: 'high', title: 'npm 제목', url: 'https://npm.test/1' };
+  const recheck = { name: 'p', severity: 'high', title: 'GitHub 제목', url: 'https://gh.test/1' };
+  const { blocking } = gateFindings({ findings: [full], introduced: { findings: [recheck] } });
+  assert.deepEqual(blocking, [recheck]);
+
+  const same = { ...full };
+  const matched = gateFindings({ findings: [full], introduced: { findings: [same] } });
+  assert.deepEqual(matched.preexisting, [], '같은 advisory 를 경고에도 한 번 더 실었다');
+});
+
+const SHA_A = 'a'.repeat(40);
+
+test('schedule 은 기준이 없다 — 기존 의존성의 새 advisory 를 실패로 잡는 유일한 자리', () => {
+  const base = auditBaseFromGithubEvent('schedule', { schedule: '17 4 * * *' });
+  assert.equal(base.sha ?? base.branch ?? base.ref ?? null, null);
+});
+
+test('push 는 이전 tip 을 기준으로 삼는다 — 여러 커밋을 한 번에 밀어도 전부 범위에 든다', () => {
+  assert.equal(auditBaseFromGithubEvent('push', { before: SHA_A, after: 'b'.repeat(40) }).sha, SHA_A);
+});
+
+test('새 브랜치 push 나 모양이 틀린 before 는 기준이 없다', () => {
+  for (const before of ['0'.repeat(40), 'abc123', SHA_A.toUpperCase(), undefined, 42]) {
+    const base = auditBaseFromGithubEvent('push', { before });
+    assert.equal(base.sha ?? null, null, String(before));
+  }
+});
+
+test('PR 은 base sha, dispatch 는 기본 브랜치 tip 을 기준으로 삼는다', () => {
+  const pr = auditBaseFromGithubEvent('pull_request', { pull_request: { base: { sha: SHA_A } } });
+  assert.equal(pr.sha, SHA_A);
+  const dispatch = auditBaseFromGithubEvent('workflow_dispatch', { repository: { default_branch: 'main' } });
+  assert.equal(dispatch.branch, 'main');
+  // git 인자로 넘어가는 값이다 — 옵션처럼 보이면 받지 않는다.
+  const injected = auditBaseFromGithubEvent('workflow_dispatch', {
+    repository: { default_branch: '--upload-pack=touch /tmp/x' },
+  });
+  assert.equal(injected.branch ?? null, null);
+});
+
+test('모르는 이벤트나 payload 가 없으면 기준이 없다 (전체 판정으로 떨어진다)', () => {
+  for (const [name, event] of [
+    ['merge_group', {}],
+    [undefined, null],
+    ['push', null],
+    ['pull_request', {}],
+    ['workflow_dispatch', {}],
+  ]) {
+    const base = auditBaseFromGithubEvent(name, event);
+    assert.equal(base.sha ?? base.branch ?? null, null, `${name}`);
+    assert.ok(base.why, `${name}: 왜 기준이 없는지 로그에 남길 문장이 없다`);
+  }
+});
+
+/** git 대역 — 부른 인자를 기록하고, 정해 둔 결과만 돌려준다. */
+function gitStub({ shallow = true, fetchOk = true, files = {} } = {}) {
+  const calls = [];
+  const exec = (cmd, args, opts) => {
+    assert.equal(cmd, 'git');
+    calls.push({ line: args.join(' '), opts });
+    if (args[0] === 'rev-parse') return shallow ? 'true\n' : 'false\n';
+    if (args[0] === 'fetch') {
+      if (!fetchOk) throw new Error('fatal: could not fetch');
+      return '';
+    }
+    if (args[0] === 'show') {
+      if (!(args[1] in files)) throw new Error(`fatal: invalid object name ${args[1]}`);
+      return files[args[1]];
+    }
+    throw new Error(`예상 못 한 git 호출: ${args.join(' ')}`);
+  };
+  return { exec, lines: () => calls.map((c) => c.line), calls };
+}
+
+test('readBaseLockfile — sha 는 가져와서 그 sha 로 읽고, fetch 에는 시간 한도가 있다', () => {
+  const git = gitStub({ files: { [`${SHA_A}:package-lock.json`]: '{"packages":{}}' } });
+  assert.equal(readBaseLockfile({ sha: SHA_A }, { exec: git.exec }), '{"packages":{}}');
+  assert.deepEqual(git.lines(), [
+    'rev-parse --is-shallow-repository',
+    `fetch --no-tags --depth=1 origin ${SHA_A}`,
+    `show ${SHA_A}:package-lock.json`,
+  ]);
+  const fetchCall = git.calls.find((c) => c.line.startsWith('fetch'));
+  assert.ok(fetchCall.opts.timeout > 0, '멈춘 fetch 가 잡을 6시간 붙들 수 있다');
+});
+
+test('readBaseLockfile — 완전한 클론에서는 depth 를 붙이지 않는다 (이력을 자르지 않는다)', () => {
+  const git = gitStub({ shallow: false, files: { [`${SHA_A}:package-lock.json`]: '{}' } });
+  readBaseLockfile({ sha: SHA_A }, { exec: git.exec });
+  assert.ok(git.lines().includes(`fetch --no-tags origin ${SHA_A}`), git.lines().join(' | '));
+});
+
+test('readBaseLockfile — sha 는 가져오기가 실패해도 이미 있으면 그 커밋으로 읽는다', () => {
+  const git = gitStub({ fetchOk: false, files: { [`${SHA_A}:package-lock.json`]: '{}' } });
+  assert.equal(readBaseLockfile({ sha: SHA_A }, { exec: git.exec }), '{}');
+});
+
+test('readBaseLockfile — 브랜치 가져오기가 실패하면 FETCH_HEAD 를 읽지 않는다 (조용한 통과 차단)', () => {
+  // actions/checkout 이 남긴 FETCH_HEAD 는 지금 커밋 자신이다. 그걸 기준으로 읽으면 들인
+  // 버전이 0개가 돼, 이 변경이 들인 취약점까지 경고로 내려간다.
+  const git = gitStub({ fetchOk: false, files: { 'FETCH_HEAD:package-lock.json': '{"stale":1}' } });
+  assert.equal(readBaseLockfile({ branch: 'main' }, { exec: git.exec }), null);
+  assert.equal(git.lines().some((l) => l.startsWith('show')), false, git.lines().join(' | '));
+});
+
+test('readBaseLockfile — 브랜치는 가져온 뒤 FETCH_HEAD 로 읽는다', () => {
+  const git = gitStub({ files: { 'FETCH_HEAD:package-lock.json': '{"main":1}' } });
+  assert.equal(readBaseLockfile({ branch: 'main' }, { exec: git.exec }), '{"main":1}');
+  assert.ok(git.lines().includes('fetch --no-tags --depth=1 origin main'));
+});
+
+test('readBaseLockfile — 로컬 ref 는 가져오지 않고, 못 읽으면 null 이다', () => {
+  const git = gitStub({ files: { 'origin/main:package-lock.json': '{}' } });
+  assert.equal(readBaseLockfile({ ref: 'origin/main' }, { exec: git.exec }), '{}');
+  assert.deepEqual(git.lines(), ['show origin/main:package-lock.json']);
+
+  assert.equal(readBaseLockfile({ ref: 'nope' }, { exec: gitStub().exec }), null);
+  assert.equal(readBaseLockfile({}, { exec: gitStub().exec }), null);
+});
+
+test('--base 는 github-event 나 git ref 를 받고, 비었거나 옵션처럼 보이면 거부한다', () => {
+  assert.equal(parseArgs([]).base, null);
+  assert.equal(parseArgs([`--base=${BASE_FROM_GITHUB_EVENT}`]).base, 'github-event');
+  assert.equal(parseArgs(['--base=origin/main']).base, 'origin/main');
+  assert.throws(() => parseArgs(['--base=']), /--base 값이 올바르지 않다/);
+  assert.throws(() => parseArgs(['--base=--upload-pack=x']), /--base 값이 올바르지 않다/);
+});
+
+test('workflowCommand 는 Actions 안에서만 찍고 메시지·제목을 이스케이프한다', () => {
+  const env = { GITHUB_ACTIONS: 'true' };
+  assert.equal(
+    workflowCommand('warning', 'a: b, c', '50%\r\nnext', env),
+    '::warning title=a%3A b%2C c::50%25%0D%0Anext',
+  );
+  assert.equal(workflowCommand('warning', 't', 'm', {}), null);
+});
+
 // ───────────────────── ci.yml 스텝 순서 회귀 가드 ─────────────────────
 
 const AUDIT_JOB = 'dependency-audit';
@@ -726,6 +1031,25 @@ test('ci.yml 은 취약점 게이트로 audit-lockfile-advisories.mjs 를 돌린
   const gate = steps.find((s) => s.run.includes('audit-lockfile-advisories.mjs'));
   assert.ok(gate, '취약점 감사 스텝이 없다');
   assert.match(gate.run, /--audit-level=moderate/, '문턱이 moderate 가 아니다');
+});
+
+test('취약점 게이트는 이벤트 기준으로 판정한다 — 무관한 push 가 advisory 공개로 red 가 되지 않게', () => {
+  const gate = jobRunSteps(readCi(), AUDIT_JOB).find((s) =>
+    s.run.includes('audit-lockfile-advisories.mjs'),
+  );
+  assert.ok(gate, '취약점 감사 스텝이 없다');
+  assert.match(gate.run, new RegExp(`--base=${BASE_FROM_GITHUB_EVENT}(\\s|$)`));
+});
+
+test('취약점 게이트는 schedule 에서도 돈다 — 기존 의존성의 새 advisory 를 실패로 잡는 유일한 자리', () => {
+  // push · PR 은 그 변경이 들인 버전만 실패시킨다. 이 스텝이 schedule 에서 빠지면 기존
+  // 의존성에 새로 공개된 advisory 는 어디서도 실패로 잡히지 않는다(경고만 남는다).
+  const gate = jobRunSteps(readCi(), AUDIT_JOB).find((s) =>
+    s.run.includes('audit-lockfile-advisories.mjs'),
+  );
+  assert.ok(gate, '취약점 감사 스텝이 없다');
+  assert.ok(runsIndependently(gate), `조건이 바뀌었다: ${gate.if}`);
+  assert.doesNotMatch(gate.if, /schedule/, `schedule 에서 이 스텝이 빠진다: ${gate.if}`);
 });
 
 /** 전체-줄 주석을 걷어낸 ci.yml. 이 저장소의 ci.yml 주석은 전부 전체-줄 형식이다. */

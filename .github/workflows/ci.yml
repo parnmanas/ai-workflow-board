@@ -55,6 +55,10 @@ on:
   # 전체 매트릭스를 통과했으므로 매일 다시 태울 이유가 없다(scripts/audit-cron-
   # coverage.mjs 가 이 두 가지를 가드한다).
   #
+  # push · PR 의 취약점 감사는 그 변경이 lockfile 에 들인 버전만 실패시킨다 — 기존 버전에
+  # 새로 공개된 advisory 가 무관한 커밋을 red 로 만들던 것을 멈추려고(2026-10-22 ~ 11-02
+  # 에만 네 번). 그래서 그런 advisory 를 **실패로** 잡는 곳은 이 cron 하나다.
+  #
   # 주의: GitHub 의 schedule 트리거는 **기본 브랜치에서만** 돈다. 즉 cron 은 main 의
   # lockfile 만 본다 — 배포 브랜치 production.private 는 push 때만 감사된다. 그래서
   # dependency-audit 에 schedule 전용 스텝을 하나 더 뒀다(아래 "배포 브랜치 lockfile
@@ -143,11 +147,12 @@ jobs:
   # 아래 목록은 이 잡의 가드 스텝을 훑는 안내일 뿐이다 — 개수는 적지 않는다.
   # 스텝이 늘 때 숫자만 안 고쳐져 주석이 조용히 틀리는 전례가 있었다(실제 목록은
   # 항상 아래 `steps:` 가 원천이고, 오프라인 가드가 먼저·네트워크 의존 검사가 나중):
-  #   1) 취약점 감사 — lockfile 대비 advisory. moderate 이상이면 실패시킨다.
+  #   1) 취약점 감사 — lockfile 대비 advisory, moderate 이상.
   #      `npm audit` 이 아니라 bulk advisory 엔드포인트를 직접 조회한다
   #      (scripts/audit-lockfile-advisories.mjs, ticket 1019e57d).
-  #      (배포 대상인 main 은 현재 0건이므로 이 문턱은 새로 들어오는 취약점만 잡는다.
-  #       `npm audit fix` 는 금지 — 루트 overrides 를 날린다.)
+  #      push · PR · dispatch 는 **그 변경이 lockfile 에 들인 버전**에 걸린 것만 실패시키고,
+  #      기존 버전에 새로 공개된 advisory 는 경고로 남긴다. 그걸 실패로 잡는 건 schedule 이다.
+  #      (`npm audit fix` 는 금지 — 루트 overrides 를 날린다.)
   #   2) install-script 허용목록 — `npm ci` 가 실행하게 될 서드파티 스크립트 집합이
   #      늘어나면 실패. ci.yml 주석에만 있던 허용목록을 실행 가능한 검사로 만든 것.
   #   3) 액션 SHA 고정 (2026-08-19 감사) — `uses:` 가 가변 태그(@v4)면 실패.
@@ -252,8 +257,17 @@ jobs:
       # 넘어간다. npm 축 하나만 두면 npm 측 장애가 곧 저장소 전체의 병합 차단이다 —
       # 실제로 2026-09-04 npm bulk 는 200초 동안 0바이트를 돌려줬다.
       #
-      # 판정 자체는 그대로 fail-closed 다 — moderate 이상 advisory 가 있으면 실패하고,
-      # **두 출처가 모두** 조회에 실패하면 "확인 못 했다" 를 통과로 바꾸지 않는다.
+      # 판정 자체는 그대로 fail-closed 다 — 실패 대상인 moderate 이상 advisory 가 있으면
+      # 실패하고, **두 출처가 모두** 조회에 실패하면 "확인 못 했다" 를 통과로 바꾸지 않는다.
+      #
+      # 실패 대상은 이벤트마다 다르다(`--base=github-event`). push · PR · dispatch 는 그
+      # 변경이 lockfile 에 들인 name@version(push 는 이전 tip, PR 은 base, dispatch 는
+      # 기본 브랜치 대비)에 걸린 것만 실패시키고, 기존 버전에 새로 공개된 advisory 는
+      # 경고(annotation)로 남긴다. advisory 공개 하나가 의존성을 건드리지 않은 커밋까지
+      # 전부 red 로 만들었기 때문이다 — 그 red 는 아무것도 막지 못하고(직접 push 다)
+      # 엉뚱한 커밋을 지목했다. schedule 은 기준이 없어 lockfile 전체가 실패 대상이다 —
+      # 시간축 advisory 는 거기서 실패로 잡힌다. 기준 lockfile 을 못 구하면 schedule 과
+      # 같은 전체 판정으로 떨어진다(약해지지 않는다). 상세: 스크립트 헤더.
       #
       # 폴백 축에 GITHUB_TOKEN 을 **일부러 넘기지 않는다.** `/advisories` 는 공개
       # 엔드포인트라 비인증으로도 돌고, 이 워크플로는 `pull_request` 에서 PR 이 저작한
@@ -261,9 +275,9 @@ jobs:
       # 두는 셈이다. supply-chain-integrity-guard.test.mjs 의 "ci.yml now references a
       # secret" 단언이 지키는 선이 바로 이것이라 넘지 않는다. 비인증 한도(시간당 60회)에
       # 걸리면 통과가 아니라 fail-closed 로 죽는다.
-      - name: 취약점 감사 (advisory 조회, moderate 이상 실패)
+      - name: 취약점 감사 (advisory 조회 — 이 변경이 들인 moderate 이상 실패, schedule 은 전체)
         if: ${{ !cancelled() }}
-        run: node scripts/audit-lockfile-advisories.mjs --audit-level=moderate
+        run: node scripts/audit-lockfile-advisories.mjs --audit-level=moderate --base=github-event
       # schedule 전용 — cron 은 기본 브랜치(main)에서만 돌므로, 이 스텝이 없으면
       # 배포 브랜치는 "다음 push" 까지 새 advisory 를 한 번도 평가받지 못한다.
       # push/PR 에서는 그 브랜치 자신의 dependency-audit 이 이미 돌므로 불필요.
