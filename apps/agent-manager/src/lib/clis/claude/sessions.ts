@@ -12,9 +12,11 @@ import {
   type HistoryEvent,
   isRecord,
   isSyntheticPrompt,
+  latestRecordFields,
   parseLines,
   readChunk,
   readJsonlRecords,
+  recordString,
   SESSION_ID_RE,
   statJsonlFiles,
   TAIL_BYTES,
@@ -23,7 +25,7 @@ import {
   truncate,
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, addSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
-import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+import type { CliSessionRecordSettings, CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
 
 /**
  * claude 기록의 `message.usage` → 공용 계약.
@@ -131,6 +133,28 @@ async function claudeMeta(path: string, size: number): Promise<{ sessionId: stri
   return { sessionId, cwd, title: cleanTitle(customTitle || firstPrompt), createdAt };
 }
 
+/**
+ * 레코드 하나에 실린 실행 설정. 모델은 API 가 답한 `message.model` 이 먼저다(backend profile 이면
+ * 고른 이름과 다르다) — 오류 같은 합성 답은 `<synthetic>` 이라 고른 `requestedModel` 로 떨어진다.
+ * 권한 모드는 사용자 레코드에, effort 는 assistant 레코드에 실린다.
+ */
+function claudeSettingsOf(rec: Record<string, any>): Partial<CliSessionRecordSettings> | null {
+  if (rec.isSidechain) return null;
+  const out: Partial<CliSessionRecordSettings> = {
+    mode: recordString(rec.permissionMode),
+    cli_version: recordString(rec.version),
+    git_branch: recordString(rec.gitBranch),
+    client: recordString(rec.entrypoint),
+    last_record_at: recordString(rec.timestamp),
+  };
+  if (rec.type === 'assistant') {
+    const answered = isRecord(rec.message) ? recordString(rec.message.model) : undefined;
+    out.model = answered && answered !== '<synthetic>' ? answered : recordString(rec.requestedModel);
+    out.effort = recordString(rec.effort) ?? recordString(rec.perTurnEffort);
+  }
+  return out;
+}
+
 async function findSessionFile(ctx: CliSessionStoreContext, sessionId: string): Promise<string | null> {
   const projectsDir = join(ctx.home, 'projects');
   let dirs: string[];
@@ -219,6 +243,27 @@ export const claudeSessionStore: CliSessionStoreDriver = {
       });
     }
     return out;
+  },
+
+  async readSessionInfo(ctx, sessionId) {
+    const path = await findSessionFile(ctx, sessionId);
+    if (!path) return null;
+    const st = await stat(path);
+    const meta = await claudeMeta(path, st.size);
+    if (!meta) return null;
+    return {
+      summary: {
+        cli: 'claude',
+        session_id: meta.sessionId,
+        cwd: meta.cwd,
+        title: meta.title,
+        created_at: meta.createdAt,
+        updated_at: new Date(st.mtimeMs).toISOString(),
+        source: 'cli',
+        size_bytes: st.size,
+      },
+      settings: await latestRecordFields<CliSessionRecordSettings>(path, st.size, ['model', 'mode'], claudeSettingsOf),
+    };
   },
 
   async readHistory(ctx, sessionId) {

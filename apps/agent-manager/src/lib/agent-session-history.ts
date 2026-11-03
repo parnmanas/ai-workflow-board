@@ -144,6 +144,63 @@ export async function* readJsonlRecords(path: string): AsyncGenerator<Record<str
   }
 }
 
+/** 실행 설정을 찾을 때 한 번에 읽는 조각 — 한 줄짜리 큰 tool 출력 몇 개가 64KiB 꼬리를 다 채우기도 한다. */
+export const SETTINGS_CHUNK_BYTES = 1024 * 1024;
+/** 끝에서부터 이만큼까지만 읽는다 — 그 앞에만 있는 칸은 "기록에 없음" 으로 둔다. */
+export const SETTINGS_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * 레코드마다 `pick` 이 돌려준 칸을 모아 **칸마다 가장 나중 값**을 만든다. 파일 끝에서부터 조각씩 거꾸로 읽고,
+ * `required` 칸을 다 채우면 멈춘다. claude 의 권한 모드처럼 사람이 쓴 프롬프트에만 실리는 칸은 긴 tool 출력 뒤로
+ * 한참 앞에 있을 수 있어서 꼬리 하나로는 모자란다. 조각은 줄바꿈(0x0A) 에서만 자르므로 UTF-8 문자가 갈리지 않는다.
+ */
+export async function latestRecordFields<T extends object>(
+  path: string,
+  size: number,
+  required: ReadonlyArray<keyof T>,
+  pick: (rec: Record<string, any>) => Partial<T> | null,
+): Promise<Partial<T>> {
+  const out: Partial<T> = {};
+  const fh = await open(path, 'r');
+  try {
+    let end = size;
+    // 앞 조각과 이어 붙일, 이미 읽은 조각의 첫 (잘린) 줄.
+    let carry = Buffer.alloc(0);
+    while (end > 0 && size - end < SETTINGS_SCAN_MAX_BYTES) {
+      const len = Math.min(end, SETTINGS_CHUNK_BYTES);
+      const start = end - len;
+      const buf = Buffer.alloc(len);
+      const { bytesRead } = await fh.read(buf, 0, len, start);
+      let block = Buffer.concat([buf.subarray(0, bytesRead), carry]);
+      if (start > 0) {
+        const firstNewline = block.indexOf(0x0a);
+        carry = firstNewline === -1 ? block : block.subarray(0, firstNewline);
+        block = firstNewline === -1 ? Buffer.alloc(0) : block.subarray(firstNewline + 1);
+      } else {
+        carry = Buffer.alloc(0);
+      }
+      const records = parseLines(block.toString('utf8'));
+      for (let i = records.length - 1; i >= 0; i -= 1) {
+        const fields = pick(records[i]);
+        if (!fields) continue;
+        for (const [key, value] of Object.entries(fields) as Array<[keyof T, T[keyof T]]>) {
+          if (value !== undefined && out[key] === undefined) out[key] = value;
+        }
+      }
+      if (required.every((key) => out[key] !== undefined)) break;
+      end = start;
+    }
+  } finally {
+    await fh.close();
+  }
+  return out;
+}
+
+/** 기록의 문자열 칸 — 비었거나 문자열이 아니면 없음. */
+export function recordString(value: unknown, max = 200): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
 /**
  * 이벤트 payload 를 크기 안으로 접는다. 문자열은 자르고, 배열·객체는 개수를 제한한다.
  * (러너의 boundedValue 와 같은 규칙 — 그쪽은 라이브 스트림, 이쪽은 CLI 홈 기록이다.)

@@ -75,7 +75,7 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
+  op: 'list' | 'history' | 'info' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -726,6 +726,21 @@ export class AgentSessionRunner {
           const sessions = await this.#store.listSessions(cli);
           const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
           await this.#reply(requestId, op, { ok: true, result: { sessions: withLive } });
+          return;
+        }
+        case 'info': {
+          // 세션을 고를 때 묻는 가벼운 조회 — 기록의 머리·꼬리만 읽고 프로세스를 띄우지 않는다.
+          if (!sessionId) throw Object.assign(new Error('session_id is required'), { code: 'not_found' });
+          const info = await this.#store.readSessionInfo(cli, sessionId);
+          const live = this.#live.get(this.#key(cli, sessionId));
+          if (!info.session && !live) {
+            await this.#reply(requestId, op, { ok: false, error: 'Session not found on this Runtime Host.', code: 'not_found' });
+            return;
+          }
+          await this.#reply(requestId, op, {
+            ok: true,
+            result: { session: info.session ?? (live ? this.#summaryOf(live) : null), settings: info.settings, live: live ? this.#stateOf(live) : null },
+          });
           return;
         }
         case 'usage_limits': {

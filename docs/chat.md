@@ -37,13 +37,20 @@ For a **specific existing native CLI session**, use `send_session_message`:
 ```
 
 This MCP tool keeps the recipient's existing conversation context. The sender
-must be an AWB native Agent Session with a full-scope Host key, and both sessions
-must belong to the same Account and have been opened in AWB. If the same ID
-matches more than one session, specify `manager_id` (Runtime Host UUID) and
-`cli` as well. Native session IDs differ from MCP transport IDs and `rt-…` keys.
-The target Host must have a live delivery connection. A closed session is resumed
-through the existing native prompt path; while busy, its CLI receives steering
-or queues the message until the current turn ends, depending on adapter support.
+must be an AWB native Agent Session with a full-scope Host key. The recipient can
+be any session on the same Account's connected Runtime Hosts — including one only
+ever used from a terminal. If it is not running, AWB opens it first (the same open
+as the session screen) and waits up to 30 seconds: an open failure returns the
+Host's error code and reason, and a slower open returns `open_timeout`; in both
+cases nothing is sent. A successful send after opening reports `opened: true`.
+If the same ID matches more than one session, specify `manager_id` (Runtime Host
+UUID) and `cli` as well. Native session IDs differ from MCP transport IDs and `rt-…` keys.
+To find the address, use `list_session_hosts`, `list_session_folders`,
+`list_sessions` (filter by Host, CLI, folder, text or recency) and
+`get_session_info` (created/last used, CLI, model, effort, mode) — see
+docs/agent-sessions.md "MCP에서 세션 찾기". The target Host must have a live
+delivery connection. While busy, the recipient's CLI receives steering or
+queues the message until the current turn ends, depending on adapter support.
 
 The recipient sees `[AWB session message]`, the authenticated sender's full
 session address, and instructions for replying with the same tool. The message

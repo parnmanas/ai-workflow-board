@@ -67,6 +67,7 @@ import { OperatorDecisionService } from '../voice/operator-decision.service';
 import { OperatorProposalService } from '../voice/operator-proposal.service';
 import { SessionOpenService } from '../agent-sessions/session-open.service';
 import { SessionMessagesService } from '../agent-sessions/session-messages.service';
+import { SessionDirectoryService } from '../agent-sessions/session-directory.service';
 import { InterruptedSessionsService } from '../voice/interrupted-sessions.service';
 
 // Module-level log reference, set from McpController.onModuleInit
@@ -192,6 +193,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     private readonly interruptedSessionsService: InterruptedSessionsService,
     private readonly sessionMessagesService: SessionMessagesService,
     private readonly sessionOpenService: SessionOpenService,
+    private readonly sessionDirectoryService: SessionDirectoryService,
     // Shared lifecycle services keep REST and MCP ownership/review checks aligned.
     private readonly businessMailService: BusinessMailService,
     private readonly businessWorkflowService: BusinessWorkflowService,
@@ -312,6 +314,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       operatorProposalService: this.operatorProposalService,
       sessionMessagesService: this.sessionMessagesService,
       sessionOpenService: this.sessionOpenService,
+      sessionDirectoryService: this.sessionDirectoryService,
       interruptedSessionsService: this.interruptedSessionsService,
       businessMailService: this.businessMailService,
       businessWorkflowService: this.businessWorkflowService,

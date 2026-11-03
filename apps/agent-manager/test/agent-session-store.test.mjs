@@ -474,3 +474,46 @@ test('codex policy records do not become the title or visible prompts', async (t
   assert.equal(history.session.title, 'Original task');
   assert.deepEqual(history.events.filter((e) => e.type === 'user_prompt').map((e) => e.payload.text), ['Original task']);
 });
+
+test('session info: the newest recorded model, effort and mode per field, read from the end of the record', async (t) => {
+  const home = await seedHome(t);
+  const projectDir = join(home.claudeHome, 'projects', '-tmp-work-repo');
+  const id = 'cccccccc-0000-4000-8000-000000000000';
+  const filler = 'x'.repeat(300 * 1024);
+  // 권한 모드는 사람이 쓴 프롬프트에만 실린다 — 큰 tool 출력 뒤로 1MiB 조각보다 앞에 있어도 찾아야 한다.
+  await writeFile(join(projectDir, `${id}.jsonl`), jsonl([
+    { type: 'user', sessionId: id, cwd: '/tmp/work/repo', timestamp: '2026-10-01T00:00:00.000Z', permissionMode: 'plan', version: '2.1.1', message: { role: 'user', content: 'Plan the migration' } },
+    { type: 'assistant', sessionId: id, timestamp: '2026-10-01T00:00:01.000Z', requestedModel: 'sonnet', effort: 'low', message: { role: 'assistant', model: 'claude-sonnet-5-5', content: [{ type: 'text', text: 'first' }] } },
+    { type: 'user', sessionId: id, cwd: '/tmp/work/repo', timestamp: '2026-10-01T00:00:02.000Z', permissionMode: 'bypassPermissions', gitBranch: 'feat/x', message: { role: 'user', content: 'Go ahead' } },
+    ...Array.from({ length: 5 }, (_, i) => ({ type: 'user', sessionId: id, timestamp: `2026-10-01T00:00:0${3 + i}.000Z`, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: filler }] } })),
+    { type: 'assistant', sessionId: id, timestamp: '2026-10-01T00:01:00.000Z', requestedModel: 'opus', effort: 'xhigh', version: '2.1.9', entrypoint: 'sdk-ts', message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'done' }] } },
+    { type: 'assistant', sessionId: id, timestamp: '2026-10-01T00:01:01.000Z', requestedModel: 'opus', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'API Error' }] } },
+    { type: 'assistant', isSidechain: true, sessionId: id, timestamp: '2026-10-01T00:01:02.000Z', requestedModel: 'haiku', message: { role: 'assistant', model: 'claude-haiku-5-5', content: [] } },
+  ]));
+  const store = new AgentSessionStore(home);
+  const claude = await store.readSessionInfo('claude', id);
+  assert.equal(claude.session.title, 'Plan the migration');
+  assert.equal(claude.session.cwd, '/tmp/work/repo');
+  assert.equal(claude.session.created_at, '2026-10-01T00:00:00.000Z');
+  assert.deepEqual(claude.settings, {
+    model: 'opus', effort: 'xhigh', mode: 'bypassPermissions', cli_version: '2.1.9', git_branch: 'feat/x', client: 'sdk-ts',
+    last_record_at: '2026-10-01T00:01:01.000Z',
+  }, 'a synthetic answer falls back to the requested model; subagent records are ignored');
+
+  await writeFile(join(home.codexHome, 'sessions', '2026', '09', '17', `rollout-2026-09-17T10-00-00-${CODEX_ID}.jsonl`), jsonl([
+    { timestamp: '2026-09-17T00:00:00.000Z', type: 'session_meta', payload: { id: CODEX_ID, timestamp: '2026-09-17T00:00:00.000Z', cwd: '/tmp/work/codex', originator: 'codex_cli_rs', cli_version: '0.165.0', git: { branch: 'main' } } },
+    { timestamp: '2026-09-17T00:00:01.000Z', type: 'turn_context', payload: { model: 'gpt-old', effort: 'low', approval_policy: 'on-request', sandbox_policy: { type: 'workspace-write' } } },
+    { timestamp: '2026-09-17T00:00:02.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Review the diff' }] } },
+    { timestamp: '2026-09-17T00:00:03.000Z', type: 'turn_context', payload: { model: 'gpt-new', approval_policy: 'never', sandbox_policy: { type: 'danger-full-access' }, collaboration_mode: { mode: 'plan', settings: { reasoning_effort: 'max' } } } },
+    { timestamp: '2026-09-17T00:00:04.000Z', type: 'event_msg', payload: { type: 'task_complete' } },
+  ]));
+  const codex = await store.readSessionInfo('codex', CODEX_ID);
+  assert.equal(codex.session.title, 'Review the diff');
+  assert.deepEqual(codex.settings, {
+    model: 'gpt-new', effort: 'max', mode: 'never', sandbox: 'danger-full-access', collaboration_mode: 'plan',
+    cli_version: '0.165.0', git_branch: 'main', client: 'codex_cli_rs', last_record_at: '2026-09-17T00:00:04.000Z',
+  });
+
+  assert.deepEqual(await store.readSessionInfo('claude', 'dddddddd-0000-4000-8000-000000000000'), { session: null, settings: null });
+  assert.deepEqual(await store.readSessionInfo('claude', '../escape'), { session: null, settings: null });
+});

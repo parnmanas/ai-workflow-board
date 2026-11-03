@@ -71,7 +71,10 @@ export const AGENT_SESSION_REQUEST_OPS = [
   'list',        // RPC: 이 CLI 의 장비 내 세션 목록
   'usage_limits', // RPC: latest native quota only; no transcript or CLI process changes
   'history',     // RPC: 세션 기록(CLI 홈의 파일을 트랜스크립트 이벤트로 변환)
-  'open',        // RPC: 세션을 연다(session_id 없으면 session/new, 있으면 session/load)
+  // RPC: 세션 하나의 요약 + 기록에 남은 실행 설정(모델·effort·모드 …) + 살아 있으면 그 상태.
+  // 트랜스크립트를 만들지 않는다 — MCP 가 세션을 고를 때 쓰는 가벼운 조회(docs/agent-sessions.md "MCP에서 세션 찾기").
+  'info',
+  'open',       // RPC: 세션을 연다(session_id 없으면 session/new, 있으면 session/load)
   'prompt',      // { turn_id, text } — 살아 있지 않으면 매니저가 먼저 연다
   'permission',  // { permission_request_id, option_id | null }
   'elicitation', // { elicitation_id, elicitation_action: 'accept'|'decline'|'cancel', elicitation_content? } — 질문/폼 답
@@ -191,6 +194,28 @@ export interface AgentSessionSummary {
   /** 매니저에 살아 있는 프로세스가 있을 때의 상태(list RPC 가 세션마다 실어 보낸다). 없으면 프로세스 없음. */
   live_status?: AgentSessionStatus | string;
 }
+
+/**
+ * 매니저가 세션 기록에서 읽은 실행 설정(`info` RPC) — 칸마다 마지막으로 기록된 CLI 원문 값.
+ * agent-manager `CliSessionRecordSettings` 와 같은 모양이다(공동 contract).
+ */
+export interface AgentSessionRecordSettings {
+  model?: string;
+  effort?: string;
+  /** 권한·승인 모드(claude `permissionMode`, codex `approval_policy`). */
+  mode?: string;
+  sandbox?: string;
+  collaboration_mode?: string;
+  cli_version?: string;
+  git_branch?: string;
+  /** 기록을 남긴 클라이언트(claude `entrypoint`, codex `originator`). */
+  client?: string;
+  last_record_at?: string;
+}
+
+export const AGENT_SESSION_RECORD_SETTING_KEYS = [
+  'model', 'effort', 'mode', 'sandbox', 'collaboration_mode', 'cli_version', 'git_branch', 'client', 'last_record_at',
+] as const satisfies ReadonlyArray<keyof AgentSessionRecordSettings>;
 
 export interface AgentSessionEventRecord {
   id: string;

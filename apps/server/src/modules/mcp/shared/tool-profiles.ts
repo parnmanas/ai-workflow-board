@@ -87,6 +87,11 @@ export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'send_chat_room_message',
   'send_session_message',
   'open_session',
+  // 세션 주소를 찾는 도구 — 이것 없이는 send_session_message 에 넘길 주소를 사람이 알려 줘야 한다.
+  'list_session_hosts',
+  'list_session_folders',
+  'list_sessions',
+  'get_session_info',
   // work order 의 Knowledge 섹션은 skill 목차만 싣고 본문은 이 도구로 읽으라고 한다
   // (docs/skills.md "Knowledge") — 없으면 compact 런은 배정된 skill 을 못 읽는다.
   'get_skill',

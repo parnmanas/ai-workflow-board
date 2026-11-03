@@ -27,7 +27,7 @@ import {
   isRecord,
   SESSION_ID_RE,
 } from './agent-session-history.js';
-import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionWatcher } from './clis/cli-module.js';
+import type { CliSessionInfoRead, CliSessionRecordSettings, CliSessionStoreContext, CliSessionStoreDriver, CliSessionWatcher } from './clis/cli-module.js';
 import type { SessionUsage } from './session-usage.js';
 import type { SessionUsageLimits } from './session-usage-limits.js';
 import { cliSessions } from './clis/index.js';
@@ -406,6 +406,33 @@ export class AgentSessionStore {
     } catch {
       return null; // Diagnostics must never replace the original failure.
     }
+  }
+
+  /**
+   * 세션 하나의 요약 + 기록에 남은 실행 설정(모델·effort·모드 …). 트랜스크립트를 만들지 않는다 —
+   * MCP 가 세션을 고를 때 묻는 가벼운 조회다. 기록을 못 읽는 CLI 는 AWB 인덱스만으로 답하고 설정은 null.
+   */
+  async readSessionInfo(cli: string, sessionId: string): Promise<{ session: SessionSummary | null; settings: CliSessionRecordSettings | null }> {
+    if (!SESSION_ID_RE.test(sessionId)) return { session: null, settings: null };
+    const indexEntry = (await this.#readIndex()).find((e) => e.cli === cli && e.session_id === sessionId) ?? null;
+    const fromIndex: SessionSummary | null = indexEntry
+      ? { cli, session_id: sessionId, cwd: indexEntry.cwd, title: indexEntry.title, created_at: indexEntry.created_at, updated_at: indexEntry.updated_at, source: 'awb' }
+      : null;
+    const bound = this.#driverFor(cli);
+    let read: CliSessionInfoRead | null = null;
+    try {
+      read = bound?.driver.readSessionInfo ? await bound.driver.readSessionInfo(bound.ctx, sessionId) : null;
+    } catch {
+      read = null;
+    }
+    if (!read) return { session: fromIndex, settings: null };
+    return {
+      // listSessions 와 같은 합치기 — AWB 가 만든 세션은 인덱스 제목(사용자 지정)이 이긴다.
+      session: indexEntry
+        ? { ...read.summary, cli, source: 'awb', title: indexEntry.title || read.summary.title }
+        : { ...read.summary, cli },
+      settings: read.settings,
+    };
   }
 
   async readHistory(cli: string, sessionId: string): Promise<HistoryResult> {

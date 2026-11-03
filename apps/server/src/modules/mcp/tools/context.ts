@@ -90,6 +90,7 @@ import type { OperatorProposalService } from '../../voice/operator-proposal.serv
 import type { InterruptedSessionsService } from '../../voice/interrupted-sessions.service';
 import type { SessionOpenService } from '../../agent-sessions/session-open.service';
 import type { SessionMessagesService } from '../../agent-sessions/session-messages.service';
+import type { SessionDirectoryService } from '../../agent-sessions/session-directory.service';
 
 /**
  * Minimal surface that MCP tools need from the logging subsystem.
@@ -251,6 +252,7 @@ export interface ToolContext {
   interruptedSessionsService?: InterruptedSessionsService;
   sessionMessagesService?: SessionMessagesService;
   sessionOpenService?: SessionOpenService;
+  sessionDirectoryService?: SessionDirectoryService;
   // Marketing(docs/marketing.md) — 캠페인 에이전트의 MCP 표면(marketing-tools.ts). 사이클 · 승인 · 외부 발신이
   // NestJS 프로세스의 서비스에 있으므로 standalone context 에는 없다 — 도구가 그 사유로 거절한다.
   businessMailService?: BusinessMailService;

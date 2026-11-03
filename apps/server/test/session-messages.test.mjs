@@ -6,6 +6,7 @@ import { McpClient } from './helpers/mcp-client.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { AgentSessionsService } from '../dist/modules/agent-sessions/agent-sessions.service.js';
 import { OperatorReportService } from '../dist/modules/voice/operator-report.service.js';
+import { SessionMessagesService } from '../dist/modules/agent-sessions/session-messages.service.js';
 
 test('native session DMs route by session ID with account isolation and no human approval powers', async (t) => {
   const { app, port, modules } = await bootApp({ port: 0 });
@@ -73,6 +74,36 @@ test('native session DMs route by session ID with account isolation and no human
   const onRequest = (p) => requests.push(p);
   activityEvents.on('agent_session_request', onRequest);
   t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+  // 매니저 쪽 — Host 에 있는 세션 목록(AWB 에서 연 적 없는 것 포함)과 open 의 결과.
+  const keys = new Map([first, second, foreignHost].map((h) => [h.id, h.key]));
+  const onHost = {
+    [first.id]: { codex: ['native-sender'], claude: [] },
+    [second.id]: { codex: ['native-recipient', 'closed-native', 'terminal-only', 'locked-native', 'slow-native'], claude: ['operator-recipient'] },
+  };
+  const rpcErrors = [];
+  const respond = (p) => {
+    if (!p.request_id || !keys.has(p.manager_id)) return;
+    const ids = onHost[p.manager_id]?.[p.cli] ?? [];
+    let reply;
+    if (p.op === 'list') {
+      reply = { ok: true, result: { sessions: ids.map((id) => ({ session_id: id, cwd: '/repo', title: id, created_at: null, updated_at: new Date().toISOString(), source: 'cli' })) } };
+    } else if (p.op === 'info') {
+      reply = ids.includes(p.session_id)
+        ? { ok: true, result: { session: { session_id: p.session_id, cwd: '/repo', title: p.session_id, updated_at: new Date().toISOString() }, settings: null, live: null } }
+        : { ok: false, code: 'not_found', error: 'Session not found on this Runtime Host.' };
+    } else if (p.op === 'open') {
+      if (p.session_id === 'slow-native') return;
+      reply = p.session_id === 'locked-native'
+        ? { ok: false, code: 'resume_locked_external', error: 'Codex app (pid 4321) holds this session.' }
+        : { ok: true, result: { session_id: p.session_id, cwd: '/repo', title: p.session_id, status: 'ready' } };
+    } else return;
+    void fetch(`${base}/api/agent/sessions/rpc/${p.request_id}`, {
+      method: 'POST', headers: { 'X-Agent-Key': keys.get(p.manager_id), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manager_id: p.manager_id, ...reply }),
+    }).then(async (r) => { if (!r.ok) throw new Error(await r.text()); }).catch((e) => rpcErrors.push(e));
+  };
+  activityEvents.on('agent_session_request', respond);
+  t.after(() => activityEvents.removeListener('agent_session_request', respond));
   const send = (client, ref, content = 'Please check the result.') => client.callTool('send_session_message', { ...ref, content });
   const error = (result, code) => {
     assert.equal(result?.isError, true, JSON.stringify(result));
@@ -122,13 +153,64 @@ test('native session DMs route by session ID with account isolation and no human
     assert.equal(requests.at(-1).driver_user_id, owner.id);
   });
 
-  await t.test('closed sessions retain execution settings when resumed', async () => {
+  await t.test('closed sessions are opened with their pinned settings, then messaged', async () => {
     const closed = await native(second, 'closed-native');
     await ds.getRepository('AgentSessionExecution').update(closed, { config_defaults: JSON.stringify({ model: 'pinned-model' }) });
     sessions.applyState(second.id, closed.cli, closed.session_id, { status: 'closed' });
-    assert.equal((await send(sender, closed)).status, 'submitted');
+    const before = requests.length;
+    const result = await send(sender, closed);
+    assert.equal(result.status, 'submitted', JSON.stringify(result));
+    assert.equal(result.opened, true);
+    assert.deepEqual(requests.slice(before).map((r) => r.op), ['open', 'prompt']);
+    assert.equal(requests.at(-2).config_defaults.model, 'pinned-model');
     assert.equal(requests.at(-1).config_defaults.model, 'pinned-model');
     assert.equal(requests.at(-1).session_id, closed.session_id);
+  });
+
+  await t.test('a session never opened in AWB is found on its Host, opened, then messaged', async () => {
+    const before = requests.length;
+    const result = await send(sender, { session_id: 'terminal-only' }, '이 세션에서 이어서 확인해 줘.');
+    assert.equal(result.status, 'submitted', JSON.stringify(result));
+    assert.equal(result.opened, true);
+    assert.deepEqual(result.to, { manager_id: second.id, cli: 'codex', session_id: 'terminal-only' });
+    const sent = requests.slice(before);
+    assert.ok(sent.filter((r) => r.op !== 'list').every((r) => r.manager_id === second.id && r.session_id === 'terminal-only'));
+    assert.deepEqual(sent.filter((r) => r.op !== 'list').map((r) => r.op), ['open', 'prompt']);
+    assert.equal(sent.find((r) => r.op === 'open').driver_user_id, owner.id);
+    const pinned = await ds.getRepository('AgentSessionExecution').findOneBy({ manager_id: second.id, cli: 'codex', session_id: 'terminal-only' });
+    assert.equal(pinned.account_id, account.id);
+    // 열린 뒤에는 다시 열지 않는다.
+    const again = await send(sender, { session_id: 'terminal-only' });
+    assert.equal(again.opened, undefined);
+    assert.equal(requests.at(-1).op, 'prompt');
+  });
+
+  await t.test('an open failure returns the Host\'s reason and sends nothing', async () => {
+    const before = requests.length;
+    const result = await send(sender, { manager_id: second.id, cli: 'codex', session_id: 'locked-native' });
+    error(result, 'resume_locked_external');
+    assert.match(result.error.error, /Opening the target session failed: Codex app \(pid 4321\)/);
+    assert.ok(!requests.slice(before).some((r) => r.op === 'prompt'));
+  });
+
+  await t.test('a Host that does not finish opening in time gets open_timeout and no message', async () => {
+    const messages = app.get(SessionMessagesService);
+    messages.openWaitMs = 300;
+    try {
+      const before = requests.length;
+      error(await send(sender, { session_id: 'slow-native' }), 'open_timeout');
+      assert.ok(requests.slice(before).some((r) => r.op === 'open' && r.session_id === 'slow-native'));
+      assert.ok(!requests.slice(before).some((r) => r.op === 'prompt'));
+    } finally {
+      messages.openWaitMs = 30_000;
+    }
+  });
+
+  await t.test('an unknown ID on a known Host is checked before anything is pinned or opened', async () => {
+    const before = requests.length;
+    error(await send(sender, { manager_id: second.id, cli: 'codex', session_id: 'ghost' }), 'session_not_found');
+    assert.deepEqual(requests.slice(before).map((r) => r.op), ['info']);
+    assert.equal(await ds.getRepository('AgentSessionExecution').findOneBy({ manager_id: second.id, session_id: 'ghost' }), null);
   });
 
   await t.test('unknown, foreign, self and duplicate IDs are not guessed', async () => {
@@ -136,7 +218,7 @@ test('native session DMs route by session ID with account isolation and no human
     error(await send(sender, { session_id: 'unknown' }), 'session_not_found');
     error(await send(sender, outsider), 'session_not_found');
     error(await send(sender, from), 'self_message');
-    assert.equal(requests.length, before);
+    assert.deepEqual(requests.slice(before).filter((r) => r.op !== 'list'), [], 'only Host lists are read; nothing is opened or prompted');
     await native(first, to.session_id, 'claude');
     error(await send(sender, { session_id: to.session_id }), 'session_ambiguous');
     assert.equal((await send(sender, to)).status, 'submitted');
@@ -228,4 +310,5 @@ test('native session DMs route by session ID with account isolation and no human
     error(await send(sender, to), 'host_unreachable');
     assert.equal(requests.length, before);
   });
+  assert.deepEqual(rpcErrors, []);
 });

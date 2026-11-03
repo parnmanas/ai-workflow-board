@@ -14,9 +14,11 @@ import {
   type HistoryEvent,
   isRecord,
   isSyntheticPrompt,
+  latestRecordFields,
   parseLines,
   readChunk,
   readJsonlRecords,
+  recordString,
   SESSION_ID_RE,
   statJsonlFiles,
   TAIL_BYTES,
@@ -26,7 +28,7 @@ import {
   walkJsonl,
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
-import type { CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
+import type { CliSessionRecordSettings, CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
 import { watchCodexAsyncQuestions } from './async-questions.js';
 
 /**
@@ -86,13 +88,23 @@ export function codexToolKind(name: string): string {
   return 'other';
 }
 
-async function codexMeta(path: string, size: number): Promise<{ sessionId: string; cwd: string; title: string; createdAt: string | null } | null> {
+interface CodexMeta {
+  sessionId: string;
+  cwd: string;
+  title: string;
+  createdAt: string | null;
+  /** 머리의 `session_meta` 에만 있는 실행 정보 — 꼬리를 읽는 설정 조회가 보탠다. */
+  settings: Pick<CliSessionRecordSettings, 'cli_version' | 'git_branch' | 'client'>;
+}
+
+async function codexMeta(path: string, size: number): Promise<CodexMeta | null> {
   const headLen = Math.min(size, HEAD_BYTES);
   const head = parseLines(await readChunk(path, 0, headLen), false, size > headLen);
   let sessionId = '';
   let cwd = '';
   let createdAt: string | null = null;
   let firstPrompt = '';
+  let settings: CodexMeta['settings'] = {};
   for (const rec of head) {
     const payload = isRecord(rec.payload) ? rec.payload : {};
     if (rec.type === 'session_meta') {
@@ -102,6 +114,11 @@ async function codexMeta(path: string, size: number): Promise<{ sessionId: strin
       sessionId = typeof payload.id === 'string' ? payload.id : sessionId;
       cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
       createdAt = typeof payload.timestamp === 'string' ? payload.timestamp : createdAt;
+      settings = {
+        cli_version: recordString(payload.cli_version),
+        git_branch: isRecord(payload.git) ? recordString(payload.git.branch) : undefined,
+        client: recordString(payload.originator),
+      };
     } else if (!firstPrompt && rec.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
       const text = payload.role === 'user' ? stripDirectWorkPolicy(textOfBlocks(payload.content)) : textOfBlocks(payload.content);
       if (text && !isSyntheticPrompt(text)) firstPrompt = text;
@@ -116,7 +133,25 @@ async function codexMeta(path: string, size: number): Promise<{ sessionId: strin
   }
   if (!SESSION_ID_RE.test(sessionId) || !cwd) return null;
   if (!firstPrompt) return null;
-  return { sessionId, cwd, title: cleanTitle(firstPrompt), createdAt };
+  return { sessionId, cwd, title: cleanTitle(firstPrompt), createdAt, settings };
+}
+
+/** `turn_context` 는 턴마다 그 턴의 모델·effort·승인 정책을 남긴다 — 마지막 것이 세션이 마지막으로 돈 설정이다. */
+function codexSettingsOf(rec: Record<string, any>): Partial<CliSessionRecordSettings> | null {
+  const at = recordString(rec.timestamp);
+  const payload = isRecord(rec.payload) ? rec.payload : null;
+  if (rec.type !== 'turn_context' || !payload) return at ? { last_record_at: at } : null;
+  const collaboration = isRecord(payload.collaboration_mode) ? payload.collaboration_mode : {};
+  const collaborationSettings = isRecord(collaboration.settings) ? collaboration.settings : {};
+  const sandbox = isRecord(payload.sandbox_policy) ? payload.sandbox_policy.type : payload.sandbox_policy;
+  return {
+    model: recordString(payload.model) ?? recordString(collaborationSettings.model),
+    effort: recordString(payload.effort) ?? recordString(collaborationSettings.reasoning_effort),
+    mode: recordString(payload.approval_policy),
+    sandbox: recordString(sandbox),
+    collaboration_mode: recordString(collaboration.mode),
+    last_record_at: at,
+  };
 }
 
 async function findSessionFile(ctx: CliSessionStoreContext, sessionId: string): Promise<string | null> {
@@ -182,6 +217,32 @@ export const codexSessionStore: CliSessionStoreDriver = {
       });
     }
     return out;
+  },
+
+  async readSessionInfo(ctx, sessionId) {
+    const path = await findSessionFile(ctx, sessionId);
+    if (!path) return null;
+    const st = await stat(path);
+    const meta = await codexMeta(path, st.size);
+    if (!meta) return null;
+    const recorded = await latestRecordFields<CliSessionRecordSettings>(path, st.size, ['model'], codexSettingsOf);
+    const settings: CliSessionRecordSettings = { ...recorded };
+    for (const [key, value] of Object.entries(meta.settings) as Array<[keyof CodexMeta['settings'], string | undefined]>) {
+      if (value !== undefined) settings[key] = value;
+    }
+    return {
+      summary: {
+        cli: 'codex',
+        session_id: meta.sessionId,
+        cwd: meta.cwd,
+        title: meta.title,
+        created_at: meta.createdAt,
+        updated_at: new Date(st.mtimeMs).toISOString(),
+        source: 'cli',
+        size_bytes: st.size,
+      },
+      settings,
+    };
   },
 
   async readHistory(ctx, sessionId) {

@@ -23,6 +23,7 @@ import { BusinessModule } from '../business/business.module';
 import { MarketingModule } from '../marketing/marketing.module';
 import { SessionOpenService } from '../agent-sessions/session-open.service';
 import { SessionMessagesService } from '../agent-sessions/session-messages.service';
+import { SessionDirectoryService } from '../agent-sessions/session-directory.service';
 
 @Module({
   imports: [
@@ -67,6 +68,6 @@ import { SessionMessagesService } from '../agent-sessions/session-messages.servi
     BusinessModule,
   ],
   controllers: [McpController],
-  providers: [SessionMessagesService, SessionOpenService],
+  providers: [SessionMessagesService, SessionOpenService, SessionDirectoryService],
 })
 export class McpModule {}

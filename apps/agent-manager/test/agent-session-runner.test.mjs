@@ -1640,3 +1640,22 @@ test('usage limit RPC reads native quota without loading history or starting a C
   await runner.handle(request('usage_limits', { cli: 'claude', request_id: 'focus-unsupported', session_id: sid }));
   assert.deepEqual(server.rpc('focus-unsupported').result.events, []);
 });
+
+test('info RPC reads one session\'s recorded settings without loading history or starting a CLI', async (t) => {
+  const { root, server, runner, store } = await harness(t, { commandResolver: async () => { throw new Error('must not start a CLI'); } });
+  store.readHistory = async () => { throw new Error('must not load history'); };
+  await appendFile(join(root, 'claude', 'projects', '-work', `${CLAUDE_ID}.jsonl`), JSON.stringify({
+    type: 'assistant', uuid: 'a2', sessionId: CLAUDE_ID, timestamp: '2026-09-17T00:00:02.000Z', version: '2.1.300',
+    requestedModel: 'opus', effort: 'high', message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'ok' }] },
+  }) + '\n');
+  await runner.handle(request('info', { request_id: 'info-1', session_id: CLAUDE_ID }));
+  const response = server.rpc('info-1');
+  assert.equal(response.ok, true);
+  assert.equal(response.result.session.session_id, CLAUDE_ID);
+  assert.equal(response.result.session.title, 'existing prompt');
+  assert.deepEqual([response.result.settings.model, response.result.settings.effort, response.result.settings.cli_version], ['claude-opus-5-5', 'high', '2.1.300']);
+  assert.equal(response.result.live, null);
+  assert.deepEqual(runner.liveStates(), []);
+  await runner.handle(request('info', { request_id: 'info-missing', session_id: 'aaaaaaaa-0000-4000-8000-00000000ffff' }));
+  assert.equal(server.rpc('info-missing').code, 'not_found');
+});

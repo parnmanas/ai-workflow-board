@@ -31,12 +31,14 @@ import {
   AGENT_SESSION_PROMPT_MAX_CHARS,
   AGENT_SESSION_PROMPT_MAX_IMAGES,
   AGENT_SESSION_PROMPT_IMAGE_MAX_BYTES,
+  AGENT_SESSION_RECORD_SETTING_KEYS,
   AGENT_SESSION_STATUSES,
   agentSessionAcceptsPrompt,
   type AgentSessionAuth,
   type AgentSessionCommand,
   type AgentSessionConfigOption,
   type AgentSessionEventRecord,
+  type AgentSessionRecordSettings,
   type AgentSessionSummary,
 } from '../../common/types/agent-sessions';
 import type {
@@ -232,12 +234,12 @@ const RPC_ERROR_STATUS: Record<string, number> = {
   not_image: 415,
   too_large: 413,
 };
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, info: 20_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
 /**
  * 매니저 스트림이 없는 동안 보낸 요청 중 **다시 보내도 안전한 것**(읽기 전용). `open` 은 빠진다 —
  * 첫 요청이 실제로는 닿았을 수 있어 두 번 열면 세션 프로세스가 둘이 된다.
  */
-const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'usage_limits', 'image', 'local_image']);
+const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'info', 'usage_limits', 'image', 'local_image']);
 /** 스트림이 붙은 뒤 재전송까지 — SSE 핸들러가 Observable 을 돌려주고 구독되기를 기다린다. */
 const REDELIVER_DELAY_MS = 1_000;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
@@ -310,6 +312,26 @@ function normalizeAuth(input: unknown): AgentSessionAuth | null {
     ...(typeof r.detail === 'string' && r.detail ? { detail: r.detail.slice(0, 200) } : {}),
     ...(projected && Object.keys(projected).length ? { account: projected } : {}),
   };
+}
+
+/** 매니저가 기록에서 읽은 실행 설정(`info` RPC) — 아는 칸의 문자열만 받는다. 빈 결과는 null("기록 없음"). */
+function normalizeRecordSettings(input: unknown): AgentSessionRecordSettings | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const r = input as Record<string, unknown>;
+  const out: AgentSessionRecordSettings = {};
+  for (const key of AGENT_SESSION_RECORD_SETTING_KEYS) {
+    const value = str(r[key], 200).trim();
+    if (value) out[key] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** `info` RPC 의 매니저 쪽 라이브 상태 — 세션을 고를 때 필요한 것만. */
+export interface AgentSessionInfoLive {
+  status: string | null;
+  current_mode: string | null;
+  available_modes: AgentSessionModeOption[];
+  config_options: AgentSessionConfigOption[];
 }
 
 /** 턴이 진행 중일 때만 나오는 이벤트 타입 — 서버가 세션을 처음 보는 배치에서 상태를 추정하는 근거. */
@@ -1095,6 +1117,59 @@ export class AgentSessionsService implements OnModuleDestroy {
         .map((event: any, i: number) => this.normalizeEvent(event, i)).filter((event): event is AgentSessionEventRecord => !!event)
       : [];
     return { events };
+  }
+
+  /**
+   * 세션 하나의 요약 + 기록에 남은 실행 설정 + 매니저의 라이브 상태(`info` RPC). 읽기다 — driver 를 잡지 않고
+   * 메모리 상태도 고치지 않는다(MCP 가 세션을 고르는 조회가 사람이 보는 세션을 빼앗으면 안 된다).
+   */
+  async readSessionInfo(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<{
+    session: AgentSessionSummary | null; settings: AgentSessionRecordSettings | null; live: AgentSessionInfoLive | null;
+  }> {
+    this.requireHost(accountId, managerId, cli);
+    this.assertSessionId(sessionId);
+    let result: { session?: unknown; settings?: unknown; live?: unknown };
+    try {
+      result = await this.rpc(managerId, cli, 'info', { account_id: accountId, session_id: sessionId }, userId);
+    } catch (err: any) {
+      // 이 op 을 모르는 구버전 매니저는 `Unknown RPC op` 로 답한다 — 원인을 그대로 말해 준다.
+      if (err?.code === 'bad_request') {
+        throw new AgentSessionError(501, 'manager_outdated', 'Update the agent manager on this Runtime Host to read session details.');
+      }
+      throw err;
+    }
+    const live = result?.live && typeof result.live === 'object' ? (result.live as Record<string, unknown>) : null;
+    return {
+      session: this.normalizeSummary(cli, result?.session),
+      settings: normalizeRecordSettings(result?.settings),
+      live: live ? {
+        status: typeof live.status === 'string' && STATUS_SET.has(live.status) ? live.status : null,
+        current_mode: typeof live.current_mode === 'string' ? live.current_mode.slice(0, 128) : null,
+        available_modes: Array.isArray(live.available_modes)
+          ? live.available_modes.filter((m: any) => m && typeof m.id === 'string').slice(0, 32)
+            .map((m: any) => ({ id: m.id, name: typeof m.name === 'string' ? m.name : m.id }))
+          : [],
+        config_options: normalizeConfigOptions(live.config_options),
+      } : null,
+    };
+  }
+
+  /**
+   * 이 계정 · 호스트 · CLI 의 설정 선택지(이름 포함) — 실행 snapshot 의 `{ config_id: value }` 를 모델 · effort · 모드로
+   * 읽을 때 쓴다. 화면의 CLI 설정과 같은 출처(캐시된 ACP 선택지 → 살아 있는 세션 → 호스트 모델 목록) + 실행 옵션.
+   */
+  async configOptionsFor(accountId: string, managerId: string, cli: string): Promise<AgentSessionConfigOption[]> {
+    const row = await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
+    const cached = this.parseKnownOptions(row?.known_config_options);
+    return [
+      ...this.withModelFallback(cached.length ? cached : this.liveConfigOptions(managerId, cli), managerId, cli),
+      ...this.launchOptions(managerId, cli),
+    ];
+  }
+
+  /** 서버 메모리에 있는 같은 id 의 세션들(호스트 · CLI 무관) — MCP 가 세션 id 만으로 주소를 찾을 때. */
+  liveSnapshotsById(sessionId: string): AgentSessionLiveSnapshot[] {
+    return [...this.live.values()].filter((state) => state.session_id === sessionId).map((state) => this.snapshot(state));
   }
 
   async getSession(

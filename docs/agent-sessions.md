@@ -40,6 +40,45 @@ read-only·runtime·환경 키는 세션을 열 수 없다. 호출 때마다 Hos
 도구는 프롬프트를 함께 전송하거나 실행 옵션을 덮어쓰거나 잠긴 CLI를 강제로 인수하지 않는다.
 full·compact 도구 프로필에 모두 포함되며, NestJS 통합 MCP 서버에서 제공한다.
 
+## MCP에서 세션 찾기
+
+`open_session`·`send_session_message`에 넘길 주소(`manager_id`·`cli`·`session_id`)를 사람이 알려 주지 않아도
+에이전트가 직접 찾도록 네 도구가 있다(`SessionDirectoryService`, 도구는 `session-message-tools.ts`). 모두 읽기다.
+
+| 도구 | 답 |
+|---|---|
+| `list_session_hosts` | 이 Account 의 Runtime Host — `manager_id`·이름·`online`·세션 CLI·`last_seen_at`·등록된 project 폴더, 호출자 Host 는 `is_you` |
+| `list_session_folders` | Host 별 작업 폴더 — 경로·project·세션 수·실행 중 수·CLI·`last_used_at`. 세션 없는 project 폴더도 싣는다 |
+| `list_sessions` | 세션 목록(최근 사용 순) — 주소·제목·`cwd`·`created_at`·`last_used_at`·`status`·`model`·`effort`·`mode`·`opened_in_awb` |
+| `get_session_info` | 세션 하나 — 위 항목 + 설정별 출처, 기록 원문(CLI 버전·git branch·sandbox), AWB 상태(처음 연 시각·credential 이름·실행 snapshot) |
+
+- `list_sessions` 필터: `manager_id`·`cli`·`cwd`(그 폴더와 **하위 폴더** — 작업 트리 `.awb/wt/…` 도 포함, Windows 경로는
+  대소문자·구분자 무시)·`query`(제목·id·cwd)·`active_within_hours`·`running_only`·`limit`(기본 30, 최대 200).
+  `manager_id` 를 생략하면 연결된 모든 Host 에 묻고, 답하지 못한 Host×CLI 는 `unreachable` 로 따로 싣는다 — 한 곳의 실패가
+  나머지를 가리지 않는다.
+- `get_session_info` 는 `session_id` 만으로도 찾는다: AWB 실행 snapshot → 서버가 아는 라이브 세션 → 연결된 Host 의 목록 순.
+  같은 id 가 둘 이상이면 409 `session_ambiguous` 로 후보를 알려 주고 `manager_id`·`cli` 를 받는다.
+  Host 가 꺼져 있으면 AWB 가 저장한 것(실행 snapshot)만 `notes` 와 함께 돌려준다.
+- `status` 는 프로세스 상태(`starting`·`ready`·`busy`·`awaiting_*`)이거나, 프로세스가 없으면 `idle`/`not_running` 이다.
+- **모델·effort·모드의 출처**(칸마다 앞에서부터): 지금 돌고 있는 어댑터의 선택(`live`) → CLI 기록의 마지막 턴(`record`) →
+  돌지 않는 세션의 마지막 라이브 상태 → AWB 가 다시 열 때 거는 실행 snapshot(`awb_launch`). `list_sessions` 는 기본으로
+  `live`·`awb_launch` 만 보고, `details: true` 면 앞의 20개까지 기록도 읽는다.
+- 기록 읽기는 새 RPC op `info` 다 — 트랜스크립트를 만들지 않고 기록의 머리(제목·생성 시각)와 끝에서부터 1MiB 조각씩
+  (필요한 칸을 찾으면 멈추고, 최대 32MiB) 읽는다. Claude 는 assistant 레코드의 `message.model`(합성 답이면 `requestedModel`)·
+  `effort`, 사람이 쓴 프롬프트의 `permissionMode`, Codex 는 마지막 `turn_context` 의 `model`·`effort`·`approval_policy`·
+  `sandbox_policy` 와 `session_meta` 의 CLI 버전·branch 를 읽는다. 다른 CLI 는 아직 기록 설정이 없다(`record: null`).
+  `info` 를 모르는 구버전 매니저면 `notes` 에 `manager_outdated` 를 싣고 목록에서 본 요약으로 답한다.
+- `send_session_message` 는 이 목록에 나오는 세션이면 받는다 — AWB 에서 연 적 없는(터미널에서만 쓰던) 세션도 된다. 주소는
+  `locate()`(위의 id 찾기와 같은 순서)로 찾고, 주소만 받은 모르는 세션은 `info` 로 그 Host 에 있는지 먼저 확인한다(없는 id 로
+  실행 설정을 고정하지 않게). 받는 세션이 돌고 있지 않으면 화면의 Connect 와 같은 `openSession` 으로 **먼저 연다** —
+  잠금·폴더 없음 같은 열기 실패는 매니저가 말한 코드·사유 그대로 보낸 쪽에 돌려주고 메시지는 보내지 않는다. 열기는
+  30초(`SESSION_MESSAGE_OPEN_WAIT_MS`, Codex MCP 도구 기본 제한 60초 안)만 기다리고, 넘으면 `open_timeout` 으로 알린다 —
+  여는 일은 계속되므로 다시 보내면 곧 닿는다. 열었으면 답에 `opened: true` 가 실린다.
+- 경계는 `open_session` 과 같다(`session-caller.ts` `resolveSessionCaller`): DB 의 full-scope Host 키(runtime 키 제외),
+  Host 의 **현재** 소유 Account, 소유자의 `agent_sessions.use`. 그 Account 의 Host 만 보이고, 다른 Account 가 연 세션은
+  목록에서도 상세에서도 보이지 않는다. 조회는 driver 를 잡지 않으므로 사람이 보고 있는 세션을 빼앗지 않는다.
+- full·compact 도구 프로필에 모두 포함된다.
+
 ## 세션 헤더
 
 - 헤더에는 늘 같은 것만 보인다: 제목(호스트 · CLI) · 상태 · **Mode · Model · Effort** 셀렉트 ·
@@ -168,12 +207,12 @@ credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using
 
 - **서버 `modules/agent-sessions`** — 전사를 복제하지 않는 RPC·스트림 중계자. 실행 소유권과 설정은 DB에 고정한다.
   `InstanceRegistryService`(하트비트)에서 살아 있는
-  Runtime Host 와 그 장비의 세션 CLI(`acp_session_clis`)를 읽고, list/history/open 은 `agent_session_request{request_id}`
-  → `POST /api/agent/sessions/rpc/:id` 로 왕복한다(fs-browser 와 같은 패턴, 타임아웃 list 20s / history 40s / open 120s).
+  Runtime Host 와 그 장비의 세션 CLI(`acp_session_clis`)를 읽고, list/history/info/open 은 `agent_session_request{request_id}`
+  → `POST /api/agent/sessions/rpc/:id` 로 왕복한다(fs-browser 와 같은 패턴, 타임아웃 list 20s / history 40s / info 20s / open 120s).
   라이브 상태(status/mode/driver)만 메모리에 두고, 매니저가 중계한 이벤트를 driver(마지막으로 그 세션을 **연**
   사용자 — history 로 읽은 것도 포함, open/prompt 같은 쓰기뿐 아니라)에게 SSE 로 흘린다. 다른 매니저 키는 남의 RPC 를 풀거나 이벤트를 중계할 수 없다.
   **서버 재시작 직후**: 매니저는 하트비트(HTTP)와 SSE 를 따로 다시 붙이므로, 호스트가 "연결됨" 인데 스트림은 아직
-  없을 수 있다. 그때 보낸 요청은 SSE 로 가므로 사라진다. 그래서 스트림이 없을 때 보낸 **읽기** RPC(list/history/image/
+  없을 수 있다. 그때 보낸 요청은 SSE 로 가므로 사라진다. 그래서 스트림이 없을 때 보낸 **읽기** RPC(list/history/info/image/
   local_image — `open` 은 중복 실행 위험으로 제외)는 그 매니저 스트림이 붙으면(`AgentConnectivityRegistry.onBecameReachable`)
   같은 request_id 로 다시 보내고 타임아웃도 새로 잰다. 사이드바도 목록 실패를 "세션 없음" 으로 저장하지 않고 마지막
   목록을 유지한 채 다시 묻는다(`Sidebar.tsx` `loadHostSessions`).
@@ -683,6 +722,7 @@ cache_write` 로 계산한다.
 
 `agent_session_request` payload(`AgentSessionRequestPayload`, `credential_id`·`force` 포함), `/api/agent/sessions/*` 바디·credential 응답, 하트비트 `acp_session_clis`·`agent_sessions[]`(`mcp_session_ref` 포함)
 는 서버와 agent-manager 가 같은 contract 를 본다 — 변경은 **같은 PR**. 버전은 손으로 올리지 않는다.
+`info` RPC 답의 `settings`(서버 `AgentSessionRecordSettings` ↔ 매니저 `CliSessionRecordSettings`)도 같은 계약이다.
 `usage` 이벤트 payload 의 키도 같은 계약이다(서버 `common/types/agent-sessions.ts` 의 주석 ↔ 매니저
 `session-usage.ts` 의 `usageEventPayload`) — 키를 늘리면 화면(`sessionTranscript.logic.ts`)까지 한 PR 로 묶는다.
 
@@ -725,12 +765,14 @@ cache_write` 로 계산한다.
 
 - 서버: `apps/server/test/session-open.test.mjs` — MCP 생성·재연결·메시지 전송, 저장된 설정,
   Account·Host·소유자 권한, compact 프로필, 잠금 오류와 강제 인수 차단.
+- 서버: `apps/server/test/session-directory.test.mjs` — MCP 세션 찾기: Host·폴더·세션 목록과 필터, 설정 출처(live·record·
+  awb_launch), id 만으로 찾기·모호함·다른 Account·꺼진 Host·구버전 매니저, driver 를 잡지 않음, 키·권한 경계.
 - 서버: `apps/server/test/agent-sessions.test.mjs` — hosts / RPC 왕복·소유권 / prompt·stream·permission / close / CLI 설정·credential 전달 /
   유령 상태 되돌림(list·history·인스턴스 제거·하트비트) / config option·elicitation op 과 awaiting_input / 첫 이벤트의 상태 추정.
 - 서버: `agent-session-read-status-race.test.mjs` — 늦은 list/history 응답과 새 이벤트·하트비트의 경합,
   같은 밀리초 전환, 초기 상태 생성과 소유권 조회 중 도착한 이벤트, 기존 유령 상태 복구.
 - agent-manager: `agent-session-heartbeat.test.mjs` — 하트비트 `agent_sessions` 필드와 `liveStates()`.
-- agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱),
+- agent-manager: `apps/agent-manager/test/agent-session-store.test.mjs`(합성 Claude·Codex 파일 파싱, `readSessionInfo` 의 기록 설정),
   `agent-session-runner.test.mjs`(fake ACP 로 list·history·open·prompt·permission·resume, credential 별 세션 cli-home 적용,
   미결 permission/질문 재전송·취소, config option·slash command·plan·elicitation 왕복).
 - 클라이언트: `apps/client/test/agent-session-transcript.test.mjs`(접기 규칙·slash 매칭·schema 정규화), `sessions-navigation.test.mjs`,

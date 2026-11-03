@@ -123,6 +123,32 @@ export interface CliSessionSummary {
   size_bytes?: number;
 }
 
+/**
+ * 세션 기록에 남은 실행 설정 — 칸마다 **마지막으로 기록된** 값(그 세션이 실제로 돈 설정). 기록에 없는
+ * 칸은 생략한다. 값은 CLI 원문 그대로다(claude `permissionMode`, codex `approval_policy` …).
+ */
+export interface CliSessionRecordSettings {
+  model?: string;
+  effort?: string;
+  /** 권한·승인 모드(claude `permissionMode`, codex `approval_policy`). */
+  mode?: string;
+  /** codex `sandbox_policy.type`. */
+  sandbox?: string;
+  /** codex `collaboration_mode.mode`(plan 등). */
+  collaboration_mode?: string;
+  cli_version?: string;
+  git_branch?: string;
+  /** 기록을 남긴 클라이언트(claude `entrypoint`, codex `originator`) — 터미널인지 AWB(ACP)인지. */
+  client?: string;
+  /** 마지막 기록 시각. */
+  last_record_at?: string;
+}
+
+export interface CliSessionInfoRead {
+  summary: CliSessionSummary;
+  settings: CliSessionRecordSettings;
+}
+
 export interface CliSessionHistoryEvent {
   /** 스캐너는 비워 둔다 — 절대 위치 번호는 호출자(AgentSessionStore)가 매긴다. */
   id: string;
@@ -201,6 +227,9 @@ export interface CliSessionStoreDriver {
   /** CLI 자체 기록에서 세션을 열거한다(AWB 인덱스는 호출자가 합친다). 절대 throw 하지
    *  않는다 — 못 읽으면 빈 목록. */
   listSessions(ctx: CliSessionStoreContext): Promise<CliSessionSummary[]>;
+  /** 세션 하나의 요약과 기록에 남은 실행 설정(모델·effort·모드 …). 기록이 없으면 `null`.
+   *  기록 전체를 트랜스크립트로 바꾸지 않는다 — 머리와 꼬리만 읽는다(꼬리에 모델이 없을 때만 전체). */
+  readSessionInfo?(ctx: CliSessionStoreContext, sessionId: string): Promise<CliSessionInfoRead | null>;
   /** 기록을 읽는다. 세션도 기록도 없으면 `null` — 호출자가 AWB 인덱스만으로 답한다.
    *  sessionId 는 호출자가 이미 형식 검사를 마친 값이다. */
   readHistory(
