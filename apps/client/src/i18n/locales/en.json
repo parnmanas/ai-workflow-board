@@ -7141,12 +7141,11 @@
   "{0} awaiting your approval": "{0} awaiting your approval",
   "영상 응답을 해석하지 못했습니다.": "Could not read the video response.",
   "영상 파일이 불러오는 동안 바뀌었습니다. 다시 시도해 주세요.": "The video file changed while loading. Please try again.",
-  "클릭하면 재생 (← → 로 넘기기)": "Click to play (← → to navigate)",
   "영상을 가져오지 못했습니다": "Failed to fetch video",
   "영상을 가져오지 못했습니다 —": "Failed to fetch video —",
   "새 탭에서 열기": "Open in new tab",
   "영상 재생": "Play video",
-  "영상 불러오기": "Load video",
   "영상 불러오는 중… {0}": "Loading video… {0}",
-  "브라우저가 이 영상을 재생하지 못했습니다": "Browser could not play this video"
+  "브라우저가 이 영상을 재생하지 못했습니다": "Browser could not play this video",
+  "누르면 바로 아래에서 재생": "Click to play right below"
 }

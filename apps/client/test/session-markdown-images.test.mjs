@@ -149,15 +149,26 @@ function transcriptOf(text, props = {}) {
   }));
 }
 
-test('영상 링크: 목록은 그대로 두고, 누르면 새 탭 대신 갤러리에서 재생한다 — Ctrl+클릭은 새 탭 그대로', async (t) => {
+/** jsdom 은 재생을 구현하지 않는다 — 부른 것만 기록한다. */
+function stubMedia(t) {
+  t.mock.method(window.HTMLMediaElement.prototype, 'pause', () => {});
+  return t.mock.method(window.HTMLMediaElement.prototype, 'play', () => Promise.resolve());
+}
+
+const POOL = 'https://dive.example.com/preview/bohol-pool.mp4';
+const DIVE1 = 'https://dive.example.com/preview/bohol-dive-1.mp4';
+const SAMPLE = 'https://dive.example.com/preview/bohol-dive-1-v1.mp4';
+
+test('영상 링크: 목록은 그대로 두고 링크 바로 아래에 썸네일을 보이며, 링크를 누르면 새 탭 대신 그 자리에서 재생한다', async (t) => {
   const dom = setupDom();
   t.after(() => dom.cleanup());
+  const play = stubMedia(t);
   const text = [
     '**보홀**',
-    '- [제한수역(풀장) 교육 · 1:54](https://dive.example.com/preview/bohol-pool.mp4)',
-    '- [#1 다나오 비치 · 0:35](https://dive.example.com/preview/bohol-dive-1.mp4)',
+    `- [제한수역(풀장) 교육 · 1:54](${POOL})`,
+    `- [#1 다나오 비치 · 0:35](${DIVE1})`,
     '',
-    '▶ https://dive.example.com/preview/bohol-dive-1-v1.mp4',
+    `▶ ${SAMPLE}`,
     '',
     '[안내](https://dive.example.com/guide.html)',
   ].join('\n');
@@ -165,14 +176,17 @@ test('영상 링크: 목록은 그대로 두고, 누르면 새 탭 대신 갤러
   t.after(() => view.unmount());
   await act(async () => {});
   const links = [...view.container.querySelectorAll('a[data-video-link]')];
-  assert.deepEqual(links.map((a) => a.getAttribute('href')), [
-    'https://dive.example.com/preview/bohol-pool.mp4',
-    'https://dive.example.com/preview/bohol-dive-1.mp4',
-    'https://dive.example.com/preview/bohol-dive-1-v1.mp4',
-  ], '목록 속 링크와 맨 URL 이 모두 재생 링크다');
-  assert.equal(view.container.querySelectorAll('ul').length, 1, '목록이 카드로 끊기지 않는다');
-  assert.equal(view.container.querySelectorAll('ul > li').length, 2);
-  assert.equal(view.container.querySelectorAll('video').length, 0, '누르기 전에는 아무것도 불러오지 않는다');
+  assert.deepEqual(links.map((a) => a.getAttribute('href')), [POOL, DIVE1, SAMPLE], '목록 속 링크와 맨 URL 이 모두 영상이다');
+  assert.equal(view.container.querySelectorAll('ul').length, 1, '목록이 끊기지 않는다');
+  const items = [...view.container.querySelectorAll('ul > li')];
+  assert.equal(items.length, 2);
+  // 썸네일은 그 링크의 목록 칸 안에 — 영상 전체가 아니라 한 장면(#t=1)과 메타데이터만 받는다.
+  assert.deepEqual(
+    items.map((li) => li.querySelector('[data-video-thumb] video')?.getAttribute('src')),
+    [`${POOL}#t=1`, `${DIVE1}#t=1`],
+  );
+  assert.equal(items[0].querySelector('[data-video-thumb] video')?.getAttribute('preload'), 'metadata');
+  assert.equal(items[0].querySelector('[data-video-thumb] video')?.hasAttribute('controls'), false, '누르기 전에는 썸네일');
   const guide = [...view.container.querySelectorAll('a')].find((a) => a.getAttribute('href') === 'https://dive.example.com/guide.html');
   assert.equal(guide?.hasAttribute('data-video-link'), false, '영상이 아닌 링크는 그대로다');
 
@@ -185,76 +199,119 @@ test('영상 링크: 목록은 그대로 두고, 누르면 새 탭 대신 갤러
     links[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
   });
   assert.deepEqual(prevented, [false], 'Ctrl+클릭은 브라우저의 새 탭 열기 그대로');
-  assert.equal(document.querySelectorAll('[data-testid="media-lightbox"]').length, 0);
+  assert.equal(play.mock.calls.length, 0);
 
   await act(async () => { click(links[1]); });
-  assert.deepEqual(prevented, [false, true], '보통 클릭은 새 탭 대신 팝업');
+  assert.deepEqual(prevented, [false, true], '보통 클릭은 새 탭 대신 그 자리에서');
+  const playingThumb = items[1].querySelector('[data-video-thumb]');
+  assert.equal(playingThumb?.getAttribute('data-playing'), 'true');
+  assert.equal(playingThumb?.querySelector('video')?.hasAttribute('controls'), true);
+  assert.equal(play.mock.calls.length, 1, '바로 재생한다');
+  assert.equal(document.querySelectorAll('[data-testid="media-lightbox"]').length, 0, '팝업이 아니라 전사 안에서 본다');
+  assert.equal(items[0].querySelector('[data-video-thumb]')?.getAttribute('data-playing'), 'false', '다른 영상은 썸네일 그대로');
+
+  // ⤢ 는 크게 보기 — 갤러리에서 ← → 로 다른 영상으로 넘긴다.
+  const expand = playingThumb?.querySelector(`button[aria-label="${ui('Expand video')}"]`);
+  await act(async () => { click(expand); });
   const lightbox = document.querySelector('[data-testid="media-lightbox"]');
-  assert.ok(lightbox, '갤러리 팝업이 열린다');
-  assert.equal(lightbox.querySelector('video')?.getAttribute('src'), 'https://dive.example.com/preview/bohol-dive-1.mp4');
-  assert.match(lightbox.textContent, /#1 다나오 비치 · 0:35/);
-  assert.equal(lightbox.querySelector('[data-testid="media-lightbox-counter"]')?.textContent, '2 / 3', '← → 로 다른 영상으로 넘긴다');
+  assert.ok(lightbox, '크게 보기 갤러리');
+  assert.equal(lightbox.querySelector('video')?.getAttribute('src'), DIVE1);
+  assert.equal(lightbox.querySelector('[data-testid="media-lightbox-counter"]')?.textContent, '2 / 3');
   const open = [...lightbox.querySelectorAll('a')].find((a) => a.textContent === ui('새 탭에서 열기'));
   assert.equal(open?.getAttribute('target'), '_blank', '다른 출처는 download 가 무시되고 이 탭이 넘어가 버린다');
 });
 
-test('로컬 영상 카드: 누르기 전에는 받지 않고, 진행률을 보이다 다 받으면 재생하고, 떠나면 URL 을 푼다', async (t) => {
+test('로컬 영상: 보이면 앞부분만 받아 썸네일을 그리고, 누르면 끝까지 받아 그 자리에서 재생한다', async (t) => {
   const dom = setupDom();
   t.after(() => dom.cleanup());
-  const calls = [];
+  const play = stubMedia(t);
+  const previews = [];
+  const fulls = [];
   let finish;
+  const loadLocalVideoPreview = async (path) => {
+    previews.push(path);
+    return { blob: new Blob([new Uint8Array(1024)], { type: 'video/mp4' }), size: 3 * 1024 * 1024 };
+  };
   const loadLocalVideo = (path, options) => {
-    calls.push(path);
-    options.onProgress(1024 * 1024, 2 * 1024 * 1024);
+    fulls.push(path);
+    options.onProgress(1024 * 1024, 3 * 1024 * 1024);
     return new Promise((resolve) => { finish = resolve; });
   };
-  t.mock.method(URL, 'createObjectURL', () => 'blob:local-video');
+  let made = 0;
+  t.mock.method(URL, 'createObjectURL', () => `blob:video-${++made}`);
   const revoke = t.mock.method(URL, 'revokeObjectURL', () => {});
-  const view = transcriptOf('데모입니다.\n![데모](./out/demo.mp4)', { loadLocalVideo });
+  const view = transcriptOf('데모입니다.\n![데모](./out/demo.mp4)', { loadLocalVideo, loadLocalVideoPreview });
   let unmounted = false;
   t.after(() => { if (!unmounted) view.unmount(); });
   await act(async () => {});
-  assert.deepEqual(calls, [], '전사를 열기만 해서는 영상을 받지 않는다');
-  assert.equal(view.container.querySelectorAll('video').length, 0);
-  const play = view.container.querySelector(`button[aria-label="${ui('영상 재생')}"]`);
-  assert.ok(play, '재생 카드');
-  await act(async () => { click(play); });
-  assert.deepEqual(calls, ['./out/demo.mp4']);
-  assert.match(view.container.textContent, uiPattern('영상 불러오는 중… {0}', { 0: '1.0 / 2.0MB' }));
+  assert.deepEqual(previews, ['./out/demo.mp4'], '썸네일용 앞부분만 받는다');
+  assert.deepEqual(fulls, [], '영상 전체는 누를 때 받는다');
+  assert.equal(view.container.querySelector('[data-video-thumb] video')?.getAttribute('src'), 'blob:video-1#t=1');
+  assert.match(view.container.querySelector('[data-video-badge]')?.textContent ?? '', /3\.0MB/);
+  await act(async () => { click(view.container.querySelector(`button[aria-label="${ui('영상 재생')}"]`)); });
+  assert.deepEqual(fulls, ['./out/demo.mp4']);
+  assert.match(view.container.textContent, uiPattern('영상 불러오는 중… {0}', { 0: '1.0 / 3.0MB' }));
   await act(async () => { finish(new Blob(['video bytes'], { type: 'video/mp4' })); });
-  assert.equal(view.container.querySelector('video')?.getAttribute('src'), 'blob:local-video');
+  assert.equal(view.container.querySelector('[data-video-thumb] video')?.getAttribute('src'), 'blob:video-2');
+  assert.equal(view.container.querySelector('[data-video-thumb] video')?.hasAttribute('controls'), true);
+  assert.equal(play.mock.calls.length, 1, '다 받으면 그 자리에서 재생한다');
   const download = [...view.container.querySelectorAll('a')].find((a) => a.textContent === ui('다운로드'));
   assert.equal(download?.getAttribute('download'), 'demo.mp4');
   view.unmount();
   unmounted = true;
-  assert.equal(revoke.mock.calls.length, 1, '받은 영상 URL 은 전사를 떠날 때 풀린다');
+  assert.equal(revoke.mock.calls.length, 2, '썸네일·영상 URL 은 전사를 떠날 때 풀린다');
 });
 
-test('로컬 영상 카드: 받는 중에 떠나면 멈추고, 실패는 사유와 다시 시도를 그 자리에 보인다', async (t) => {
+test('로컬 영상: 앞부분이 곧 전부인 작은 파일은 다시 받지 않고 그대로 재생한다', async (t) => {
   const dom = setupDom();
   t.after(() => dom.cleanup());
-  const signals = [];
-  let attempts = 0;
-  const loadLocalVideo = (_path, options) => {
-    signals.push(options.signal);
-    attempts++;
-    return attempts === 1 ? Promise.reject(new Error('Video is 250MB — over the 200MB cap.')) : new Promise(() => {});
+  const play = stubMedia(t);
+  const fulls = [];
+  t.mock.method(URL, 'createObjectURL', () => 'blob:small');
+  t.mock.method(URL, 'revokeObjectURL', () => {});
+  const view = transcriptOf('![녹화](./rec.webm)', {
+    loadLocalVideoPreview: async () => ({ blob: new Blob([new Uint8Array(1000)], { type: 'video/webm' }), size: 1000 }),
+    loadLocalVideo: async (path) => { fulls.push(path); return new Blob([]); },
+  });
+  t.after(() => view.unmount());
+  await act(async () => {});
+  await act(async () => { click(view.container.querySelector(`button[aria-label="${ui('영상 재생')}"]`)); });
+  assert.deepEqual(fulls, [], '이미 다 받았다');
+  assert.equal(view.container.querySelector('[data-video-thumb] video')?.getAttribute('src'), 'blob:small');
+  assert.equal(play.mock.calls.length, 1);
+});
+
+test('로컬 영상: 못 받으면 사유와 다시 시도를 그 자리에 보이고, 받는 중에 떠나면 멈춘다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  stubMedia(t);
+  t.mock.method(URL, 'createObjectURL', () => 'blob:preview');
+  t.mock.method(URL, 'revokeObjectURL', () => {});
+  let previewCalls = 0;
+  const loadLocalVideoPreview = async () => {
+    previewCalls++;
+    if (previewCalls === 1) throw new Error('Update the agent manager on this Runtime Host to play local videos.');
+    return { blob: new Blob([new Uint8Array(10)], { type: 'video/webm' }), size: 100 };
   };
-  const view = transcriptOf('[녹화](E:/rec/play.webm)', { loadLocalVideo });
+  const signals = [];
+  const loadLocalVideo = (_path, options) => { signals.push(options.signal); return new Promise(() => {}); };
+  const view = transcriptOf('[녹화](E:/rec/play.webm)', { loadLocalVideo, loadLocalVideoPreview });
   let unmounted = false;
   t.after(() => { if (!unmounted) view.unmount(); });
   await act(async () => {});
-  await act(async () => { click(view.container.querySelector(`button[aria-label="${ui('영상 재생')}"]`)); });
-  await act(async () => {});
   assert.match(view.container.textContent, uiPattern('영상을 가져오지 못했습니다 —'));
-  assert.match(view.container.textContent, /250MB — over the 200MB cap/);
+  assert.match(view.container.textContent, /Update the agent manager/);
   assert.match(view.container.textContent, /E:\/rec\/play\.webm/, '경로가 그 자리에 남는다');
   const retry = [...view.container.querySelectorAll('button')].find((b) => b.textContent === ui('다시 시도'));
   await act(async () => { click(retry); });
-  assert.equal(attempts, 2);
+  await act(async () => {});
+  assert.equal(previewCalls, 2);
+  assert.equal(view.container.querySelector('[data-video-thumb] video')?.getAttribute('src'), 'blob:preview#t=1');
+  await act(async () => { click(view.container.querySelector(`button[aria-label="${ui('영상 재생')}"]`)); });
+  assert.equal(signals.length, 1);
   view.unmount();
   unmounted = true;
-  assert.equal(signals[1].aborted, true, '받는 중에 전사를 떠나면 남은 조각을 받지 않는다');
+  assert.equal(signals[0].aborted, true, '받는 중에 전사를 떠나면 남은 조각을 받지 않는다');
 });
 
 test('getHostSessionLocalVideo: 조각을 Range 로 이어 받아 한 Blob 으로 만들고, 파일이 바뀌면 섞지 않고 멈춘다', async (t) => {
@@ -290,4 +347,23 @@ test('getHostSessionLocalVideo: 조각을 Range 로 이어 받아 한 Blob 으�
     api.getHostSessionLocalVideo('host', 'codex', 'sess', './out/demo.webm', '/repo'),
     { message: ui('영상 파일이 불러오는 동안 바뀌었습니다. 다시 시도해 주세요.') },
   );
+});
+
+test('getHostSessionLocalVideoPreview: 앞부분을 한 번만 Range 로 받고 파일 전체 크기를 함께 돌려준다', async (t) => {
+  const dom = setupDom();
+  t.after(() => dom.cleanup());
+  const previousStorage = globalThis.localStorage;
+  globalThis.localStorage = dom.window.localStorage;
+  t.after(() => { if (previousStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousStorage; });
+  const ranges = [];
+  let contentRange = 'bytes 0-9/50';
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    ranges.push(init.headers.Range);
+    return new Response(Buffer.from('0123456789'), { status: 206, headers: { 'Content-Range': contentRange, 'Content-Type': 'video/mp4' } });
+  });
+  const head = await api.getHostSessionLocalVideoPreview('host', 'codex', 'sess', './out/demo.mp4', '/repo');
+  assert.deepEqual(ranges, ['bytes=0-4194303'], '썸네일용 앞부분 4MiB 한 번');
+  assert.deepEqual([head.size, head.blob.size], [50, 10]);
+  contentRange = 'bytes 0-99/50';
+  await assert.rejects(api.getHostSessionLocalVideoPreview('host', 'codex', 'sess', './out/demo.mp4', '/repo'), { message: ui('영상 응답을 해석하지 못했습니다.') });
 });

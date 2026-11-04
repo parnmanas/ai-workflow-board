@@ -821,6 +821,11 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
       api.getHostSessionLocalVideo(managerId, cli, sessionId, path, cwd, options),
     [managerId, cli, sessionId, cwd],
   );
+  const loadLocalVideoPreview = useCallback(
+    (path: string, options?: { signal?: AbortSignal }) =>
+      api.getHostSessionLocalVideoPreview(managerId, cli, sessionId, path, cwd, options),
+    [managerId, cli, sessionId, cwd],
+  );
 
   const setConfigOption = useCallback(async (configId: string, value: string | boolean) => {
     try {
@@ -1136,6 +1141,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             loadImage={loadImage}
             loadLocalImage={loadLocalImage}
             loadLocalVideo={loadLocalVideo}
+            loadLocalVideoPreview={loadLocalVideoPreview}
           />
           </div>
         )}

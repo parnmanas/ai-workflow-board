@@ -267,6 +267,9 @@ function accountHeaders(accountId: string): Record<string, string> {
 /** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
 export type ApiError = Error & { code?: string; status?: number; body?: any };
 
+/** 세션 영상 썸네일에 받는 앞부분 — 1080p 편집본(약 10Mbps)이면 3초쯤이라 1초 장면이 들어 있다. */
+const LOCAL_VIDEO_PREVIEW_BYTES = 4 * 1024 * 1024;
+
 /**
  * JSON 이 아닌 본문(오디오)을 주고받는 요청. 실패는 `request` 와 같은 모양(message · code · status)으로 던진다.
  * `contentType` 을 주면 그 형식의 바이트를 그대로 보낸다.
@@ -1890,6 +1893,27 @@ export const api = {
       options.onProgress?.(loaded, total);
     }
     return new Blob(parts, { type });
+  },
+  /**
+   * 같은 영상의 **앞부분만**(최대 4MiB) — 전사 썸네일 한 장면용. 색인(moov)이 앞에 있는 mp4 와 webm 은 이것만으로
+   * 브라우저가 장면을 그린다. `size` 는 파일 전체 크기라, 앞부분이 곧 전부면 화면이 재생에 그대로 쓴다.
+   */
+  getHostSessionLocalVideoPreview: async (
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    path: string,
+    cwd: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ blob: Blob; size: number }> => {
+    const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });
+    const url = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
+      + `/sessions/${encodeURIComponent(sessionId)}/local-video?${query.toString()}`;
+    const resp = await fetchOk(url, { headers: { Range: `bytes=0-${LOCAL_VIDEO_PREVIEW_BYTES - 1}` }, signal: options.signal });
+    const range = /^bytes 0-(\d+)\/(\d+)$/.exec(resp.headers.get('Content-Range') || '');
+    const blob = await resp.blob();
+    if (!range || blob.size !== Number(range[1]) + 1) throw new Error(translate('영상 응답을 해석하지 못했습니다.'));
+    return { blob, size: Number(range[2]) };
   },
   /** 세션 프롬프트 — 텍스트 + 이미지 첨부. 이미지는 base64 그대로 실어 보내고 서버는 저장하지 않고
    *  매니저로 흘려보낸다(매니저가 ACP Image 블록으로 변환). 빈 텍스트 + 이미지 1장 이상도 된다. */

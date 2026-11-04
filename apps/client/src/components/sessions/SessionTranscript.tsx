@@ -39,12 +39,16 @@ export interface SessionTranscriptProps {
   /** 답에 **경로로** 적은 영상(`![데모](./out/demo.mp4)`) → 바이트. 매니저가 조각으로 읽어 주는 것을 끝까지
    *  모은다 — 전사는 진행률을 보이고, 떠나면 `signal` 로 멈춘다. 안 넘기면 그 자리에 경로만 보인다. */
   loadLocalVideo?: LocalVideoLoader;
+  /** 같은 영상의 앞부분만(썸네일 한 장면용) — 바이트와 파일 전체 크기. */
+  loadLocalVideoPreview?: LocalVideoPreviewLoader;
 }
 
 export type LocalVideoLoader = (
   path: string,
   options?: { onProgress?: (loaded: number, total: number) => void; signal?: AbortSignal },
 ) => Promise<Blob>;
+
+export type LocalVideoPreviewLoader = (path: string, options?: { signal?: AbortSignal }) => Promise<{ blob: Blob; size: number }>;
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const MAX_PRE_CHARS = 20_000;
@@ -283,9 +287,9 @@ function AutomaticPromptBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ text, loadLocalImage, loadLocalVideo, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
+function AssistantBlock({ text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; loadLocalVideoPreview?: LocalVideoPreviewLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
   useLocale();
-  // 원격 영상 링크(맨 URL 포함)는 글 안에 둔 채 재생 링크로 바꾼다 — 목록 속 링크를 카드로 떼면 목록이 끊긴다.
+  // 원격 영상 링크(맨 URL 포함)는 글 안에 둔 채 바로 아래에 썸네일을 붙인다 — 링크를 카드로 떼면 목록이 끊긴다.
   const renderLink = useCallback<MarkdownLinkRenderer>(
     (href, children) => (isRemoteVideoUrl(href)
       ? <VideoLink href={href} registerMedia={registerMedia} openMedia={openMedia}>{children}</VideoLink>
@@ -301,11 +305,23 @@ function AssistantBlock({ text, loadLocalImage, loadLocalVideo, registerMedia, o
         return <MarkdownFile key={i} alt={seg.alt} target={seg.target} fileKind={seg.fileKind} loadLocalFile={loadLocalImage} />;
       }
       if (seg.kind === 'video') {
-        return <MarkdownVideo key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalVideo={loadLocalVideo} registerMedia={registerMedia} openMedia={openMedia} />;
+        return (
+          <VideoThumb
+            key={i}
+            source={seg.source}
+            target={seg.target}
+            label={seg.alt}
+            withCaption
+            loadLocalVideo={loadLocalVideo}
+            loadLocalVideoPreview={loadLocalVideoPreview}
+            registerMedia={registerMedia}
+            openMedia={openMedia}
+          />
+        );
       }
       return <MarkdownImage key={i} alt={seg.alt} target={seg.target} source={seg.source} loadLocalImage={loadLocalImage} registerMedia={registerMedia} openMedia={openMedia} />;
     }),
-    [text, loadLocalImage, loadLocalVideo, renderLink, registerMedia, openMedia, getLocale()],
+    [text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, renderLink, registerMedia, openMedia, getLocale()],
   );
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
@@ -1189,106 +1205,111 @@ function textOf(node: React.ReactNode): string {
 
 const megabytes = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
 
-/**
- * 답 속 원격 영상 링크(`[#1 다나오 비치 · 0:35](https://…/preview/a.mp4)`, 맨 URL) — 누르면 새 탭 대신 전사
- * 갤러리 팝업에서 재생하고 ← → 로 다른 영상·이미지로 넘긴다. 링크는 글 안에 그대로라 목록이 끊기지 않고,
- * Ctrl/⌘/가운데 클릭의 새 탭 열기는 브라우저 기본 동작 그대로다.
- *
- * 갤러리에는 URL 만 올린다 — 누르기 전에는 아무것도 불러오지 않으므로 에이전트가 쓴 주소가 저절로 요청되지 않는다.
- */
-function VideoLink({
-  href,
-  children,
-  registerMedia,
-  openMedia,
-}: {
-  href: string;
-  children: React.ReactNode;
-  registerMedia?: (key: string, item: MediaLightboxItem) => void;
-  openMedia?: (key: string) => void;
-}) {
-  useLocale();
-  const mediaKey = `video:${href}`;
-  const label = textOf(children).trim();
-  useEffect(() => {
-    registerMedia?.(mediaKey, {
-      src: href,
-      kind: 'video',
-      caption: label && label !== href ? `${label} — ${href}` : href,
-      filename: downloadName(href, 'mp4'),
-    });
-  }, [registerMedia, mediaKey, href, label]);
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      data-video-link=""
-      title={translate('클릭하면 재생 (← → 로 넘기기)')}
-      onClick={(e) => {
-        if (!openMedia || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        e.preventDefault();
-        openMedia(mediaKey);
-      }}
-      style={{ color: tokens.colors.accent }}
-    >
-      <span aria-hidden="true" style={{ fontSize: '0.75em', marginRight: 4 }}>▶</span>
-      {children}
-    </a>
-  );
+/** `1:54` · `1:02:03` — 썸네일 모서리에 붙이는 길이. */
+function clockOf(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+/** 썸네일로 보일 장면(초). 편집본은 페이드 인이라 첫 장면이 검은 경우가 많다. */
+const THUMB_AT_SECONDS = 1;
+
+/** 지금 소리를 내는 전사 영상 — 다른 영상을 틀면 멈춘다(두 영상이 겹쳐 들리지 않게). */
+let playingVideo: HTMLVideoElement | null = null;
+function claimPlayback(video: HTMLVideoElement) {
+  if (playingVideo && playingVideo !== video && !playingVideo.paused) playingVideo.pause?.();
+  playingVideo = video;
 }
 
 /**
- * 답 속 영상 한 편 — `![데모](./out/demo.mp4)`, 로컬 경로 링크, 원격 영상의 이미지 문법. 누르면 재생하는 카드다.
- *
- * 이미지와 달리 **누르기 전에는 불러오지 않는다**: 영상은 수십~수백 MB 라 전사를 열 때마다 받으면 모바일 데이터와
- * 메모리를 쓰고, 원격 URL 이면 에이전트가 쓴 주소가 저절로 요청된다. 로컬은 Runtime Host 매니저가 조각으로 읽어
- * 주는 것을 끝까지 모아(진행률 표시) Blob URL 로, 원격은 그 URL 을 그대로 재생한다.
- * 못 읽으면 이미지처럼 경로와 사유를 그 자리에 보인다.
+ * 화면 가까이 오면 true — 썸네일은 보이는 것만 받는다(목록에 영상이 열세 편이어도 한꺼번에 받지 않게).
+ * IntersectionObserver 가 없으면(테스트·옛 브라우저) 처음부터 true.
  */
-function MarkdownVideo({
-  alt,
-  target,
+function useNearViewport(ref: React.RefObject<Element | null>): boolean {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    const target = ref.current;
+    if (near || !target) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setNear(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '400px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [near, ref]);
+  return near;
+}
+
+/**
+ * 답 속 영상 한 편 — 이미지처럼 전사 안에 썸네일로 보이고, 누르면 그 자리에서 재생한다.
+ *
+ * 썸네일은 영상 전체가 아니라 한 장면만 받는다. 원격은 브라우저가 `#t=1` 장면을 위해 앞부분(메타데이터)과
+ * 그 장면만 범위 요청하고, 로컬은 Runtime Host 매니저가 앞부분(`LocalVideoPreviewLoader`, 4MiB)만 보낸다 —
+ * 색인(moov)이 앞에 있는 mp4 와 webm 은 그것만으로 장면이 나온다. 못 그리는 파일(색인이 뒤에 있는 mp4)은
+ * 빈 카드로 두고, 누르면 끝까지 받아 재생한다. 영상 전체는 누를 때 받는다: 원격은 그 URL 을 그대로
+ * 스트리밍하고, 로컬은 조각을 모아(진행률 표시) Blob URL 로 재생한다 — 앞부분이 곧 전부면 그대로 쓴다.
+ *
+ * `<span>` 으로만 짠다 — 목록·문단 속 링크 바로 아래(`VideoLink`)에도 들어가야 해서다(`<p>` 안에 div 불가).
+ */
+function VideoThumb({
   source,
+  target,
+  label,
+  playSignal = 0,
+  withCaption,
   loadLocalVideo,
+  loadLocalVideoPreview,
   registerMedia,
   openMedia,
 }: {
-  alt: string;
-  target: string;
   source: 'local' | 'remote';
+  target: string;
+  label: string;
+  /** 늘어날 때마다 재생한다 — 위의 링크 글자를 눌렀을 때. */
+  playSignal?: number;
+  withCaption: boolean;
   loadLocalVideo?: LocalVideoLoader;
+  loadLocalVideoPreview?: LocalVideoPreviewLoader;
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
   useLocale();
-  const [requested, setRequested] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  const [url, setUrl] = useState('');
-  const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const boxRef = useRef<HTMLSpanElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  // 원격은 링크(`VideoLink`)와 같은 열쇠 — 같은 영상이 갤러리에 두 번 오르지 않는다.
+  const near = useNearViewport(boxRef);
+  const [playing, setPlaying] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [preview, setPreview] = useState<{ url: string; size: number; complete: boolean } | null>(null);
+  const [fullUrl, setFullUrl] = useState('');
+  const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [duration, setDuration] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const mediaKey = source === 'remote' ? `video:${target}` : `video:local:${target}`;
   const filename = downloadName(target, 'mp4');
-  const captionText = alt ? `${alt} — ${target}` : target;
+  const captionText = label && label !== target ? `${label} — ${target}` : target;
 
   useEffect(() => {
-    if (source !== 'local' || !requested || !loadLocalVideo) return;
+    if (playSignal > 0) setPlaying(true);
+  }, [playSignal]);
+
+  // 로컬 썸네일 — 보일 때 앞부분만 받는다.
+  useEffect(() => {
+    if (source !== 'local' || !near || !loadLocalVideoPreview) return;
     const controller = new AbortController();
     let objectUrl = '';
-    setUrl('');
+    setPreview(null);
     setError(null);
-    setProgress(null);
     void (async () => {
       try {
-        const blob = await loadLocalVideo(target, {
-          signal: controller.signal,
-          onProgress: (loaded, total) => { if (!controller.signal.aborted) setProgress({ loaded, total }); },
-        });
+        const head = await loadLocalVideoPreview(target, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
+        objectUrl = URL.createObjectURL(head.blob);
+        setPreview({ url: objectUrl, size: head.size, complete: head.blob.size >= head.size });
       } catch (err: any) {
         if (!controller.signal.aborted) setError(err?.message || translate('영상을 가져오지 못했습니다'));
       }
@@ -1297,29 +1318,71 @@ function MarkdownVideo({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [source, target, requested, loadLocalVideo, attempt]);
+  }, [source, target, near, loadLocalVideoPreview, attempt]);
 
-  // 원격은 누르기 전에도 URL 만 갤러리에 올린다(불러오지 않는다). 로컬은 바이트를 다 받은 뒤에 올린다.
-  const playable = source === 'remote' ? target : url;
+  // 로컬 재생 — 누르면 끝까지 받는다. 앞부분이 곧 전부(작은 파일)면 다시 받지 않는다.
+  const fetchFull = source === 'local' && playing && Boolean(preview) && !preview?.complete;
   useEffect(() => {
-    if (playable && registerMedia) registerMedia(mediaKey, { src: playable, kind: 'video', caption: captionText, filename });
-  }, [playable, registerMedia, mediaKey, captionText, filename]);
+    if (!fetchFull || !loadLocalVideo) return;
+    const controller = new AbortController();
+    let objectUrl = '';
+    setFullUrl('');
+    setProgress(null);
+    setError(null);
+    void (async () => {
+      try {
+        const blob = await loadLocalVideo(target, {
+          signal: controller.signal,
+          onProgress: (loaded, total) => { if (!controller.signal.aborted) setProgress({ loaded, total }); },
+        });
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setFullUrl(objectUrl);
+      } catch (err: any) {
+        if (!controller.signal.aborted) setError(err?.message || translate('영상을 가져오지 못했습니다'));
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fetchFull, target, loadLocalVideo, attempt]);
 
-  const caption = (
-    <span style={{ fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' }} title={target}>
-      {alt ? `${alt} — ` : ''}{target}
-    </span>
-  );
+  // 원격은 썸네일과 재생이 같은 주소다 — 바꿔 끼우면 다시 받으므로 장면만 처음으로 돌린다.
+  const playSrc = source === 'remote' ? target : (preview?.complete ? preview.url : fullUrl);
+  const thumbSrc = source === 'remote'
+    ? (near ? `${target}#t=${THUMB_AT_SECONDS}` : '')
+    : (preview ? `${preview.url}#t=${THUMB_AT_SECONDS}` : '');
+  const ready = playing && Boolean(playSrc);
+  const src = source === 'remote' ? thumbSrc : (ready ? playSrc : thumbSrc);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!ready || !video) return;
+    if (source === 'remote') {
+      try { video.currentTime = 0; } catch { /* 메타데이터 전이면 처음부터다 */ }
+    }
+    claimPlayback(video);
+    void video.play?.()?.catch?.(() => undefined);
+  }, [ready, source]);
+
+  useEffect(() => {
+    if (!registerMedia) return;
+    const galleryItem = source === 'remote' ? target : playSrc;
+    if (galleryItem) registerMedia(mediaKey, { src: galleryItem, kind: 'video', caption: captionText, filename });
+  }, [source, target, playSrc, registerMedia, mediaKey, captionText, filename]);
+
+  const captionStyle: React.CSSProperties = { fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' };
   const fileLink = source === 'local'
-    ? url && <a href={url} download={filename} style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('다운로드')}</a>
+    ? playSrc && <a href={playSrc} download={filename} style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('다운로드')}</a>
     : <a href={target} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('새 탭에서 열기')}</a>;
 
-  if (source === 'local' && !loadLocalVideo) {
-    return <div data-block="markdown-video" style={{ whiteSpace: 'normal' }}>🎬 {caption}</div>;
+  if (source === 'local' && (!loadLocalVideo || !loadLocalVideoPreview)) {
+    return <span data-block="markdown-video" style={{ display: 'block', whiteSpace: 'normal' }}>🎬 <span style={captionStyle} title={target}>{captionText}</span></span>;
   }
   if (error) {
     return (
-      <div data-block="markdown-video" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
+      <span data-block="markdown-video" style={{ display: 'block', margin: '6px 0', whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.warning }}>
         {translate('영상을 가져오지 못했습니다 —')} {error}
         <button
           type="button"
@@ -1330,84 +1393,102 @@ function MarkdownVideo({
           style={{ marginLeft: 8 }}
         >
           {translate('다시 시도')}</button>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-          <span style={{ flex: 1, minWidth: 0 }}>{caption}</span>
+        <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <span style={{ ...captionStyle, flex: 1, minWidth: 0 }} title={target}>{captionText}</span>
           {fileLink}
-        </div>
-      </div>
+        </span>
+      </span>
     );
   }
-  const ready = requested && Boolean(playable);
-  if (!ready) {
-    const loading = requested && source === 'local';
-    const percent = progress && progress.total > 0 ? Math.min(100, (progress.loaded / progress.total) * 100) : 0;
-    return (
-      <figure data-block="markdown-video" style={{ margin: '6px 0', whiteSpace: 'normal' }}>
-        <button
-          type="button"
-          disabled={loading}
-          onClick={() => setRequested(true)}
-          aria-label={translate('영상 재생')}
-          title={source === 'local' ? translate('영상 불러오기') : translate('영상 재생')}
-          style={{
-            position: 'relative',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            width: 'min(480px, 100%)',
-            aspectRatio: '16 / 9',
-            padding: 0,
-            overflow: 'hidden',
-            borderRadius: tokens.radii.md,
-            border: `1px solid ${tokens.colors.border}`,
-            background: '#000',
-            color: '#fff',
-            cursor: loading ? 'progress' : 'pointer',
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{ width: 56, height: 56, borderRadius: '50%', background: 'rgba(255,255,255,0.16)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}
-          >
-            ▶
-          </span>
-          {loading && (
-            <span data-video-progress="" style={{ fontSize: 11.5, color: '#ccc' }}>
-              {translate('영상 불러오는 중… {0}', { 0: progress ? `${megabytes(progress.loaded)} / ${megabytes(progress.total)}MB` : '' })}
-            </span>
-          )}
-          {loading && progress && (
-            <span aria-hidden="true" style={{ position: 'absolute', left: 0, bottom: 0, height: 3, width: `${percent}%`, background: tokens.colors.accent }} />
-          )}
-        </button>
-        <figcaption style={{ marginTop: 2 }}>{caption}</figcaption>
-      </figure>
-    );
-  }
+  const loadingFull = playing && !ready;
+  const percent = progress && progress.total > 0 ? Math.min(100, (progress.loaded / progress.total) * 100) : 0;
+  const sizeLabel = source === 'local' && preview ? `${megabytes(preview.size)}MB` : '';
+  const badge = [duration > 0 ? clockOf(duration) : '', sizeLabel].filter(Boolean).join(' · ');
   return (
-    <figure data-block="markdown-video" style={{ margin: '6px 0', whiteSpace: 'normal' }}>
-      <div style={{ position: 'relative', display: 'inline-block', maxWidth: '100%' }}>
+    <span data-block="markdown-video" style={{ display: 'block', margin: '6px 0', whiteSpace: 'normal' }}>
+      <span
+        ref={boxRef}
+        data-video-thumb=""
+        data-playing={ready ? 'true' : 'false'}
+        style={{ position: 'relative', display: 'block', width: ready ? 'min(860px, 100%)' : 'min(480px, 100%)' }}
+      >
         <video
           key={attempt}
           ref={videoRef}
-          src={playable}
-          controls
-          autoPlay
+          src={src || undefined}
+          controls={ready}
           playsInline
-          preload="metadata"
-          onError={() => setError(translate('브라우저가 이 영상을 재생하지 못했습니다'))}
+          preload={ready ? 'auto' : 'metadata'}
+          onPlay={(e) => claimPlayback(e.currentTarget)}
+          onLoadedMetadata={(e) => {
+            const d = e.currentTarget.duration;
+            if (Number.isFinite(d) && d > 0) setDuration(d);
+          }}
+          onError={() => {
+            // 로컬 썸네일을 앞부분만으로 못 그리는 파일(색인이 뒤에 있는 mp4)은 빈 카드로 두고 누르면 끝까지 받는다.
+            if (source === 'local' && !ready) return;
+            setError(translate('브라우저가 이 영상을 재생하지 못했습니다'));
+          }}
           style={{
             display: 'block',
-            maxWidth: '100%',
+            width: '100%',
+            aspectRatio: ready ? undefined : '16 / 9',
             maxHeight: 520,
+            objectFit: 'contain',
             borderRadius: tokens.radii.md,
             border: `1px solid ${tokens.colors.border}`,
             background: '#000',
           }}
         />
-        {openMedia && (
+        {!ready && (
+          <button
+            type="button"
+            disabled={loadingFull}
+            onClick={() => setPlaying(true)}
+            aria-label={translate('영상 재생')}
+            title={translate('영상 재생')}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: 0,
+              overflow: 'hidden',
+              border: 'none',
+              borderRadius: tokens.radii.md,
+              background: 'transparent',
+              color: '#fff',
+              cursor: loadingFull ? 'progress' : 'pointer',
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{ width: 56, height: 56, borderRadius: '50%', background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}
+            >
+              ▶
+            </span>
+            {loadingFull && (
+              <span data-video-progress="" style={{ fontSize: 11.5, color: '#eee', textShadow: '0 1px 2px #000' }}>
+                {translate('영상 불러오는 중… {0}', { 0: progress ? `${megabytes(progress.loaded)} / ${megabytes(progress.total)}MB` : '' })}
+              </span>
+            )}
+            {loadingFull && progress && (
+              <span aria-hidden="true" style={{ position: 'absolute', left: 0, bottom: 0, height: 3, width: `${percent}%`, background: tokens.colors.accent }} />
+            )}
+            {!loadingFull && badge && (
+              <span
+                data-video-badge=""
+                style={{ position: 'absolute', right: 6, bottom: 6, padding: '1px 6px', borderRadius: 4, background: 'rgba(0,0,0,0.7)', color: '#fff', fontSize: 11, fontFamily: MONO }}
+              >
+                {badge}
+              </span>
+            )}
+          </button>
+        )}
+        {openMedia && (source === 'remote' || playSrc) && (
           <button
             type="button"
             title={translate('크게 보기 (갤러리)')}
@@ -1426,16 +1507,66 @@ function MarkdownVideo({
             ⤢
           </button>
         )}
-      </div>
-      <figcaption style={{ marginTop: 2, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-        <span style={{ flex: 1, minWidth: 0 }}>{caption}</span>
-        {fileLink}
-      </figcaption>
-    </figure>
+      </span>
+      {withCaption ? (
+        <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', marginTop: 2 }}>
+          <span style={{ ...captionStyle, flex: 1, minWidth: 0 }} title={target}>{captionText}</span>
+          {fileLink}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
-export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage, loadLocalVideo }: SessionTranscriptProps) {
+/**
+ * 답 속 원격 영상 링크(`[#1 다나오 비치 · 0:35](https://…/preview/a.mp4)`, 맨 URL) — 링크는 글 안에 그대로 두고
+ * 바로 아래에 썸네일을 붙인다(목록이 끊기지 않는다). 링크 글자를 눌러도 새 탭 대신 그 썸네일이 재생된다.
+ * Ctrl/⌘/가운데 클릭의 새 탭 열기는 브라우저 기본 동작 그대로다.
+ */
+function VideoLink({
+  href,
+  children,
+  registerMedia,
+  openMedia,
+}: {
+  href: string;
+  children: React.ReactNode;
+  registerMedia?: (key: string, item: MediaLightboxItem) => void;
+  openMedia?: (key: string) => void;
+}) {
+  useLocale();
+  const [playSignal, setPlaySignal] = useState(0);
+  return (
+    <>
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-video-link=""
+        title={translate('누르면 바로 아래에서 재생')}
+        onClick={(e) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          setPlaySignal((value) => value + 1);
+        }}
+        style={{ color: tokens.colors.accent }}
+      >
+        {children}
+      </a>
+      <VideoThumb
+        source="remote"
+        target={href}
+        label={textOf(children).trim()}
+        playSignal={playSignal}
+        withCaption={false}
+        registerMedia={registerMedia}
+        openMedia={openMedia}
+      />
+    </>
+  );
+}
+
+export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage, loadLocalVideo, loadLocalVideoPreview }: SessionTranscriptProps) {
   useLocale();
   // 전사 전체 이미지 갤러리 — 새 탭/다운로드 대신 팝업 + prev/next.
   // 각 이미지 블록이 URL 을 resolve 한 뒤 registerMedia 로 등록한다.
@@ -1476,7 +1607,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'automatic_prompt':
             return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':
-            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} loadLocalVideo={loadLocalVideo} registerMedia={registerMedia} openMedia={openMedia} />;
+            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} loadLocalVideo={loadLocalVideo} loadLocalVideoPreview={loadLocalVideoPreview} registerMedia={registerMedia} openMedia={openMedia} />;
           case 'reasoning':
             return <ReasoningBlock key={block.key} text={block.text} />;
           case 'tool':
