@@ -105,6 +105,11 @@ export const AGENT_SESSION_REQUEST_OPS = [
   // AWB 화면은 다른 장비에 있으므로 매니저가 대신 읽어 준다. 이미지 파일만(확장자+매직 바이트,
   // SVG 제외) 8MB 까지 — 임의 파일 읽기 통로가 아니다. 상대 경로는 세션 cwd 기준.
   'local_image',
+  // 답에 경로로 적은 **영상**의 한 조각. { image_path, cwd?, offset, length? } → { base64, mime_type, size, offset, mtime_ms }
+  //
+  // 경로 규칙은 local_image 와 같고(영상 확장자 + 매직 바이트) 한 편 200MB 까지. 한 편이 RPC 응답
+  // 하나의 상한을 넘기 쉬우므로 화면이 offset 을 옮겨 가며 조각(최대 8MiB)을 모은다.
+  'local_video',
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 

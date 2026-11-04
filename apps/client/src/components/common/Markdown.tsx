@@ -16,11 +16,21 @@ import { tokens } from '../../tokens';
 
 export { handleMentionAwareCopy, type MentionParticipant } from './markdownRefs';
 
-function markdownComponents(participants?: MentionParticipant[]): Components {
+/**
+ * 링크 한 개를 표면이 직접 그린다 — `undefined` 를 돌려주면 기본 링크다. 세션 전사가 영상 링크를
+ * 재생 링크로 바꾸는 데 쓴다(맨 URL 자동 링크도 여기로 온다). 다른 표면은 넘기지 않는다.
+ */
+export type MarkdownLinkRenderer = (href: string, children: React.ReactNode) => React.ReactNode | undefined;
+
+function markdownComponents(participants?: MentionParticipant[], renderLink?: MarkdownLinkRenderer): Components {
   return {
-    a: ({ href, children }) => /^https?:\/\//i.test(href || '')
-      ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: tokens.colors.accent }}>{children}</a>
-      : <span>{children}</span>,
+    a: ({ href, children }) => {
+      const custom = href && renderLink ? renderLink(href, children) : undefined;
+      if (custom !== undefined) return <>{custom}</>;
+      return /^https?:\/\//i.test(href || '')
+        ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: tokens.colors.accent }}>{children}</a>
+        : <span>{children}</span>;
+    },
     span: ({ node, children, ...props }) => {
       const token = node?.properties?.['dataAwbRef'];
       return typeof token === 'string' ? <>{renderMarkdownRef(token, participants)}</> : <span {...props}>{children}</span>;
@@ -127,10 +137,10 @@ function prepareMarkdown(text: string) {
 /** Shared Markdown for sessions, chat, tickets, mission conversations and memory. Raw HTML is
  * never executed; KaTeX also keeps trust disabled for agent-authored formulas.
  */
-export default function Markdown({ text, participants }: { text: string; participants?: MentionParticipant[] }) {
+export default function Markdown({ text, participants, renderLink }: { text: string; participants?: MentionParticipant[]; renderLink?: MarkdownLinkRenderer }) {
   useLocale();
   const { source, remarkContent } = useMemo(() => prepareMarkdown(text), [text, getLocale()]);
-  const components = useMemo(() => markdownComponents(participants), [participants, getLocale()]);
+  const components = useMemo(() => markdownComponents(participants, renderLink), [participants, renderLink, getLocale()]);
   return <div className="awb-markdown">
     <ReactMarkdown remarkPlugins={[remarkGfm, remarkContent]}
       rehypePlugins={[[rehypeKatex, { trust: false, strict: false, maxExpand: 1000, maxSize: 20 }]]}

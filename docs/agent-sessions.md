@@ -213,11 +213,11 @@ credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using
   사용자 — history 로 읽은 것도 포함, open/prompt 같은 쓰기뿐 아니라)에게 SSE 로 흘린다. 다른 매니저 키는 남의 RPC 를 풀거나 이벤트를 중계할 수 없다.
   **서버 재시작 직후**: 매니저는 하트비트(HTTP)와 SSE 를 따로 다시 붙이므로, 호스트가 "연결됨" 인데 스트림은 아직
   없을 수 있다. 그때 보낸 요청은 SSE 로 가므로 사라진다. 그래서 스트림이 없을 때 보낸 **읽기** RPC(list/history/info/image/
-  local_image — `open` 은 중복 실행 위험으로 제외)는 그 매니저 스트림이 붙으면(`AgentConnectivityRegistry.onBecameReachable`)
+  local_image/local_video — `open` 은 중복 실행 위험으로 제외)는 그 매니저 스트림이 붙으면(`AgentConnectivityRegistry.onBecameReachable`)
   같은 request_id 로 다시 보내고 타임아웃도 새로 잰다. 사이드바도 목록 실패를 "세션 없음" 으로 저장하지 않고 마지막
   목록을 유지한 채 다시 묻는다(`Sidebar.tsx` `loadHostSessions`).
   **RPC 실패의 기본 HTTP 상태는 502/504 가 아니다**: 매니저가 실패를 답하면 기본 422, 시간 초과는 503(사유는 `message`).
-  `not_found`(404), 잘못된 경로(400), 이미지 형식(415)·크기(413) 오류는 기존 상태를 유지한다.
+  `not_found`(404), 잘못된 경로(400), 이미지·영상 형식(415)·크기(413)·영상 조각 범위(416) 오류는 기존 상태를 유지한다.
   앞단 Cloudflare 가 origin 의 502/504 를 자기 HTML 오류 페이지로 바꿔, 매니저가 정확히 말한 사유("The repository is
   on … with local changes")가 화면에 "Request failed" 로만 보였다(2026-10-20). 터미널 RPC 도 같다 —
   `common/host-rpc-status.ts`. 화면은 그래도 가려진 응답을 받으면 본문 대신 상태 코드를 말한다(`api.ts` `apiErrorMessage`).
@@ -594,7 +594,7 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
    쓰기 완료 전에 화면이 요청할 수 있으므로 `readStoredImage` 가 그 약속을 기다린다.
 3. 화면은 `GET /api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/image/:ref` 로
    바이트를 받는다. 서버는 `image` RPC 로 매니저에서 읽어 와 **저장하지 않고** 흘려보낸다.
-   `image`·`local_image` 를 포함한 모든 세션 RPC payload 에 검증된 Host 소유 `account_id` 를
+   `image`·`local_image`·`local_video` 를 포함한 모든 세션 RPC payload 에 검증된 Host 소유 `account_id` 를
    반드시 싣는다. SSE envelope 에만 소유권이 있으면 매니저는 빈 payload 소유권을 거절한다.
    재연결 재전송도 같은 계정을 유지한다(`test/agent-session-media-ownership.test.mjs`).
 4. 클라이언트는 그 응답을 **Blob URL** 로 바꿔 `<img>` 에 쓴다. `<img src>` 는 Authorization
@@ -634,6 +634,35 @@ html/md 보고서(`[결과](./report.html)`, `![결과](./notes.md)` — `!` 유
    다운로드 링크(새 탭 Blob URL 은 샌드박스가 안 걸리므로 "새 탭에서 열기"를 두지 않는다). md 는 텍스트로
    받아 `Markdown`으로 카드에 그린다. 서버는 `text/html`
    응답에 `Content-Security-Policy: sandbox` 를 덧붙여 URL 직접 열기까지 막는다.
+
+### 답에 적은 영상 (`local_video` RPC · 원격 영상 링크)
+
+에이전트가 렌더한 영상을 보여 주는 모양은 둘이다. 장비의 **경로**(`![데모](./out/demo.mp4)`,
+`[녹화](E:/rec/play.webm)`)이거나, 자기 장비의 미리보기 사이트에 올린 **원격 링크** —
+`- [#1 다나오 비치 · 0:35](https://…/preview/bohol-dive-1.mp4)` 목록, 맨 URL `▶ https://…/x.mp4`
+(실제 쓰임: 다이빙 영상 편집 세션). 확장자는 mp4·m4v·mov·webm·mkv·ogv, 판정은 클라이언트 `markdownImages.ts`.
+
+1. **누르기 전에는 불러오지 않는다.** 영상은 수십~수백 MB 라 전사를 열 때마다 받으면 모바일 데이터와 메모리를
+   쓰고, 원격이면 에이전트가 쓴 주소가 저절로 요청된다. 그래서 이미지와 달리 ▶ 카드·링크로 둔다.
+2. **원격 링크는 글 안에 남는다.** 목록 속 링크를 카드로 떼면 목록이 끊기므로 `Markdown` 의 `renderLink` 로
+   그 자리의 링크만 재생 링크(▶)로 바꾼다. 누르면 새 탭 대신 전사 갤러리(`MediaLightbox`)가 그 URL 을 재생하고
+   ← → 로 다른 영상·이미지로 넘긴다. Ctrl/⌘/가운데 클릭은 브라우저의 새 탭 열기 그대로다. 원격 영상의
+   이미지 문법(`![…](https://…mp4)`)과 로컬 경로는 그 자리의 재생 카드가 된다.
+3. **원격 재생은 CSP `media-src https:` 덕이다**(`common/security-headers.ts`). 미디어 지시어에만 열었다 —
+   영상은 코드를 실행하지 못하고, script/object/img 는 그대로다. 개발 서버에는 CSP 가 없어 거기서만 되고
+   운영에서 조용히 막히는 종류라 값을 `security-headers.test.mjs` 가 고정한다.
+4. **로컬 경로는 조각으로 온다.** 한 편이 RPC 응답 하나의 상한(16MB)을 넘기 쉬우므로 화면이
+   `GET …/sessions/:sessionId/local-video?path=&cwd=` 에 `Range: bytes=START-` 를 보내 끝까지 이어 받는다.
+   서버는 `local_video` RPC(`{image_path, cwd, offset, length?}`)로 매니저에 묻고, 응답은 늘 206 +
+   `Content-Range` · `ETag`(파일 크기-mtime) · `no-store` 다. 매니저(`readLocalVideoChunk`)는 경로 규칙이
+   `local_image` 와 같고, 조각마다 확장자와 매직 바이트(ISO BMFF `ftyp`·옛 QuickTime 상자·EBML·`OggS`,
+   ftyp 를 쓰는 AVIF/HEIF 그림은 거절)를 다시 보며, 조각은 최대 8MiB · 한 편은 200MB 까지다. mime 은 컨테이너
+   계열(`video/mp4`·`video/webm`·`video/ogg`)로 낸다 — Firefox 는 `video/quicktime` 이면 H.264 mov 도 거절한다.
+   화면은 조각마다 크기·ETag 가 같은지 보고, 받는 사이 파일이 바뀌면(다시 렌더한 영상) 섞지 않고 실패로 보인다.
+   Blob URL 로 재생하는 이유는 이미지와 같다(`<video src>` 는 Authorization 헤더를 못 보낸다).
+5. 실패는 그 자리에 경로와 사유로 보인다 — `not_video` 415 · `too_large` 413 · `bad_range` 416 ·
+   요청한 자리에서 시작하지 않거나 파일 크기를 넘는 조각은 422 `video_chunk_invalid`. 이 op 을 모르는 구버전
+   매니저는 501 `manager_outdated`. 서버는 영상 계열이 아닌 mime 을 `application/octet-stream` 으로 낮춘다.
 
 ### 스트리밍 응답 조각의 병합
 

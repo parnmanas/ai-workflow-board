@@ -233,13 +233,17 @@ const RPC_ERROR_STATUS: Record<string, number> = {
   invalid_path: 400,
   not_image: 415,
   too_large: 413,
+  // local_video — 영상 파일이 아니거나(415), 조각 시작이 파일 밖이다(416).
+  not_video: 415,
+  bad_range: 416,
 };
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, info: 20_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000 } as const;
+// local_video 는 조각 하나(최대 8MiB)를 매니저 장비의 업링크로 올리는 시간까지 기다린다.
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, info: 20_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000, local_video: 60_000 } as const;
 /**
  * 매니저 스트림이 없는 동안 보낸 요청 중 **다시 보내도 안전한 것**(읽기 전용). `open` 은 빠진다 —
  * 첫 요청이 실제로는 닿았을 수 있어 두 번 열면 세션 프로세스가 둘이 된다.
  */
-const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'info', 'usage_limits', 'image', 'local_image']);
+const REDELIVERABLE_OPS: ReadonlySet<string> = new Set(['list', 'history', 'info', 'usage_limits', 'image', 'local_image', 'local_video']);
 /** 스트림이 붙은 뒤 재전송까지 — SSE 핸들러가 Observable 을 돌려주고 구독되기를 기다린다. */
 const REDELIVER_DELAY_MS = 1_000;
 /** 매니저 쪽 프로세스가 살아 있어야만 성립하는 상태 — 매니저가 "없다" 고 답하면 유령이다. */
@@ -1293,6 +1297,56 @@ export class AgentSessionsService implements OnModuleDestroy {
         ? rawMime
         : 'application/octet-stream');
     return { bytes: Buffer.from(base64, 'base64'), mimeType };
+  }
+
+  /**
+   * 에이전트가 답에 **경로로** 적은 영상(`![데모](./out/demo.mp4)`)의 한 조각 — 매니저가 그 장비에서
+   * `offset` 부터 읽어 준다(최대 8MiB, 영상 한 편 200MB 까지).
+   *
+   * 영상 한 편은 RPC 응답 하나의 상한을 쉽게 넘기므로 화면이 조각을 모아 재생한다. 서버는 저장하지 않고
+   * 흘려보낸다. 조각마다 파일 크기·mtime 이 함께 와서 화면이 다시 렌더된 파일과 섞지 않는다.
+   */
+  async readLocalVideo(
+    accountId: string,
+    userId: string,
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    videoPath: string,
+    cwd: string,
+    offset: number,
+    length?: number,
+  ): Promise<{ bytes: Buffer; mimeType: string; size: number; offset: number; mtimeMs: number }> {
+    this.requireHost(accountId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const path = String(videoPath ?? '').trim();
+    if (!path || path.length > 4096) throw new AgentSessionError(400, 'video_path_invalid');
+    if (cwd.length > CWD_MAX) throw new AgentSessionError(400, 'cwd_too_long');
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new AgentSessionError(416, 'bad_range');
+    if (length !== undefined && (!Number.isSafeInteger(length) || length < 1)) throw new AgentSessionError(416, 'bad_range');
+    let result: { base64?: string; mime_type?: string; size?: number; offset?: number; mtime_ms?: number };
+    try {
+      result = await this.rpc(managerId, cli, 'local_video', {
+        account_id: accountId, session_id: sessionId, image_path: path, cwd, offset, ...(length === undefined ? {} : { length }),
+      }, userId);
+    } catch (err: any) {
+      if (err?.code === 'bad_request') {
+        throw new AgentSessionError(501, 'manager_outdated', 'Update the agent manager on this Runtime Host to play local videos.');
+      }
+      throw err;
+    }
+    const bytes = Buffer.from(typeof result?.base64 === 'string' ? result.base64 : '', 'base64');
+    const size = Number(result?.size);
+    // 화면은 Content-Range 로 조각을 잇는다 — 요청한 자리에서 시작하지 않거나 파일 밖으로 넘치는 답은
+    // 이어 붙이면 영상이 깨지므로 흘려보내지 않는다.
+    if (!bytes.length || !Number.isSafeInteger(size) || Number(result?.offset) !== offset || offset + bytes.length > size) {
+      throw new AgentSessionError(HOST_RPC_FAILED_STATUS, 'video_chunk_invalid', 'The Runtime Host returned an unusable video chunk.');
+    }
+    // 영상 계열만 그대로 낸다 — 변조된 매니저가 html 같은 mime 을 실어도 AWB origin 에서 문서로 열리지 않게.
+    const rawMime = typeof result?.mime_type === 'string' ? result.mime_type : '';
+    const mimeType = /^video\/(mp4|webm|ogg)$/.test(rawMime) ? rawMime : 'application/octet-stream';
+    const mtime = Number(result?.mtime_ms);
+    return { bytes, mimeType, size, offset, mtimeMs: Number.isFinite(mtime) ? Math.floor(mtime) : 0 };
   }
 
   async openSession(

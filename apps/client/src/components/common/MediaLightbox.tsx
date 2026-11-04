@@ -116,7 +116,10 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
             >
               <div style={{ color: tokens.colors.warningLight, fontWeight: 700, marginBottom: 6 }}>
                 {translate('⚠ 이 파일은 열 수 없습니다')}</div>
-              {translate('바이트는 저장돼 있지만 이미지/영상으로 해석되지 않습니다.')}</div>
+              {crossOrigin(current.src)
+                // 원격 주소는 우리가 가진 바이트가 아니다 — 없어졌거나(404) 브라우저가 못 푸는 형식이다.
+                ? (isVideo ? translate('브라우저가 이 영상을 재생하지 못했습니다') : translate('브라우저가 이 이미지를 그리지 못했습니다'))
+                : translate('바이트는 저장돼 있지만 이미지/영상으로 해석되지 않습니다.')}</div>
           </div>
         ) : (
           <ZoomStage
@@ -184,13 +187,25 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '50vw' }} title={label}>
           {label}
         </span>
-        <a
-          href={current.src}
-          download={current.filename || (isVideo ? 'video' : 'image')}
-          onClick={(e) => e.stopPropagation()}
-          style={{ color: '#bbb', fontSize: 11, border: '1px solid #666', borderRadius: 5, padding: '3px 10px', textDecoration: 'none' }}
-        >
-          {translate('Download')}</a>
+        {crossOrigin(current.src) ? (
+          // 다른 출처(세션 답의 원격 영상 링크)는 `download` 를 브라우저가 무시하고 이 탭을 그 주소로 넘겨 버린다.
+          <a
+            href={current.src}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            style={{ color: '#bbb', fontSize: 11, border: '1px solid #666', borderRadius: 5, padding: '3px 10px', textDecoration: 'none' }}
+          >
+            {translate('새 탭에서 열기')}</a>
+        ) : (
+          <a
+            href={current.src}
+            download={current.filename || (isVideo ? 'video' : 'image')}
+            onClick={(e) => e.stopPropagation()}
+            style={{ color: '#bbb', fontSize: 11, border: '1px solid #666', borderRadius: 5, padding: '3px 10px', textDecoration: 'none' }}
+          >
+            {translate('Download')}</a>
+        )}
         <button
           type="button"
           onClick={onClose}
@@ -209,6 +224,16 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
       </div>
     </div>
   );
+}
+
+/** 이 화면과 다른 출처의 http(s) 주소인가 — blob:·data:·같은 출처 첨부는 아니다. */
+function crossOrigin(src: string): boolean {
+  if (!/^https?:\/\//i.test(src)) return false;
+  try {
+    return new URL(src).origin !== window.location.origin;
+  } catch {
+    return false;
+  }
 }
 
 const centered: React.CSSProperties = {

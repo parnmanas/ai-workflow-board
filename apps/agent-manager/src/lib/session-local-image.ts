@@ -12,6 +12,9 @@
  * 임의 파일 읽기 통로가 아니다.
  * SVG 는 받지 않는다: Blob URL 은 앱 origin 을 물려받으므로, 새 탭에서 연 SVG 의 스크립트가
  * AWB origin 으로 돈다. HTML 은 샌드박스 iframe 으로만 그린다(클라이언트)는 전제로 받는다.
+ *
+ * 영상(mp4/mov/webm/…)은 같은 경로 규칙으로 찾되 **조각 단위로** 읽는다(`local_video` RPC,
+ * `readLocalVideoChunk`). 한 편이 RPC 응답 하나의 상한을 쉽게 넘기 때문이다.
  */
 import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -34,7 +37,21 @@ const TEXT_PREVIEW_MIME: Readonly<Record<string, string>> = {
   markdown: 'text/markdown',
 };
 
-export type LocalImageErrorCode = 'invalid_path' | 'not_found' | 'not_image' | 'too_large';
+/**
+ * 영상 한 편의 상한 — 서버의 첨부 업로드 상한과 같다. 바이트는 조각으로 오가므로 이 크기를
+ * 한 번에 들고 있는 곳은 없다(화면이 조각을 모아 재생한다).
+ */
+export const LOCAL_VIDEO_MAX_BYTES = 200 * 1024 * 1024;
+/**
+ * 영상 조각 하나의 상한 — 이미지 한 장의 상한과 같게 둔다. base64 로 10.7MiB 라 세션 RPC 응답
+ * 상한(서버 16MB) 안에 든다는 것이 이미 이미지로 검증된 크기다.
+ */
+export const LOCAL_VIDEO_CHUNK_BYTES = LOCAL_IMAGE_MAX_BYTES;
+
+/** 영상으로 읽는 확장자. avi 처럼 브라우저가 재생하지 못하는 컨테이너는 받지 않는다. */
+const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv']);
+
+export type LocalImageErrorCode = 'invalid_path' | 'not_found' | 'not_image' | 'not_video' | 'too_large' | 'bad_range';
 
 export class LocalImageError extends Error {
   constructor(readonly code: LocalImageErrorCode, message: string) {
@@ -50,6 +67,26 @@ export function sniffImageMime(head: Buffer): string | null {
   if (head.length >= 12 && head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
   if (head.length >= 2 && head.subarray(0, 2).toString('latin1') === 'BM') return 'image/bmp';
   if (head.length >= 12 && head.subarray(4, 8).toString('latin1') === 'ftyp' && /^avi[fs]$/.test(head.subarray(8, 12).toString('latin1'))) return 'image/avif';
+  return null;
+}
+
+/**
+ * 매직 바이트로 판정한 영상 mime. 영상이 아니면 null.
+ *
+ * mime 은 컨테이너 **계열**로 낸다 — QuickTime(mov)도 `video/mp4`, Matroska(mkv)도 `video/webm`.
+ * 같은 상자 구조라 브라우저가 그 이름으로 받아야 재생한다: Firefox 는 `video/quicktime` 이면
+ * H.264 mov 도 거절하고, 둘 다 `video/x-matroska` 는 재생 대상으로 보지 않는다.
+ * AVIF/HEIF 는 mp4 와 같은 `ftyp` 상자를 쓰지만 그림이라 영상이 아니다.
+ */
+export function sniffVideoMime(head: Buffer): string | null {
+  if (head.length >= 12 && head.subarray(4, 8).toString('latin1') === 'ftyp') {
+    const brand = head.subarray(8, 12).toString('latin1');
+    return /^(avi[fs]|hei[cmsx]|hev[cx]|mif1|msf1)$/.test(brand) ? null : 'video/mp4';
+  }
+  // ftyp 없이 시작하는 옛 QuickTime — 첫 상자가 곧바로 moov/mdat/wide/free.
+  if (head.length >= 8 && /^(moov|mdat|wide|free)$/.test(head.subarray(4, 8).toString('latin1'))) return 'video/mp4';
+  if (head.length >= 4 && head.readUInt32BE(0) === 0x1a45dfa3) return 'video/webm';
+  if (head.length >= 4 && head.subarray(0, 4).toString('latin1') === 'OggS') return 'video/ogg';
   return null;
 }
 
@@ -90,10 +127,10 @@ function extensionOf(path: string): string {
 }
 
 /**
- * 경로의 미리보기 파일을 읽는다. 적힌 그대로 없고 `%xx` 가 섞여 있으면 퍼센트 디코딩한 경로로 한 번 더
+ * 적힌 경로의 파일을 찾는다. 적힌 그대로 없고 `%xx` 가 섞여 있으면 퍼센트 디코딩한 경로로 한 번 더
  * 찾는다 — 공백을 `%20` 으로 적는 에이전트가 많다.
  */
-export async function readLocalImage(raw: string, cwd: string): Promise<{ path: string; mimeType: string; bytes: Buffer }> {
+async function findLocalFile(raw: string, cwd: string): Promise<{ path: string; size: number; mtimeMs: number }> {
   const candidates = [resolveLocalImagePath(raw, cwd)];
   if (/%[0-9A-Fa-f]{2}/.test(raw)) {
     try {
@@ -102,17 +139,16 @@ export async function readLocalImage(raw: string, cwd: string): Promise<{ path: 
       // 디코딩이 안 되는 `%` 는 그냥 글자다.
     }
   }
-  let path = '';
-  let size = 0;
   for (const candidate of candidates) {
     const st = await stat(candidate).catch(() => null);
-    if (st?.isFile()) {
-      path = candidate;
-      size = st.size;
-      break;
-    }
+    if (st?.isFile()) return { path: candidate, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
   }
-  if (!path) throw new LocalImageError('not_found', `No such file on the Runtime Host: ${candidates[0]}`);
+  throw new LocalImageError('not_found', `No such file on the Runtime Host: ${candidates[0]}`);
+}
+
+/** 경로의 미리보기 파일(이미지·html·md)을 읽는다. */
+export async function readLocalImage(raw: string, cwd: string): Promise<{ path: string; mimeType: string; bytes: Buffer }> {
+  const { path, size } = await findLocalFile(raw, cwd);
   const ext = extensionOf(path);
   const textMime = TEXT_PREVIEW_MIME[ext];
   if (textMime) return readLocalTextFile(path, size, textMime);
@@ -130,6 +166,55 @@ export async function readLocalImage(raw: string, cwd: string): Promise<{ path: 
     const mimeType = sniffImageMime(bytes.subarray(0, 16));
     if (!mimeType) throw new LocalImageError('not_image', `File content is not a recognised image: ${path}`);
     return { path, mimeType, bytes };
+  } finally {
+    await handle.close();
+  }
+}
+
+export interface LocalVideoChunk {
+  path: string;
+  mimeType: string;
+  /** 파일 전체 크기 — 화면은 이 값과 `mtimeMs` 가 조각마다 같은지 보고 섞인 파일을 막는다. */
+  size: number;
+  mtimeMs: number;
+  offset: number;
+  bytes: Buffer;
+}
+
+/**
+ * 답에 적힌 영상 파일의 `offset` 부터 최대 `length` 바이트(조각 상한 `LOCAL_VIDEO_CHUNK_BYTES`)를 읽는다.
+ *
+ * 조각마다 확장자와 매직 바이트를 다시 본다 — 이 통로가 "영상 미리보기" 를 넘어 임의 파일의 임의
+ * 구간을 읽는 길이 되지 않게. 상한은 파일 전체 크기로 잰다(조각을 모으면 그만큼이 화면에 쌓인다).
+ */
+export async function readLocalVideoChunk(
+  raw: string,
+  cwd: string,
+  offset = 0,
+  length = LOCAL_VIDEO_CHUNK_BYTES,
+): Promise<LocalVideoChunk> {
+  const { path, size, mtimeMs } = await findLocalFile(raw, cwd);
+  if (!VIDEO_EXTENSIONS.has(extensionOf(path))) {
+    throw new LocalImageError('not_video', `Not a video file (${[...VIDEO_EXTENSIONS].join(', ')} only): ${path}`);
+  }
+  if (size === 0) throw new LocalImageError('not_video', `Empty file: ${path}`);
+  if (size > LOCAL_VIDEO_MAX_BYTES) {
+    throw new LocalImageError('too_large', `Video is ${Math.round(size / (1024 * 1024))}MB — over the ${Math.round(LOCAL_VIDEO_MAX_BYTES / (1024 * 1024))}MB cap.`);
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= size) {
+    throw new LocalImageError('bad_range', `Range starts at ${offset}, outside the ${size}-byte file.`);
+  }
+  const want = Math.min(Number.isSafeInteger(length) && length > 0 ? length : LOCAL_VIDEO_CHUNK_BYTES, LOCAL_VIDEO_CHUNK_BYTES, size - offset);
+  const handle = await open(path, 'r');
+  try {
+    const head = Buffer.alloc(16);
+    const { bytesRead: headRead } = await handle.read(head, 0, head.length, 0);
+    const mimeType = sniffVideoMime(head.subarray(0, headRead));
+    if (!mimeType) throw new LocalImageError('not_video', `File content is not a recognised video: ${path}`);
+    const bytes = Buffer.alloc(want);
+    const { bytesRead } = await handle.read(bytes, 0, want, offset);
+    // 읽는 사이 파일이 줄었으면 읽힌 만큼만 — 크기·mtime 이 달라졌으니 화면이 다음 조각에서 알아챈다.
+    return { path, mimeType, size, mtimeMs, offset, bytes: bytes.subarray(0, bytesRead) };
   } finally {
     await handle.close();
   }

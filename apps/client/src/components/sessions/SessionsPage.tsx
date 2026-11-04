@@ -815,6 +815,12 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
     (path: string) => api.getHostSessionLocalImage(managerId, cli, sessionId, path, cwd),
     [managerId, cli, sessionId, cwd],
   );
+  // 답에 경로로 적은 영상 — 같은 경로 규칙으로 매니저가 조각을 읽어 주고, 전사가 끝까지 모아 재생한다.
+  const loadLocalVideo = useCallback(
+    (path: string, options?: { onProgress?: (loaded: number, total: number) => void; signal?: AbortSignal }) =>
+      api.getHostSessionLocalVideo(managerId, cli, sessionId, path, cwd, options),
+    [managerId, cli, sessionId, cwd],
+  );
 
   const setConfigOption = useCallback(async (configId: string, value: string | boolean) => {
     try {
@@ -1129,6 +1135,7 @@ function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
             permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
             loadImage={loadImage}
             loadLocalImage={loadLocalImage}
+            loadLocalVideo={loadLocalVideo}
           />
           </div>
         )}

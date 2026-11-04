@@ -11,7 +11,8 @@
 // 이 파일이 고정하는 것:
 //   1. img/media 가 blob: 과 data: 를 허용한다 — 첨부는 object URL 로 그린다.
 //   2. 그 완화가 **실행 가능한 자원으로 번지지 않는다**: script-src/object-src 는
-//      blob:/data: 를 받지 않는다. 이게 이 완화의 안전선이다.
+//      blob:/data:/https: 를 받지 않는다. 이게 이 완화의 안전선이다. media-src 만 https: 원격
+//      영상을 받는다(세션 답의 영상 링크 재생).
 //   3. objectSrc 'none' / frameAncestors 'none' 이 그대로 남아 있다.
 //   4. main.ts 가 이 상수를 실제로 쓴다 — 값만 맞고 배선이 끊기면 의미가 없다.
 //   5. script-src 는 WASM 컴파일만 연다('wasm-unsafe-eval') — 음성 감지(VAD)가 WASM 이다. JS eval 을 여는
@@ -45,10 +46,17 @@ test('완화가 실행 가능한 자원으로 번지지 않는다 — blob: 은 
   for (const key of ['scriptSrc', 'scriptSrcAttr', 'objectSrc']) {
     const v = CSP_DIRECTIVES[key];
     if (!v) continue; // 선언하지 않으면 helmet 기본값(더 엄격)이 적용된다
-    for (const scheme of ['blob:', 'data:']) {
+    for (const scheme of ['blob:', 'data:', 'https:', '*']) {
       assert.ok(!v.includes(scheme), `${key} 에 ${scheme} 을 주면 임의 코드 실행 경로가 열린다`);
     }
   }
+});
+
+test('media-src 는 https: 원격 영상을 받는다 — 세션 답의 영상 링크를 그 자리에서 재생', () => {
+  // 개발 서버(Vite)에는 CSP 가 없어 거기서는 재생되고 운영에서만 조용히 막힌다 — 값을 직접 고정한다.
+  const v = CSP_DIRECTIVES.mediaSrc;
+  assert.ok(v.includes('https:'), '없으면 에이전트가 링크한 원격 미리보기 영상이 운영에서만 재생되지 않는다');
+  assert.ok(!v.includes('http:') && !v.includes('*'), '평문 http 와 와일드카드는 열지 않는다');
 });
 
 test("script-src 는 WebAssembly 만 허락한다 — 음성 감지(VAD)가 WASM 이고, JS eval 은 그대로 막힌다", () => {

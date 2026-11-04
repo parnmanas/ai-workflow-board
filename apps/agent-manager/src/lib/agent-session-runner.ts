@@ -32,7 +32,7 @@ import type { InterruptedAgentSession } from './restart-resume.js';
 import { log } from './logging.js';
 import { terminateDetachedProcessTree } from './process-tree.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
-import { LocalImageError, readLocalImage } from './session-local-image.js';
+import { LocalImageError, readLocalImage, readLocalVideoChunk } from './session-local-image.js';
 import {
   fetchSessionCredential,
   patchAgentSessionState,
@@ -75,7 +75,7 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'info' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image';
+  op: 'list' | 'history' | 'info' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image' | 'local_video';
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -94,8 +94,11 @@ export interface AgentSessionRequest {
   mode_id?: string;
   /** image — 보관된 이미지 참조(이벤트 payload 의 `image_ref`). */
   image_ref?: string;
-  /** local_image — 에이전트가 답에 적은 미리보기 파일 경로(`![alt](path)` 이미지·html·md). 상대 경로는 세션 cwd 기준. */
+  /** local_image · local_video — 에이전트가 답에 적은 미리보기 파일 경로(`![alt](path)` 이미지·html·md·영상). 상대 경로는 세션 cwd 기준. */
   image_path?: string;
+  /** local_video — 읽을 조각의 시작 바이트와 최대 길이(매니저가 조각 상한으로 다시 자른다). */
+  offset?: number;
+  length?: number;
   /** set_config_option */
   config_id?: string;
   config_value?: string | boolean;
@@ -775,6 +778,34 @@ export class AgentSessionRunner {
             await this.#reply(requestId, op, {
               ok: true,
               result: { base64: image.bytes.toString('base64'), mime_type: image.mimeType, path: image.path },
+            });
+          } catch (err: any) {
+            if (!(err instanceof LocalImageError)) throw err;
+            await this.#reply(requestId, op, { ok: false, error: err.message, code: err.code });
+          }
+          return;
+        }
+        case 'local_video': {
+          // 답에 적은 영상 파일의 한 조각 — 경로 규칙은 local_image 와 같다. 영상은 한 편이 RPC 응답 하나의
+          // 상한을 넘기 쉬우므로 화면이 offset 을 옮겨 가며 조각을 모은다(크기·mtime 으로 섞임을 막는다).
+          const live = sessionId ? this.#live.get(this.#key(cli, sessionId)) : undefined;
+          try {
+            const chunk = await readLocalVideoChunk(
+              String(request.image_path || ''),
+              live?.cwd || request.cwd || '',
+              Number(request.offset ?? 0),
+              Number(request.length ?? 0),
+            );
+            await this.#reply(requestId, op, {
+              ok: true,
+              result: {
+                base64: chunk.bytes.toString('base64'),
+                mime_type: chunk.mimeType,
+                size: chunk.size,
+                offset: chunk.offset,
+                mtime_ms: chunk.mtimeMs,
+                path: chunk.path,
+              },
             });
           } catch (err: any) {
             if (!(err instanceof LocalImageError)) throw err;

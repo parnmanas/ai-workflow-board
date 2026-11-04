@@ -36,5 +36,13 @@ export const CSP_DIRECTIVES: Record<string, string[]> = {
    * object-src)에는 그대로 주지 않는다 — 그 구분이 이 완화의 안전선이다.
    */
   imgSrc: ["'self'", 'data:', 'blob:'],
-  mediaSrc: ["'self'", 'data:', 'blob:'],
+  /*
+   * `https:` — 세션 답의 원격 영상 링크를 그 자리에서 재생한다. 에이전트가 렌더한 영상을 자기 장비의
+   * 미리보기 사이트에 올리고 `[#1 하이라이트 · 0:35](https://…/preview/x.mp4)` 처럼 링크하는 것이 실제
+   * 쓰임이다(docs/agent-sessions.md "답에 적은 영상"). 미디어 지시어에만 연다: 영상·소리는 코드를
+   * 실행하지 못하고, 실행 가능한 자원(script-src · object-src)과 img-src 는 그대로다. 화면은 원격
+   * 영상을 누를 때까지 불러오지 않으므로(preload 없음) 에이전트가 쓴 URL 이 저절로 요청되지 않는다.
+   * 평문 `http:` 는 열지 않는다 — https 페이지의 http 미디어는 어차피 브라우저가 막거나 올려 버린다.
+   */
+  mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
 };

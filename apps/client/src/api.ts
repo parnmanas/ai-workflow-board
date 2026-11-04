@@ -1848,6 +1848,49 @@ export const api = {
     const resp = await fetchOk(url);
     return resp.blob();
   },
+  /**
+   * 에이전트가 답에 **경로로** 적은 영상(`![데모](./out/demo.mp4)`) — 그 Runtime Host 의 매니저가 조각(최대 8MiB)
+   * 으로 읽어 주는 것을 끝까지 이어 받아 Blob 하나로 만든다. `<video src>` 는 Authorization 헤더를 못 보내므로
+   * 이미지처럼 Blob URL 로 재생한다. 조각 사이에 파일이 바뀌면(크기·mtime = ETag) 섞인 영상 대신 실패로 던진다.
+   */
+  getHostSessionLocalVideo: async (
+    managerId: string,
+    cli: string,
+    sessionId: string,
+    path: string,
+    cwd: string,
+    options: { onProgress?: (loaded: number, total: number) => void; signal?: AbortSignal } = {},
+  ): Promise<Blob> => {
+    const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });
+    const url = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
+      + `/sessions/${encodeURIComponent(sessionId)}/local-video?${query.toString()}`;
+    const parts: Blob[] = [];
+    let loaded = 0;
+    let total = -1;
+    let etag = '';
+    let type = '';
+    while (total < 0 || loaded < total) {
+      const resp = await fetchOk(url, { headers: { Range: `bytes=${loaded}-` }, signal: options.signal });
+      const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(resp.headers.get('Content-Range') || '');
+      const part = await resp.blob();
+      const [start, end, size] = range ? [Number(range[1]), Number(range[2]), Number(range[3])] : [-1, -1, -1];
+      if (start !== loaded || end < start || end >= size || part.size !== end - start + 1) {
+        throw new Error(translate('영상 응답을 해석하지 못했습니다.'));
+      }
+      const tag = resp.headers.get('ETag') || '';
+      if (total < 0) {
+        total = size;
+        etag = tag;
+        type = resp.headers.get('Content-Type') || 'video/mp4';
+      } else if (size !== total || tag !== etag) {
+        throw new Error(translate('영상 파일이 불러오는 동안 바뀌었습니다. 다시 시도해 주세요.'));
+      }
+      parts.push(part);
+      loaded = end + 1;
+      options.onProgress?.(loaded, total);
+    }
+    return new Blob(parts, { type });
+  },
   /** 세션 프롬프트 — 텍스트 + 이미지 첨부. 이미지는 base64 그대로 실어 보내고 서버는 저장하지 않고
    *  매니저로 흘려보낸다(매니저가 ACP Image 블록으로 변환). 빈 텍스트 + 이미지 1장 이상도 된다. */
   promptHostSession: (managerId: string, cli: string, sessionId: string, text: string, images?: { base64: string; mime_type: string }[]) =>

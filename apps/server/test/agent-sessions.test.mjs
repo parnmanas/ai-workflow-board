@@ -1198,6 +1198,103 @@ test('local image: 경로를 매니저에 묻고 바이트를 그 mime 으로, �
   assert.equal(empty.status, 400);
 });
 
+// 답에 경로로 적은 영상(`![데모](./out/demo.mp4)`) — 한 편이 RPC 응답 하나의 상한을 넘기므로 매니저가 조각으로
+// 읽어 주고, 화면이 `Range` 로 이어 받는다. 서버는 조각을 저장하지 않고 206 + Content-Range 로 흘려보낸다.
+test('local video: Range 조각을 매니저에 묻고 206 · Content-Range · ETag 로, 이상한 답과 범위는 사유 있는 상태 코드로', async (t) => {
+  const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
+  t.after(async () => { await closeTestApp(app); });
+  const { getDataSourceToken, AuthService, activityEvents } = modules;
+  const base = `http://localhost:${port}`;
+  const ws = await createAccount(app, getDataSourceToken, 'agent-sessions-local-video');
+  const owner = await createUser(app, getDataSourceToken, { name: 'owner-lv', role: 'admin' });
+  const ownerHeaders = { Authorization: `Bearer ${app.get(AuthService).createSession(owner.id)}`, 'X-Account-Id': ws.id };
+  const agent = await createAgent(app, getDataSourceToken, ws.id, { name: 'coder-lv', type: 'claude' });
+  const managerId = agent.manager_agent_id;
+  const managerHeaders = { 'X-Agent-Key': runtimeHostKeyForAgent(agent.id), 'Content-Type': 'application/json' };
+  const heartbeat = await call(`${base}/api/agent/instance-heartbeat`, {
+    method: 'POST', headers: managerHeaders,
+    body: JSON.stringify({
+      instance_id: 'inst-lv-1', agent_id: managerId, host_id: managerId, mode: 'manager', hostname: 'ragnar', plugin_version: 'test',
+      cli: 'claude', cli_adapters: ['claude'], acp_session_clis: ['claude'], pid: 4244, started_at: new Date().toISOString(),
+    }),
+  });
+  assert.ok(heartbeat.status < 300, heartbeat.text);
+
+  const requests = [];
+  const onRequest = (payload) => requests.push(payload);
+  activityEvents.on('agent_session_request', onRequest);
+  t.after(() => activityEvents.removeListener('agent_session_request', onRequest));
+
+  const SID = '019d5d74-427c-7d13-b1c4-a54e0081375b';
+  const path = './out/bohol pool.mp4';
+  const url = `${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/${SID}/local-video?${new URLSearchParams({ path, cwd: '/home/u/dive' })}`;
+  const MP4 = Buffer.from('000000186674797069736f6d0000020069736f6d6d703432', 'hex');
+  const chunk = (offset, bytes, extra = {}) => ({
+    ok: true,
+    result: { base64: bytes.toString('base64'), mime_type: 'video/mp4', size: 100, offset, mtime_ms: 1730000000123, path, ...extra },
+  });
+  const ask = async (managerBody, range) => {
+    const seen = requests.length;
+    const pending = fetch(url, { headers: { ...ownerHeaders, ...(range === undefined ? {} : { Range: range }) } });
+    await waitFor(() => requests.length > seen, 'local_video request');
+    const req = requests[requests.length - 1];
+    await call(`${base}/api/agent/sessions/rpc/${req.request_id}`, { method: 'POST', headers: managerHeaders, body: JSON.stringify({ manager_id: managerId, ...managerBody }) });
+    const res = await pending;
+    return { req, res, bytes: Buffer.from(await res.arrayBuffer()) };
+  };
+
+  const first = await ask(chunk(0, MP4), 'bytes=0-');
+  assert.deepEqual(
+    { op: first.req.op, session_id: first.req.session_id, image_path: first.req.image_path, cwd: first.req.cwd, offset: first.req.offset, length: first.req.length },
+    { op: 'local_video', session_id: SID, image_path: path, cwd: '/home/u/dive', offset: 0, length: undefined },
+    '끝이 없는 Range 는 길이를 매니저의 조각 상한에 맡긴다',
+  );
+  assert.equal(first.res.status, 206);
+  assert.equal(first.res.headers.get('content-type'), 'video/mp4');
+  assert.equal(first.res.headers.get('content-range'), `bytes 0-${MP4.length - 1}/100`);
+  assert.equal(first.res.headers.get('accept-ranges'), 'bytes');
+  assert.equal(first.res.headers.get('etag'), '"100-1730000000123"', '화면이 조각 사이에 바뀐 파일을 알아채는 값');
+  assert.equal(first.res.headers.get('cache-control'), 'no-store');
+  assert.ok(first.bytes.equals(MP4));
+
+  const bounded = await ask(chunk(24, Buffer.alloc(10, 1)), 'bytes=24-33');
+  assert.deepEqual([bounded.req.offset, bounded.req.length], [24, 10], '끝이 있으면 길이로 넘긴다');
+  assert.equal(bounded.res.headers.get('content-range'), 'bytes 24-33/100');
+
+  const noRange = await ask(chunk(0, MP4));
+  assert.deepEqual([noRange.req.offset, noRange.res.status], [0, 206], 'Range 가 없으면 처음부터');
+
+  const misaligned = await ask(chunk(8, MP4), 'bytes=0-');
+  assert.equal(misaligned.res.status, 422, '요청한 자리에서 시작하지 않는 조각을 이어 붙이면 영상이 깨진다');
+  assert.equal(JSON.parse(misaligned.bytes.toString()).error, 'video_chunk_invalid');
+  const overflow = await ask(chunk(96, MP4), 'bytes=96-');
+  assert.equal(overflow.res.status, 422, '파일 크기를 넘치는 조각');
+
+  const html = await ask(chunk(0, MP4, { mime_type: 'text/html' }), 'bytes=0-');
+  assert.equal(html.res.headers.get('content-type'), 'application/octet-stream', '영상 계열이 아닌 mime 은 그대로 내보내지 않는다');
+
+  const notVideo = await ask({ ok: false, error: 'Not a video file (mp4, …): ./out/notes.txt', code: 'not_video' }, 'bytes=0-');
+  assert.equal(notVideo.res.status, 415);
+  assert.match(JSON.parse(notVideo.bytes.toString()).message, /Not a video file/);
+  const outside = await ask({ ok: false, error: 'Range starts at 200, outside the 100-byte file.', code: 'bad_range' }, 'bytes=200-');
+  assert.equal(outside.res.status, 416);
+  const tooLarge = await ask({ ok: false, error: 'Video is 250MB — over the 200MB cap.', code: 'too_large' }, 'bytes=0-');
+  assert.equal(tooLarge.res.status, 413);
+  const outdated = await ask({ ok: false, error: 'Unknown RPC op local_video', code: 'bad_request' }, 'bytes=0-');
+  assert.equal(outdated.res.status, 501);
+  assert.equal(JSON.parse(outdated.bytes.toString()).error, 'manager_outdated', '구버전 매니저는 업데이트하라고 알려 준다');
+
+  // 화면이 쓰지 않는 Range 모양은 매니저까지 가지 않는다.
+  const before = requests.length;
+  for (const range of ['bytes=-500', 'bytes=0-10,20-30', 'items=0-1', 'bytes=10-5']) {
+    const bad = await call(url, { headers: { ...ownerHeaders, Range: range } });
+    assert.equal(bad.status, 416, range);
+  }
+  const empty = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/${SID}/local-video?path=`, { headers: ownerHeaders });
+  assert.equal(empty.status, 400);
+  assert.equal(requests.length, before, '거절한 요청은 Runtime Host 에 닿지 않는다');
+});
+
 // 원격 서버에서 89MB 세션이 한 시간 동안 열리지 않았다 — 매니저의 RPC 응답이 413 으로 버려질 때마다 화면은
 // 40초 타임아웃만 봤다. 매니저가 보낼 수 있는 가장 큰 정상 응답(이미지 8MiB → base64 10.7MiB)이 서버의 일반
 // JSON 상한(10MB)을 넘었으므로, RPC 응답 경로는 그보다 큰 상한으로 받고 gzip 본문도 푼다.

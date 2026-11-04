@@ -2,7 +2,7 @@ import { markdownCodeRanges, markdownMathRanges } from '../../utils/markdownMath
 
 /**
  * 에이전트 답 속의 미리보기 참조(`![alt](target)` 이미지, `[보고서](./report.html)` 같은
- * html/md 파일 링크)를 떼어 낸다.
+ * html/md 파일 링크, `![데모](./out/demo.mp4)` 같은 영상)를 떼어 낸다.
  *
  * Codex 데스크톱 앱은 에이전트가 `![변경된 UI](E:/…/forge.png)` 처럼 **로컬 경로**를 적으면 그
  * 파일을 그려 준다 — 앱이 곧 에이전트 장비라서 가능한 일이다. AWB 화면은 다른 장비에 있으므로
@@ -26,7 +26,14 @@ export type MarkdownImageSegment =
    * 에이전트는 파일 링크에 `!` 를 붙일 때도 있고 안 붙일 때도 있다. 원격 http(s) 는 여기서
    * 떼지 않는다(브라우저 직접 fetch 의 CORS·프레이밍 문제가 있어 세션 전사 범위를 넘는다).
    */
-  | { kind: 'file'; alt: string; target: string; source: 'local'; fileKind: 'html' | 'markdown' };
+  | { kind: 'file'; alt: string; target: string; source: 'local'; fileKind: 'html' | 'markdown' }
+  /**
+   * 영상(`![데모](./out/demo.mp4)`) — 누르면 재생하는 카드. 로컬 경로는 `!` 유무와 무관하게 뗀다
+   * (브라우저가 열 수 없는 링크라서). 원격 http(s) 영상은 이미지 문법일 때만 떼고, 링크
+   * (`[#1 · 0:35](https://…/a.mp4)`, 맨 URL)는 글에 남겨 전사가 재생 링크로 바꾼다(`isRemoteVideoUrl`) —
+   * 목록 속 링크를 카드로 바꾸면 목록이 끊긴다.
+   */
+  | { kind: 'video'; alt: string; target: string; source: 'local' | 'remote' };
 
 /**
  * `![alt](` 뒤의 대상을 읽는다. 끝 위치(닫는 `)` 다음)와 대상을 돌려주고, 못 읽으면 null.
@@ -72,15 +79,34 @@ function classify(target: string): 'local' | 'remote' | null {
 
 const HTML_EXTS = new Set(['html', 'htm']);
 const MD_EXTS = new Set(['md', 'markdown']);
+/** 영상으로 재생하는 확장자 — 매니저(`session-local-image.ts`)가 받는 집합과 같다. */
+const VIDEO_EXTS = new Set(['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv']);
 
-/** 로컬 경로의 미리보기 파일 종류. 쿼리·프래그먼트가 붙어도 확장자로 판정한다. */
-function fileKindOf(target: string): 'html' | 'markdown' | null {
+/** 쿼리·프래그먼트가 붙어도 확장자로 판정한다. */
+function extensionOf(target: string): string {
   const m = /\.([A-Za-z0-9]+)(?:[?#].*)?$/.exec(target.trim());
-  if (!m) return null;
-  const ext = m[1].toLowerCase();
+  return m ? m[1].toLowerCase() : '';
+}
+
+/** 로컬 경로의 미리보기 파일 종류. */
+function fileKindOf(target: string): 'html' | 'markdown' | null {
+  const ext = extensionOf(target);
   if (HTML_EXTS.has(ext)) return 'html';
   if (MD_EXTS.has(ext)) return 'markdown';
   return null;
+}
+
+/**
+ * 영상 파일을 가리키는 http(s) URL 인가 — 경로 끝의 확장자로만 본다(`?file=a.mp4` 같은 쿼리는 아니다).
+ * 전사가 답 속 링크를 재생 링크로 바꿀지 정할 때 쓴다.
+ */
+export function isRemoteVideoUrl(href: string): boolean {
+  if (!/^https?:\/\//i.test(href)) return false;
+  try {
+    return VIDEO_EXTS.has(extensionOf(new URL(href).pathname));
+  } catch {
+    return false;
+  }
 }
 
 /** 코드 예시와 수식 안의 이미지 문법은 미리보기로 읽지 않는다. */
@@ -103,12 +129,15 @@ export function splitMarkdownImages(text: string): MarkdownImageSegment[] {
     const source = classify(read.target);
     if (!source) continue;
     const fileKind = source === 'local' ? fileKindOf(read.target) : null;
-    // html/md 가 아닌 일반 링크(`[링크](x)`)는 미리보기가 아니다 — 여기서 건너뛰어 앞뒤 글과
+    const video = !fileKind && (source === 'local' ? VIDEO_EXTS.has(extensionOf(read.target)) : isRemoteVideoUrl(read.target));
+    // html/md·로컬 영상이 아닌 일반 링크(`[링크](x)`)는 미리보기가 아니다 — 여기서 건너뛰어 앞뒤 글과
     // 한 텍스트 세그먼트로 남긴다. 소비할 때만 커서를 움직여야 기존 동작과 글자 단위로 같다.
-    if (!fileKind && !isImageSyntax) continue;
+    if (!fileKind && !isImageSyntax && !(video && source === 'local')) continue;
     if (m.index > cursor) out.push({ kind: 'text', text: text.slice(cursor, m.index) });
     if (fileKind) {
       out.push({ kind: 'file', alt, target: read.target, source: 'local', fileKind });
+    } else if (video) {
+      out.push({ kind: 'video', alt, target: read.target, source });
     } else {
       out.push({ kind: 'image', alt, target: read.target, source });
     }

@@ -69,8 +69,14 @@ test('session media reaches only its owning host with account-scoped RPCs', asyn
     { name: 'local image', op: 'local_image', path: './shots/result.png', mime: 'image/png', bytes: png },
     { name: 'HTML report', op: 'local_image', path: './report.html', mime: 'text/html', bytes: Buffer.from('<h1>Result</h1>') },
     { name: 'Markdown report', op: 'local_image', path: './notes.md', mime: 'text/markdown', bytes: Buffer.from('# Result\n') },
+    // 영상은 조각으로 온다 — 206 + 파일 크기·위치를 함께 싣는다.
+    {
+      name: 'local video', op: 'local_video', endpoint: 'local-video', path: './out/demo.mp4', mime: 'video/mp4', status: 206,
+      bytes: Buffer.from('000000186674797069736f6d0000020069736f6d6d703432', 'hex'), extra: { size: 24, offset: 0, mtime_ms: 1 },
+    },
   ];
-  const urlFor = sample => `${base}${sessionPath}${sample.suffix || `/local-image?${new URLSearchParams({ path: sample.path, cwd: '/srv/work' })}`}`;
+  const urlFor = sample => `${base}${sessionPath}${sample.suffix || `/${sample.endpoint || 'local-image'}?${new URLSearchParams({ path: sample.path, cwd: '/srv/work' })}`}`;
+  const resultFor = sample => ({ base64: sample.bytes.toString('base64'), mime_type: sample.mime, ...(sample.extra || {}) });
 
   for (const sample of samples) {
     await t.test(sample.name, async () => {
@@ -82,11 +88,11 @@ test('session media reaches only its owning host with account-scoped RPCs', asyn
       });
       assert.equal(spoof.status, 404, 'another host cannot answer the file request');
       const reply = await post(`/api/agent/sessions/rpc/${request.request_id}`, managerKey, {
-        manager_id: managerId, ok: true, result: { base64: sample.bytes.toString('base64'), mime_type: sample.mime },
+        manager_id: managerId, ok: true, result: resultFor(sample),
       });
       assert.equal(reply.status, 200, await reply.text());
       const response = await pending;
-      assert.equal(response.status, 200);
+      assert.equal(response.status, sample.status || 200);
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), sample.bytes);
       assert.equal(response.headers.get('content-type'), sample.mime || 'application/octet-stream');
       if (sample.mime === 'text/html') assert.equal(response.headers.get('content-security-policy'), 'sandbox');
@@ -98,12 +104,13 @@ test('session media reaches only its owning host with account-scoped RPCs', asyn
         assert.equal(request.image_path, sample.path);
         assert.equal(request.cwd, '/srv/work');
       }
+      if (sample.op === 'local_video') assert.equal(request.offset, 0, 'the chunk position survives the SSE wire mapping');
     });
   }
 
   await t.test('another account cannot read either media endpoint', async () => {
     const before = requests.length;
-    for (const sample of [samples[0], samples[2]]) {
+    for (const sample of [samples[0], samples[2], samples[5]]) {
       const denied = await fetch(urlFor(sample), { headers: strangerHeaders });
       assert.equal(denied.status, 403, await denied.text());
     }
@@ -111,7 +118,7 @@ test('session media reaches only its owning host with account-scoped RPCs', asyn
     assert.equal(otherStream.snapshot().some(frame => frame.event === 'agent_session_request'), false);
   });
 
-  for (const sample of [samples[0], samples[2]]) {
+  for (const sample of [samples[0], samples[2], samples[5]]) {
     await t.test(`${sample.op} keeps ownership when redelivered after reconnect`, async () => {
       stream.close();
       await waitFor(() => !connectivity.isReachable(managerId));
@@ -122,11 +129,11 @@ test('session media reaches only its owning host with account-scoped RPCs', asyn
       stream = await openSseStream(port, managerKey);
       const { data: frame } = await stream.waitFor('agent_session_request', event => event.payload.request_id === first.request_id);
       const reply = await post(`/api/agent/sessions/rpc/${first.request_id}`, managerKey, {
-        manager_id: managerId, ok: true, result: { base64: sample.bytes.toString('base64'), mime_type: sample.mime },
+        manager_id: managerId, ok: true, result: resultFor(sample),
       });
       assert.equal(reply.status, 200, await reply.text());
       const response = await pending;
-      assert.equal(response.status, 200);
+      assert.equal(response.status, sample.status || 200);
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), sample.bytes);
       assert.equal(first.account_id, account.id);
       assert.equal(frame.payload.account_id, account.id);

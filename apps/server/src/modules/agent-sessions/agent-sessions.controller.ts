@@ -8,6 +8,20 @@ import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
 
 /**
+ * `Range: bytes=START-[END]` 하나만 받는다 — 화면이 쓰는 모양이 그것뿐이다. 여러 구간과 끝에서 세는
+ * 구간(`bytes=-N`)은 null(416). 헤더가 없으면 처음부터다.
+ */
+export function parseByteRange(header: string | undefined): { start: number; length?: number } | null {
+  if (header === undefined || header === '') return { start: 0 };
+  const m = /^bytes=(\d{1,15})-(\d{0,15})$/.exec(String(header).trim());
+  if (!m) return null;
+  const start = Number(m[1]);
+  if (m[2] === '') return { start };
+  const end = Number(m[2]);
+  return end < start ? null : { start, length: end - start + 1 };
+}
+
+/**
  * 사용자 표면. 계정는 chat-rooms 와 같은 `X-Account-Id` 헤더 규약.
  * 모든 경로가 (Runtime Host, CLI) 아래에 있다 — 세션은 AWB 의 것이 아니라 그 장비의 것이다.
  */
@@ -137,6 +151,47 @@ export class AgentSessionsController {
     } catch (err: any) {
       const status = typeof err?.status === 'number' ? err.status : 500;
       return res.status(status).json({ error: err?.code || 'image_failed', message: err?.message || 'Could not read the image.' });
+    }
+  }
+
+  /**
+   * 에이전트가 답에 **경로로** 적은 영상(`![데모](./out/demo.mp4)`)의 한 조각 — `Range: bytes=START-[END]`.
+   *
+   * 응답은 언제나 206 + `Content-Range` 다(Range 가 없으면 `bytes=0-`). 한 번에 최대 8MiB 라 화면이
+   * 끝까지 이어 받아 Blob URL 로 재생한다 — `<video src>` 는 Authorization 헤더를 보내지 못하므로 이미지와
+   * 같은 방식이다(토큰을 쿼리에 싣는 두 번째 인증 경로를 만들지 않는다). `ETag` 는 파일 크기·mtime 이라
+   * 화면이 조각 사이에 파일이 바뀐 것(다시 렌더한 영상)을 알아챈다.
+   */
+  @Get('hosts/:managerId/:cli/sessions/:sessionId/local-video')
+  async localVideo(
+    @Param('managerId') managerId: string,
+    @Param('cli') cli: string,
+    @Param('sessionId') sessionId: string,
+    @Query('path') path: string,
+    @Query('cwd') cwd: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const account = this.accountId(req, res);
+    if (!account) return;
+    const range = parseByteRange(req.headers.range);
+    if (!range) return res.status(416).json({ error: 'bad_range', message: 'Send a single "bytes=START-[END]" range.' });
+    try {
+      const chunk = await this.sessions.readLocalVideo(
+        account, this.userId(req), managerId, cli, sessionId, String(path ?? ''), String(cwd ?? ''), range.start, range.length,
+      );
+      res.status(206);
+      res.setHeader('Content-Type', chunk.mimeType);
+      res.setHeader('Content-Length', String(chunk.bytes.length));
+      res.setHeader('Content-Range', `bytes ${chunk.offset}-${chunk.offset + chunk.bytes.length - 1}/${chunk.size}`);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('ETag', `"${chunk.size}-${chunk.mtimeMs}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.end(chunk.bytes);
+    } catch (err: any) {
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      return res.status(status).json({ error: err?.code || 'video_failed', message: err?.message || 'Could not read the video.' });
     }
   }
 

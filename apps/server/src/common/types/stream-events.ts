@@ -1018,8 +1018,11 @@ export interface AgentSessionRequestPayload {
    *  않고 이 op 으로 따로 받는다 — base64 는 1.33배로 불어나 payload 상한을 넘기고,
    *  그러면 이미지가 `{truncated:true}` 로 바뀌어 조용히 사라진다. */
   image_ref?: string;
-  /** local_image — 에이전트가 답에 적은 미리보기 파일 경로. 매니저가 그 장비에서 읽는다(이미지·html·md). */
+  /** local_image · local_video — 에이전트가 답에 적은 미리보기 파일 경로. 매니저가 그 장비에서 읽는다(이미지·html·md·영상). */
   image_path?: string;
+  /** local_video — 읽을 조각의 시작 바이트와 최대 길이. 길이가 없거나 크면 매니저가 조각 상한(8MiB)으로 자른다. */
+  offset?: number;
+  length?: number;
   /** set_config_option — ACP session config option id 와 값(select 는 value id, boolean 은 true/false). */
   config_id?: string;
   config_value?: string | boolean;
