@@ -5,6 +5,7 @@ import { api } from '../../api';
 import type { BusinessCompany, Cashbook, CashEntry, CashKind } from '../../business.types';
 import { Button, Modal } from '../common';
 import { BusinessIcon } from './BusinessIcon';
+import { triggerBlobDownload } from '../chat/utils/attachments';
 import { CASH_LABELS, cashIncoming, cashMoney, cashbookCsv, parseCashAmount } from './cashbook.logic';
 
 type Action = { kind: 'add' | 'close' | 'reopen' } | { kind: 'reconcile' | 'void'; entry: CashEntry };
@@ -22,9 +23,7 @@ export function BusinessCashbook({ company, onChanged, onSetup }: { company: Bus
   const canEdit = month <= new Date().toISOString().slice(0, 7) && selected && !!book && !book.period?.closed && !loading;
   const download = () => {
     if (!book) return;
-    const url = URL.createObjectURL(new Blob([cashbookCsv(book)], { type: 'text/csv;charset=utf-8' }));
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `cashbook-${company.id}-${month}.csv`; anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    triggerBlobDownload(new Blob([cashbookCsv(book)], { type: 'text/csv;charset=utf-8' }), `cashbook-${company.id}-${month}.csv`);
   };
   return <section className="business-panel business-cashbook" aria-label={translate('직접 회계 장부')}>
     <div className="business-section-heading"><h3><BusinessIcon name="accounting" size={21} />{translate('USD 입출금 장부')}</h3><Button variant="secondary" onClick={onSetup}>{selected ? translate('사용 조건 · 처리 범위') : translate('직접 회계 선택')}</Button></div>

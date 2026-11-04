@@ -7147,5 +7147,9 @@
   "영상 재생": "Play video",
   "영상 불러오는 중… {0}": "Loading video… {0}",
   "브라우저가 이 영상을 재생하지 못했습니다": "Browser could not play this video",
-  "누르면 바로 아래에서 재생": "Click to play right below"
+  "누르면 바로 아래에서 재생": "Click to play right below",
+  "Copy image": "Copy image",
+  "Update the Android app to use this.": "Update the Android app to use this.",
+  "Allow storage access, then try again.": "Allow storage access, then try again.",
+  "This browser cannot copy images.": "This browser cannot copy images."
 }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { wakeStore } from '../voice/wakeState';
+import { useToast } from '../contexts/ToastContext';
+import { interceptDownloadsInAndroidApp } from '../components/common/mediaActions';
 import {
   NATIVE_VOICE_OFF,
   hiddenInAndroidApp,
@@ -17,9 +19,13 @@ import {
  *   - 앱 알림을 누르면 앱이 `navigate` 를 보낸다 → 그 세션 화면으로.
  *   - 앱의 상시 음성 스위치와 화면의 음성 지원 스위치를 맞춘다(단말의 스위치는 하나).
  *   - 화면이 숨으면 깨어 있던 대화를 내려놓는다 — 숨은 동안은 앱의 상시 음성이 듣는다.
+ *   - 화면의 내려받기 링크(`<a download>`)를 앱의 다운로드 폴더로 돌린다 — WebView 는 blob: 을 내려받지 못한다.
  */
 export default function AndroidAppBridge() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
+
+  useEffect(() => interceptDownloadsInAndroidApp((message) => showToast(message, 'error')), [showToast]);
 
   useEffect(() => {
     if (!isAndroidApp()) return;

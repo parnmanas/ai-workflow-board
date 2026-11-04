@@ -349,7 +349,7 @@ AI Workflow Board는 Runtime Host의 네이티브 CLI **session**을 기본 작�
 
 ## Android 앱 (`apps/android`)
 
-- 네이티브 껍데기(Java)가 **서버가 서빙하는 웹 화면 전체**를 WebView 로 띄운다 — 웹 빌드를 앱에 묶지 말 것(예전 Capacitor 껍데기가 그래서 CORS · 구글 로그인 이탈을 겪고 버려졌다). 네이티브는 상시 음성(`voice/VoiceService`) · 단말 자격(`UserDevice`, `/api/auth/devices*`) · 구글 로그인 PKCE 왕복(`oauth/google/start?app=android` → `awb://oauth` → `oauth/app/exchange`)만 맡는다.
+- 네이티브 껍데기(Java)가 **서버가 서빙하는 웹 화면 전체**를 WebView 로 띄운다 — 웹 빌드를 앱에 묶지 말 것(예전 Capacitor 껍데기가 그래서 CORS · 구글 로그인 이탈을 겪고 버려졌다). 네이티브는 상시 음성(`voice/VoiceService`) · 단말 자격(`UserDevice`, `/api/auth/devices*`) · 구글 로그인 PKCE 왕복(`oauth/google/start?app=android` → `awb://oauth` → `oauth/app/exchange`) · 화면이 든 바이트의 내려받기와 이미지 복사(`Downloads` · `ClipboardImages` — WebView 는 `blob:` 을 내려받지도 이미지를 복사하지도 못한다)만 맡는다.
 - 웹 ↔ 앱은 `window.AwbAndroid`(`apps/client/src/native/androidBridge.ts` ↔ `WebBridge.java`). 요청 이름을 바꾸면 양쪽을 같이 — `apps/client/test/android-bridge.test.mjs` 가 본다. `VoiceRules.java` 는 `voice/wake.logic.ts` 의 사본이다(`android-voice-rules.test.mjs`).
 - 앱 화면이 보이면 웹이, 안 보이면 서비스가 듣고 읽는다(한 단말에서 둘이 같이 들으면 두 번 깨어난다). 웹 음성 코드를 고칠 때 `hiddenInAndroidApp()` 게이트를 지우지 말 것. 상세: `docs/android-app.md`.
 

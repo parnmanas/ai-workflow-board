@@ -7147,5 +7147,9 @@
   "영상 재생": "播放视频",
   "영상 불러오는 중… {0}": "正在加载视频… {0}",
   "브라우저가 이 영상을 재생하지 못했습니다": "浏览器无法播放此视频",
-  "누르면 바로 아래에서 재생": "点击在下方播放"
+  "누르면 바로 아래에서 재생": "点击在下方播放",
+  "Copy image": "复制图片",
+  "Update the Android app to use this.": "更新 Android 应用后即可使用。",
+  "Allow storage access, then try again.": "请允许存储访问后重试。",
+  "This browser cannot copy images.": "此浏览器无法复制图片。"
 }

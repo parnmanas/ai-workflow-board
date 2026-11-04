@@ -73,3 +73,24 @@ for (const [kind, load] of Object.entries(loaders)) {
     }
   });
 }
+
+test('image: the event mime types the untyped bytes so downloads get an extension and the app clipboard takes them — never SVG', async (t) => {
+  setup(t);
+  // 서버는 세션 이미지를 형식 없이 준다(형식은 이벤트가 든다).
+  globalThis.fetch.mock.mockImplementation(async () => new Response(new Blob(['image bytes']), { headers: { 'Content-Type': 'application/octet-stream' } }));
+  const made = [];
+  t.mock.method(URL, 'createObjectURL', (blob) => { made.push(blob); return `blob:typed-${made.length}`; });
+  t.mock.method(URL, 'revokeObjectURL', () => {});
+  const events = [
+    { type: 'image', payload: { image_ref: 'png-ref', mime_type: 'image/png', size: 11 } },
+    { type: 'image', payload: { image_ref: 'svg-ref', mime_type: 'image/svg+xml', size: 11 } },
+  ].map((event, i) => ({ ...event, id: String(i + 1), seq: i + 1, turn_id: 'turn', created_at: new Date().toISOString() }));
+  const view = mount(React.createElement(SessionTranscript, {
+    blocks: buildTranscript(events), decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {},
+    loadImage: (ref) => api.getHostSessionImage('host', 'claude', 'session', ref),
+  }));
+  t.after(() => view.unmount());
+  await act(async () => {});
+  assert.deepEqual(made.map((blob) => blob.type).sort(), ['application/octet-stream', 'image/png'], 'PNG is typed, SVG stays bytes');
+  for (const blob of made) assert.equal(await blob.text(), 'image bytes', 'typing keeps the bytes');
+});

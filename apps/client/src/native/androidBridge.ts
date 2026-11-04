@@ -52,7 +52,8 @@ export function isAndroidApp(): boolean {
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 const pending = new Map<string, Pending>();
 const listeners = new Map<string, Set<(msg: any) => void>>();
-let attached = false;
+/** 답을 듣는 포트 — 앱이 객체를 다시 넣으면(새 포트) 그쪽에 다시 붙는다. */
+let attachedPort: NativePort | null = null;
 let seq = 0;
 
 function onMessage(event: MessageEvent): void {
@@ -76,8 +77,8 @@ function onMessage(event: MessageEvent): void {
 }
 
 function attach(p: NativePort): void {
-  if (attached) return;
-  attached = true;
+  if (attachedPort === p) return;
+  attachedPort = p;
   if (p.addEventListener) p.addEventListener('message', onMessage);
   else p.onmessage = onMessage;
 }
@@ -207,6 +208,57 @@ export async function setNativeVoice(enabled: boolean): Promise<NativeVoiceStatu
 
 export function openNativeBatterySettings(): void {
   callNative('voice.batterySettings').catch(() => undefined);
+}
+
+// ─── 내려받기 · 클립보드 ─────────────────────────────────────────────────────
+
+/**
+ * 브릿지 한 번에 싣는 바이트 — base64 로 2.7MB. 큰 영상(200MB)도 조각을 하나씩 보내 앱이 이어 쓰고(답을 받은
+ * 뒤에 다음 조각), 한 문자열에 영상 전체를 담아 WebView 의 메모리를 터뜨리지 않는다.
+ */
+export const NATIVE_FILE_CHUNK_BYTES = 2 * 1024 * 1024;
+
+/** 바이트 → base64. 32KB 씩 글자로 바꿔 이어 붙인다(한 번에 펼치면 인자 수 상한에 걸린다). */
+export async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/**
+ * 화면이 들고 있는 바이트(`blob:` 으로 그린 세션 이미지 · 영상 · 첨부)를 앱의 다운로드 폴더에 쓴다. WebView 의
+ * 내려받기(DownloadManager)는 blob: 을 읽지 못한다. 저장된 이름을 돌려준다(같은 이름이 있으면 앱이 바꾼다).
+ * 도중에 실패하면 앱에 취소를 알려 반쪽 파일을 남기지 않는다. 옛 앱은 `unknown_type` 으로 거절한다.
+ */
+export async function saveBlobToNativeDownloads(blob: Blob, name: string): Promise<string> {
+  const begin = { name, mime: blob.type || 'application/octet-stream', size: blob.size };
+  // 8–9 는 권한 대화상자가 뜰 수 있다 — 넉넉히 기다린다.
+  const { transfer } = await callNative<{ transfer: string }>('file.begin', begin, 120_000);
+  let complete = false;
+  try {
+    for (let at = 0; at < blob.size; at += NATIVE_FILE_CHUNK_BYTES) {
+      const base64 = await blobToBase64(blob.slice(at, at + NATIVE_FILE_CHUNK_BYTES));
+      await callNative('file.chunk', { transfer, base64 }, 60_000);
+    }
+    complete = true;
+  } finally {
+    if (!complete) await callNative('file.end', { transfer, complete: false }).catch(() => undefined);
+  }
+  const done = await callNative<{ name?: string }>('file.end', { transfer, complete: true }, 60_000);
+  return done.name || name;
+}
+
+/** http(s) 주소를 앱의 DownloadManager 로(원격 영상 등). 지금 서버의 주소에만 앱이 세션을 붙인다. */
+export async function nativeDownloadUrl(url: string, name: string, mime = ''): Promise<void> {
+  await callNative('download.url', { url, name, mime });
+}
+
+/** 이미지 한 장을 앱의 클립보드에 — WebView 의 async Clipboard API 는 이미지를 쓰지 못한다. */
+export async function copyImageToNativeClipboard(blob: Blob): Promise<void> {
+  await callNative('clipboard.image', { mime: blob.type || 'image/png', base64: await blobToBase64(blob) }, 60_000);
 }
 
 /** 앱 안에서 이 화면이 숨었는가 — 숨은 동안 마이크와 소리는 앱의 상시 음성이 맡는다. */

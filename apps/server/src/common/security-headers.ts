@@ -46,4 +46,12 @@ export const CSP_DIRECTIVES: Record<string, string[]> = {
    * 평문 `http:` 는 열지 않는다 — https 페이지의 http 미디어는 어차피 브라우저가 막거나 올려 버린다.
    */
   mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
+  /*
+   * `blob:` · `data:` — 화면이 **자기가 만든** 바이트를 다시 읽는 것만 연다(`fetch(blobUrl)`). 세션 이미지 · 영상과
+   * 첨부는 인증 헤더로 받아 blob: 으로 그리는데, 내려받기(Android 앱은 바이트를 앱에 넘겨 다운로드 폴더에 쓴다)와
+   * 이미지 복사는 그 바이트가 필요하다. 지시어가 없으면 default-src 'self' 가 적용되고 'self' 는 blob: 을 포함하지
+   * 않아 읽기가 막힌다. blob: 주소는 만든 오리진에 묶여 있고 data: 는 네트워크로 나가지 않으므로 바깥으로 여는
+   * 통로가 아니다 — 원격 출처(https: · *)는 그대로 막는다.
+   */
+  connectSrc: ["'self'", 'blob:', 'data:'],
 };

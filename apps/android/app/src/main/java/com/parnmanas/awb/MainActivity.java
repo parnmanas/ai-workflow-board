@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
   private static final int REQ_FILE = 10;
   private static final int REQ_VOICE_PERMS = 11;
   private static final int REQ_WEB_MIC = 12;
+  private static final int REQ_STORAGE = 13;
   private static final String BATTERY_ASKED = "battery_asked";
   private static final int MAX_SHORTCUTS = 4;
   private static final int PING_TIMEOUT_MS = 8000;
@@ -1099,7 +1100,26 @@ public class MainActivity extends Activity {
 
   // ─── 내려받기 ────────────────────────────────────────────────────────────
 
+  /**
+   * 브릿지 `download.url` — 화면이 이름을 정한 http(s) 내려받기(세션 답의 원격 영상 등). 화면이 들고 있는
+   * 바이트(blob:)는 이 길이 아니라 `file.*` 로 온다(Downloads).
+   */
+  void downloadUrl(String url, String name, String mimeType) {
+    String file = name == null || name.trim().isEmpty() ? null : Downloads.safeName(name, mimeType);
+    download(url, null, mimeType, file);
+  }
+
+  /** Android 8–9 의 Download 폴더 쓰기 권한 — 화면은 거절(storage_permission)을 받고 "다시 누르세요" 를 보인다. */
+  void requestStoragePermission() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return;
+    requestPermissions(new String[] { Manifest.permission.WRITE_EXTERNAL_STORAGE }, REQ_STORAGE);
+  }
+
   private void download(String url, String contentDisposition, String mimeType) {
+    download(url, contentDisposition, mimeType, null);
+  }
+
+  private void download(String url, String contentDisposition, String mimeType, String fileName) {
     Uri uri = Uri.parse(url);
     String scheme = uri.getScheme() == null ? "" : uri.getScheme();
     if (!"http".equals(scheme) && !"https".equals(scheme)) {
@@ -1117,7 +1137,7 @@ public class MainActivity extends Activity {
       }
       r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
       r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
-          URLUtil.guessFileName(url, contentDisposition, mimeType));
+          fileName != null ? fileName : URLUtil.guessFileName(url, contentDisposition, mimeType));
       DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
       if (dm != null) dm.enqueue(r);
       main.post(() -> Toast.makeText(this, "내려받는 중…", Toast.LENGTH_SHORT).show());

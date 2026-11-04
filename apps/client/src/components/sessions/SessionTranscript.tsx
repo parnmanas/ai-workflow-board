@@ -9,6 +9,7 @@ import { formatReceivedAt, usageSummaryParts } from './sessionTranscript.logic';
 import type { ElicitationFieldView, PermissionOptionView, TranscriptBlock } from './sessionTranscript.logic';
 import { isRemoteVideoUrl, splitMarkdownImages } from './markdownImages';
 import MediaLightbox, { type MediaLightboxItem } from '../common/MediaLightbox';
+import { isAndroidApp } from '../../native/androidBridge';
 
 /**
  * Agent Session 트랜스크립트 렌더러. Chat 의 MessageList 와 달리 말풍선 목록이
@@ -786,6 +787,18 @@ function Note({ children, tone, multiline = false }: { children: React.ReactNode
 }
 
 /**
+ * 서버는 세션 이미지 바이트를 형식 없이(application/octet-stream) 준다 — 형식은 이벤트가 들고 있다. 그 형식을
+ * 붙여야 내려받은 파일에 확장자가 붙고(브라우저도 앱도 형식으로 정한다) 앱의 클립보드가 이미지로 받는다.
+ * 서버의 미리보기 파일 규칙처럼 SVG 는 붙이지 않는다 — blob: 주소는 이 화면의 출처로 열린다.
+ */
+export function typedSessionMedia(blob: Blob, mimeType: string | undefined): Blob {
+  const mime = (mimeType || '').toLowerCase();
+  if (blob.type && blob.type !== 'application/octet-stream') return blob;
+  if (!/^(image|video)\/[a-z0-9.+-]+$/.test(mime) || mime === 'image/svg+xml') return blob;
+  return new Blob([blob], { type: mime });
+}
+
+/**
  * 에이전트가 내보낸 이미지 한 장.
  *
  * 바이트는 이벤트에 실려 오지 않는다(base64 는 1.33배로 불어나 payload 상한에 걸리고,
@@ -824,7 +837,7 @@ function ImageBlock({
       try {
         const blob = await loadImage(block.imageRef);
         if (revoked) return;
-        objectUrl = URL.createObjectURL(blob);
+        objectUrl = URL.createObjectURL(typedSessionMedia(blob, block.mimeType));
         setUrl(objectUrl);
       } catch (err: any) {
         if (!revoked) setError(err?.message || translate('이미지를 가져오지 못했습니다'));
@@ -834,7 +847,7 @@ function ImageBlock({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [block.uri, block.imageRef, loadImage, attempt]);
+  }, [block.uri, block.imageRef, block.mimeType, loadImage, attempt]);
 
   useEffect(() => {
     if (url && registerMedia && (block.imageRef || block.uri)) {
@@ -1373,9 +1386,13 @@ function VideoThumb({
   }, [source, target, playSrc, registerMedia, mediaKey, captionText, filename]);
 
   const captionStyle: React.CSSProperties = { fontFamily: MONO, fontSize: 11, color: tokens.colors.textMuted, wordBreak: 'break-all' };
+  // 원격 영상은 브라우저가 다른 출처의 `download` 를 무시하므로 새 탭으로 연다. 앱 안에서는 내려받기 링크가 앱의
+  // DownloadManager 로 간다(`interceptDownloadsInAndroidApp`) — 다운로드 폴더에 받는다.
   const fileLink = source === 'local'
     ? playSrc && <a href={playSrc} download={filename} style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('다운로드')}</a>
-    : <a href={target} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('새 탭에서 열기')}</a>;
+    : isAndroidApp()
+      ? <a href={target} download={filename} style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('다운로드')}</a>
+      : <a href={target} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: tokens.colors.accent }}>{translate('새 탭에서 열기')}</a>;
 
   if (source === 'local' && (!loadLocalVideo || !loadLocalVideoPreview)) {
     return <span data-block="markdown-video" style={{ display: 'block', whiteSpace: 'normal' }}>🎬 <span style={captionStyle} title={target}>{captionText}</span></span>;

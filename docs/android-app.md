@@ -8,7 +8,7 @@ AWB Android 앱은 **서버가 서빙하는 AWB 웹 화면 전체를 앱 안의 
 | 상시 음성(백그라운드 듣기 · 대화 · 낭독) | 브라우저는 화면이 꺼지거나 다른 앱이 앞에 오면 마이크를 끊는다 |
 | 끊기지 않는 로그인(단말 자격) | 사용자 세션은 서버 메모리에만 있어 24시간 · 배포 재시작마다 끊긴다 |
 | 구글 로그인 왕복 | Google 은 WebView 안의 로그인을 막는다(disallowed_useragent) |
-| 다른 사이트 링크 · 내려받기 · 파일 고르기 · 마이크 권한 | WebView 기본값으로는 아무 일도 일어나지 않는다 |
+| 다른 사이트 링크 · 내려받기 · 이미지 복사 · 파일 고르기 · 마이크 권한 | WebView 기본값으로는 아무 일도 일어나지 않는다 |
 
 예전 Capacitor 껍데기(`apps/client/android`)는 웹 빌드를 묶어 `https://localhost` 에서 돌았다 — 서버와 오리진이 달라
 CORS 설정이 필요했고, 구글 로그인은 페이지째 이동이라 시스템 브라우저로 빠져나가 앱으로 돌아오지 않았다. 그래서 버렸다.
@@ -22,6 +22,8 @@ ServerUrls        서버 주소 정규화 · 오리진 중복 검사
 WebBridge         window.AwbAndroid — 서버 오리진의 최상위 문서에만 주입(androidx.webkit WebMessageListener)
 Auth              서버별 세션 토큰의 단일 출처. 해당 서버의 단말 자격으로 세션을 다시 받는다
 GoogleLogin       PKCE + Custom Tab
+Downloads         화면이 든 바이트(blob: · data:)를 다운로드 폴더에(file.* 브릿지) — 10+ MediaStore, 8–9 공개 폴더
+ClipboardImages   이미지 한 장을 클립보드에(clipboard.image) — 캐시 파일 + FileProvider URI
 voice/VoiceService  상시 음성 포그라운드 서비스(microphone|mediaPlayback)
 voice/Vad · VoiceApi · EventStream · Speaker · VoiceRules
 ```
@@ -47,6 +49,28 @@ WebView 저장소는 오리진 단위라 같은 오리진을 중복 등록하지
 - **뒤로 버튼은 `WebView.goBack()`** 이다. history 항목이 없는 오버레이는 뒤로를 누르면 화면째 사라진다 —
   라이트박스는 `components/common/useCloseOnBack.ts` 로 열려 있는 동안 같은 주소의 항목 하나를 얹어 뒤로가 그것을 닫게 한다.
   네이티브 변경 없이 웹 배포만으로 따라온다.
+
+### 내려받기 · 이미지 복사
+
+세션의 이미지 · 영상과 첨부는 인증 헤더로 받아 `blob:` 주소로 그린다. WebView 의 내려받기(DownloadManager)는 `blob:` 을
+읽지 못하고, WebView 의 async Clipboard API 는 이미지를 쓰지 못한다. 그래서 앱 안에서는 바이트를 앱에 넘긴다.
+
+- **내려받기** — `interceptDownloadsInAndroidApp`(`components/common/mediaActions.ts`, `AndroidAppBridge` 가 건다)이 문서의
+  모든 `<a download>` 클릭을 캡처 단계에서 받는다. 화면이 든 바이트(`blob:` · `data:`)는 `file.begin` → `file.chunk`(2MiB,
+  답을 받은 뒤 다음 조각) → `file.end` 로 넘기고, `Downloads` 가 Android 10+ 는 MediaStore Downloads(권한 없음, 다 쓸 때까지
+  `IS_PENDING`)에, 8–9 는 공개 Download 폴더(`WRITE_EXTERNAL_STORAGE`)에 써서 내려받기 목록에 올린다. 실패 · 취소 · 크기
+  불일치 · 10분 넘게 버려진 전송 · 화면 닫힘은 반쪽 파일을 지운다. http(s) 주소는 `download.url` 로 DownloadManager 에
+  맡긴다(지금 서버의 주소에만 그 서버의 세션을 붙인다).
+- 코드로 여는 내려받기 링크도 **문서에 붙여** 누른다(`triggerBlobDownload`) — 문서 밖 링크의 `a.click()` 은 가로채기에
+  닿지 않아 앱에서는 아무 일도 일어나지 않는다. `apps/client/test/android-bridge.test.mjs` 가 소스 전체를 검사한다.
+- **이미지 복사** — 라이트박스의 Copy 가 `clipboard.image` 로 바이트를 넘기면 `ClipboardImages` 가 앱 캐시(`clipboard/`)에
+  쓰고 FileProvider(`${applicationId}.files`) content URI 로 클립보드에 둔다 — 붙여 넣는 앱에는 시스템이 읽기 권한을 준다.
+  Android 13+ 는 시스템이 복사한 그림을 미리 보여 주므로 앱의 알림은 12 이하에서만 띄운다. 브라우저는 async Clipboard API(PNG).
+- 서버는 세션 이미지 바이트를 형식 없이(`application/octet-stream`) 준다 — 화면이 이벤트의 형식을 붙인다
+  (`typedSessionMedia`, SVG 제외). 안 붙이면 내려받은 파일에 확장자가 없고 앱의 클립보드가 거절한다.
+- 화면이 자기 `blob:` · `data:` 를 다시 읽는 `fetch` 는 CSP `connect-src 'self' blob: data:` 가 연다.
+- 옛 앱(이 요청들을 모른다)은 `unknown_type` 으로 답한다 — 바이트 내려받기는 "앱을 업데이트하세요" 를 보이고, http(s) 는
+  예전처럼 WebView 의 내려받기로 넘긴다(`data-awb-native="skip"` 표시로 다시 가로채지 않는다).
 
 ## 로그인
 
@@ -108,7 +132,7 @@ WebView 저장소는 오리진 단위라 같은 오리진을 중복 등록하지
 ```
 cd apps/android
 JAVA_HOME=<jdk 17+> ./gradlew assembleRelease      # local.properties 의 awb.keystore.* 로 서명
-JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # ServerUrls · VoiceRules · Vad 단위 테스트
+JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # ServerUrls · VoiceRules · Vad · Downloads 단위 테스트
 ```
 
 - `applicationId com.parnmanas.awb` 와 릴리즈 키가 Capacitor 껍데기와 같아 덮어 설치로 올라간다. 자동 배포의 `versionCode`는
@@ -154,3 +178,6 @@ GitHub 저장소 설정에 기존 설치본의 키를 등록한다(새 키를 �
 `adb shell am broadcast -a com.parnmanas.awb.DEBUG_UTTERANCE -p com.parnmanas.awb [--es file x.wav]`.
 서버는 운영과 따로 띄운다(scratch SQLite, 다른 포트). 앱은 `adb reverse tcp:<port> tcp:<port>` 로 `http://localhost:<port>`
 에 붙인다 — `10.0.2.2` 는 보안 컨텍스트가 아니라 CSP 가 자원을 https 로 올려 화면이 비어 버린다. 로그는 `adb logcat -s AWB-Voice`.
+
+영상을 재생하는 확인은 에뮬레이터를 `-feature -HardwareDecoder` 로 띄운다 — 호스트 디코더(swiftshader GPU)로 세션 영상을
+재생하다 에뮬레이터 프로세스째 죽은 적이 있고, 끈 뒤로는 게스트의 소프트웨어 디코더로 끝까지 재생된다.

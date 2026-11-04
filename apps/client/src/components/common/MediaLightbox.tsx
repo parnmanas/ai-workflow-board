@@ -4,6 +4,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { tokens } from '../../tokens';
 import ZoomStage from './ZoomStage';
 import { useCloseOnBack } from './useCloseOnBack';
+import { canCopyImage, copyImage, mediaActionError } from './mediaActions';
+import { isAndroidApp } from '../../native/androidBridge';
 
 /**
  * 이미지/영상 공용 라이트박스.
@@ -35,12 +37,14 @@ interface MediaLightboxProps {
 export default function MediaLightbox({ items, index, onIndexChange, onClose }: MediaLightboxProps) {
   useLocale();
   const [broken, setBroken] = useState(false);
+  const [copy, setCopy] = useState<{ state: 'idle' | 'copying' | 'copied' } | { state: 'failed'; message: string }>({ state: 'idle' });
   const total = items.length;
   const safeIndex = total === 0 ? 0 : ((index % total) + total) % total;
   const current = items[safeIndex];
 
   useEffect(() => {
     setBroken(false);
+    setCopy({ state: 'idle' });
   }, [safeIndex, current?.src]);
 
   const goPrev = useCallback(() => {
@@ -187,8 +191,31 @@ export default function MediaLightbox({ items, index, onIndexChange, onClose }: 
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '50vw' }} title={label}>
           {label}
         </span>
-        {crossOrigin(current.src) ? (
+        {current.kind === 'image' && !broken && canCopyImage(current.src) && (
+          <button
+            type="button"
+            aria-label={translate('Copy image')}
+            title={copy.state === 'failed' ? copy.message : translate('Copy image')}
+            disabled={copy.state === 'copying'}
+            onClick={() => {
+              setCopy({ state: 'copying' });
+              const src = current.src;
+              copyImage(src).then(
+                () => setCopy({ state: 'copied' }),
+                (err) => setCopy({ state: 'failed', message: mediaActionError(err, 'copy') }),
+              );
+            }}
+            style={{ border: '1px solid #666', background: 'transparent', color: copy.state === 'failed' ? tokens.colors.warningLight : '#bbb', borderRadius: 5, padding: '3px 10px', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            {copy.state === 'copied' ? translate('Copied!')
+              : copy.state === 'copying' ? translate('Copying…')
+                : copy.state === 'failed' ? copy.message
+                  : translate('Copy')}
+          </button>
+        )}
+        {crossOrigin(current.src) && !isAndroidApp() ? (
           // 다른 출처(세션 답의 원격 영상 링크)는 `download` 를 브라우저가 무시하고 이 탭을 그 주소로 넘겨 버린다.
+          // 앱 안에서는 아래 내려받기 링크가 앱의 DownloadManager 로 간다(`interceptDownloadsInAndroidApp`).
           <a
             href={current.src}
             target="_blank"

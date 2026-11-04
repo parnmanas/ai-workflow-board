@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 로 내보내는 곳 — 클립보드에 둔 이미지 한 장(ClipboardImages)뿐이다. -->
+<paths>
+    <cache-path name="clipboard" path="clipboard/" />
+</paths>

@@ -7,7 +7,7 @@ import { ui } from './helpers/i18n.mjs';
 // 컨트롤 양보, 뒤로 가기로 닫기)를 같이 본다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, React, act } from './helpers/jsdom.mjs';
+import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
 import MediaLightbox from '../src/components/common/MediaLightbox.tsx';
 import {
   IDENTITY,
@@ -321,4 +321,70 @@ test('Esc 는 라이트박스만 닫는다 — 아래 화면(티켓 패널 등)�
   assert.equal(closed, 1, '라이트박스는 닫힌다');
   assert.equal(underneath, 0, '아래 화면은 Esc 를 받지 않는다');
   assert.ok(view.container.querySelector('[data-testid="closed"]'));
+});
+
+// ─── 복사 · 내려받기 (앱 · 브라우저) ─────────────────────────────────────
+
+const PNG_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** 앱 안처럼 — 포트를 단 뒤에 그린다(라이트박스가 그릴 때 앱인지 본다). */
+function setupInApp(t, props, answer = () => ({})) {
+  const dom = setupDom({ width: 400, url: 'https://awb.example/' });
+  globalThis.PointerEvent = dom.window.PointerEvent;
+  const sent = [];
+  let listener = null;
+  dom.window.AwbAndroid = {
+    onmessage: null,
+    addEventListener(type, fn) { if (type === 'message') listener = fn; },
+    postMessage(raw) {
+      const msg = JSON.parse(raw);
+      sent.push(msg);
+      setTimeout(() => listener({ data: JSON.stringify({ id: msg.id, ok: true, result: answer(msg) }) }), 0);
+    },
+  };
+  const view = mount(React.createElement(Harness, props));
+  t.after(() => {
+    view.unmount();
+    dom.cleanup();
+  });
+  return { view, sent };
+}
+
+const buttonByLabel = (container, label) => container.querySelector(`button[aria-label="${label}"]`);
+const linkByText = (container, text) => [...container.querySelectorAll('a')].find((a) => a.textContent === text);
+
+test('이미지에는 복사 버튼이 있고 영상 · 다른 사이트 그림에는 없다', (t) => {
+  const { view } = setup(t, { items: [
+    { src: PNG_URL, kind: 'image', caption: 'shot.png' },
+    { src: 'blob:clip', kind: 'video', caption: 'clip.webm' },
+    { src: 'https://cdn.example.com/a.png', kind: 'image', caption: 'remote.png' },
+  ] });
+  assert.ok(buttonByLabel(view.container, ui('Copy image')), '이미지는 복사할 수 있다');
+  act(() => { click(view.container.querySelector('[data-testid="media-lightbox-next"]')); });
+  assert.equal(Boolean(buttonByLabel(view.container, ui('Copy image'))), false, '영상은 복사 대상이 아니다');
+  act(() => { click(view.container.querySelector('[data-testid="media-lightbox-next"]')); });
+  assert.equal(Boolean(buttonByLabel(view.container, ui('Copy image'))), false, '다른 사이트 그림은 화면이 바이트를 읽지 못한다');
+});
+
+test('앱 안: 복사는 앱의 클립보드로, 다른 사이트 영상도 다운로드 폴더로 받는 링크가 된다', async (t) => {
+  const { view, sent } = setupInApp(t, { items: [
+    { src: PNG_URL, kind: 'image', caption: 'shot.png', filename: 'shot.png' },
+    { src: 'https://dive.example.com/preview/a.mp4', kind: 'video', caption: 'a.mp4', filename: 'a.mp4' },
+  ] }, () => ({}));
+  await act(async () => { click(buttonByLabel(view.container, ui('Copy image'))); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  assert.deepEqual(sent.map((m) => [m.type, m.mime]), [['clipboard.image', 'image/png']]);
+  assert.equal(buttonByLabel(view.container, ui('Copy image'))?.textContent, ui('Copied!'));
+
+  act(() => { click(view.container.querySelector('[data-testid="media-lightbox-next"]')); });
+  const download = linkByText(view.container, ui('Download'));
+  assert.equal(download?.getAttribute('download'), 'a.mp4', '앱의 내려받기 가로채기가 받아 간다');
+  assert.equal(download?.getAttribute('href'), 'https://dive.example.com/preview/a.mp4');
+  assert.equal(Boolean(linkByText(view.container, ui('새 탭에서 열기'))), false);
+});
+
+test('브라우저: 다른 사이트 영상은 새 탭으로 연다(브라우저는 다른 출처의 download 를 무시한다)', (t) => {
+  const { view } = setup(t, { items: [{ src: 'https://dive.example.com/preview/a.mp4', kind: 'video', caption: 'a.mp4' }] });
+  assert.equal(linkByText(view.container, ui('새 탭에서 열기'))?.getAttribute('target'), '_blank');
+  assert.equal(Boolean(linkByText(view.container, ui('Download'))), false);
 });

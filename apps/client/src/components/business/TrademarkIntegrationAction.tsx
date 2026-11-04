@@ -5,6 +5,7 @@ import { api } from '../../api';
 import type { BusinessCompany, BusinessTrademark, TrademarkConnectorDefinition, TrademarkIntegration, TrademarkIntegrationAction as Action, TrademarkMailKind, TrademarkMailPayload } from '../../business.types';
 import { Button, Input, Modal, Select, Textarea } from '../common';
 import { TRADEMARK_MAIL_KINDS, TRADEMARK_MAIL_STATUS } from './trademark.logic';
+import { triggerBlobDownload } from '../chat/utils/attachments';
 
 export function TrademarkIntegrationAction({ company, trademark, connector, connection, action, replyAddress, onClose, onChanged }: {
   company: BusinessCompany; trademark: BusinessTrademark; connector: TrademarkConnectorDefinition; connection: TrademarkIntegration; action?: Action; replyAddress?: string; onClose(): void; onChanged(): Promise<void>;
@@ -44,7 +45,7 @@ export function TrademarkIntegrationAction({ company, trademark, connector, conn
   const download = (preview?: number) => run(async () => {
     if (!review) return;
     const blob = await api.downloadTrademarkAgreement(company.id, trademark.id, review.id, preview);
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = preview === undefined ? 'signed-agreement.pdf' : `agreement-review-${preview + 1}.pdf`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    triggerBlobDownload(blob, preview === undefined ? 'signed-agreement.pdf' : `agreement-review-${preview + 1}.pdf`);
   });
   const discard = () => run(async () => { if (!review) return; await api.discardTrademarkAction(company.id, trademark.id, review); await onChanged(); onClose(); });
   const ready = connector.action === 'contract' ? !!subject.trim() && !!roles.length && roles.every(r => r.name.trim() && r.email) : !!mail.subject.trim() && !!mail.text.trim() && !!mail.to && !!mail.from && !!mail.reply_to;

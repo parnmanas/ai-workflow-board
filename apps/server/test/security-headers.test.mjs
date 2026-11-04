@@ -52,6 +52,15 @@ test('완화가 실행 가능한 자원으로 번지지 않는다 — blob: 은 
   }
 });
 
+test('connect-src 는 화면이 만든 blob: · data: 만 더 연다 — 내려받기 · 이미지 복사가 바이트를 다시 읽는다', () => {
+  // 지시어가 없으면 default-src 'self' 인데 'self' 는 blob: 을 포함하지 않는다 — 앱의 내려받기와 복사가 운영에서만 막힌다.
+  const v = CSP_DIRECTIVES.connectSrc;
+  assert.ok(Array.isArray(v), 'connectSrc 가 선언돼 있어야 한다');
+  assert.ok(v.includes("'self'"), 'API · SSE 는 같은 오리진');
+  assert.ok(v.includes('blob:') && v.includes('data:'));
+  assert.deepEqual(v.filter((x) => !["'self'", 'blob:', 'data:'].includes(x)), [], '원격 출처로 여는 통로가 아니다');
+});
+
 test('media-src 는 https: 원격 영상을 받는다 — 세션 답의 영상 링크를 그 자리에서 재생', () => {
   // 개발 서버(Vite)에는 CSP 가 없어 거기서는 재생되고 운영에서만 조용히 막힌다 — 값을 직접 고정한다.
   const v = CSP_DIRECTIVES.mediaSrc;

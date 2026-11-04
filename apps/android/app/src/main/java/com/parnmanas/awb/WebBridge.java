@@ -1,14 +1,18 @@
 package com.parnmanas.awb;
 
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.webkit.WebView;
+import android.widget.Toast;
 import androidx.webkit.JavaScriptReplyProxy;
 import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
 import com.parnmanas.awb.voice.VoiceService;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +37,9 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
   private final Handler main = new Handler(Looper.getMainLooper());
   /** 서버마다 한 줄 — 같은 서버의 요청은 온 순서대로, 응답 없는 서버가 다른 서버의 요청을 붙잡지 않게. */
   private final Map<String, ExecutorService> io = new ConcurrentHashMap<>();
+  /** 내려받기 · 클립보드 — 한 줄로 돈다: 조각은 온 순서대로 이어 써야 한다. */
+  private final ExecutorService files = Executors.newSingleThreadExecutor();
+  private final Downloads downloads = new Downloads();
   private JavaScriptReplyProxy proxy;
   private String origin = "";
 
@@ -137,8 +144,65 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
         reply(to, id, new JSONObject());
         main.post(() -> GoogleLogin.start(activity, s));
         break;
+      // ─── 내려받기 · 클립보드 — 웹이 들고 있는 바이트(blob:)를 받는다 ───
+      case "file.begin":
+        if (Downloads.needsLegacyPermission(activity)) {
+          // Android 8–9 — 권한을 묻고, 웹은 다시 누르라고 알린다(대화상자 동안 전송을 붙잡지 않는다).
+          main.post(activity::requestStoragePermission);
+          replyError(to, id, "storage_permission");
+          break;
+        }
+        onFiles(to, id, () -> Http.obj("transfer",
+            downloads.begin(activity, req.optString("name", ""), req.optString("mime", ""), req.optLong("size", -1))));
+        break;
+      case "file.chunk":
+        onFiles(to, id, () -> {
+          downloads.write(activity, req.optString("transfer", ""), Base64.decode(req.optString("base64", ""), Base64.DEFAULT));
+          return new JSONObject();
+        });
+        break;
+      case "file.end":
+        onFiles(to, id, () -> {
+          String saved = downloads.end(activity, req.optString("transfer", ""), req.optBoolean("complete", false));
+          if (!saved.isEmpty()) {
+            main.post(() -> Toast.makeText(activity, "다운로드 폴더에 저장했습니다 — " + saved, Toast.LENGTH_SHORT).show());
+          }
+          return Http.obj("name", saved);
+        });
+        break;
+      case "download.url":
+        // http(s) 주소(원격 영상 등) — 시스템 DownloadManager 로. 지금 서버의 주소에만 그 서버의 세션을 붙인다.
+        main.post(() -> activity.downloadUrl(req.optString("url", ""), req.optString("name", ""), req.optString("mime", "")));
+        reply(to, id, new JSONObject());
+        break;
+      case "clipboard.image":
+        onFiles(to, id, () -> {
+          ClipboardImages.copy(activity, Base64.decode(req.optString("base64", ""), Base64.DEFAULT), req.optString("mime", ""));
+          // 13 부터는 시스템이 복사한 그림을 미리 보여 준다 — 같은 알림을 두 번 띄우지 않는다.
+          if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            main.post(() -> Toast.makeText(activity, "이미지를 복사했습니다", Toast.LENGTH_SHORT).show());
+          }
+          return new JSONObject();
+        });
+        break;
       default:
         replyError(to, id, "unknown_type");
+    }
+  }
+
+  /** 파일 일은 한 줄로 돌리고, 실패는 사유 코드(IOException 메시지)로 답한다. */
+  private void onFiles(JavaScriptReplyProxy to, String id, Callable<JSONObject> task) {
+    try {
+      files.execute(() -> {
+        try {
+          reply(to, id, task.call());
+        } catch (Exception e) {
+          String reason = e.getMessage();
+          replyError(to, id, reason == null || reason.isEmpty() ? "io_error" : reason);
+        }
+      });
+    } catch (RejectedExecutionException e) {
+      replyError(to, id, "closing");
     }
   }
 
@@ -188,5 +252,12 @@ public final class WebBridge implements WebViewCompat.WebMessageListener {
 
   void shutdown() {
     for (ExecutorService e : io.values()) e.shutdownNow();
+    // 쓰다 만 내려받기는 남기지 않는다 — 줄에 남은 일을 마친 뒤 지운다.
+    try {
+      files.execute(() -> downloads.abortAll(activity));
+    } catch (RejectedExecutionException ignored) {
+      // 이미 닫혔다
+    }
+    files.shutdown();
   }
 }

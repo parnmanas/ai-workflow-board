@@ -94,7 +94,9 @@ export function base64ToBlob(base64: string, mime: string): Blob {
 
 // Trigger a save-as for a Blob via a transient <a download> click. The object
 // URL is revoked on the next tick so the browser still has time to start the
-// download (revoking synchronously breaks Safari).
+// download (revoking synchronously breaks Safari). The link must be in the
+// document: the Android app takes downloads from clicks that reach the document
+// (`interceptDownloadsInAndroidApp`), and a detached `a.click()` never does.
 export function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
