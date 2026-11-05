@@ -2,6 +2,14 @@
 .awb-session-composer { container-type: inline-size; min-width: 0; overflow-wrap: anywhere; padding-bottom: max(12px, env(safe-area-inset-bottom)) !important; }
 .awb-composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .awb-composer-row > button { flex-shrink: 0; }
+.awb-composer-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.awb-composer-actions > button { min-height: 44px; }
+.awb-main { position: relative; }
+.awb-pull-refresh { overscroll-behavior-y: contain; }
+.awb-refresh-indicator { position: absolute; top: 0; left: 50%; z-index: 100; display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 24px; box-shadow: 0 4px 16px #0003; font-size: 13px; pointer-events: none; white-space: nowrap; }
+.awb-refresh-spinner { animation: awb-refresh-spin 0.8s linear infinite; }
+@keyframes awb-refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .awb-refresh-spinner { animation: none; } }
 /* Session header: identity · status · Mode/Model/Effort · connect actions + menu.
    One row on a wide header, two rows (controls below) on a narrow one. The break is
    measured on the header itself, so an open sidebar or artifact panel folds it the
@@ -60,7 +68,6 @@
   .awb-composer-row { flex-wrap: wrap; gap: 6px; }
   .awb-composer-input { order: -1; flex-basis: 100% !important; width: 100%; font-size: 16px !important; max-height: min(160px, 25dvh) !important; }
   .awb-composer-row > button { min-height: 44px; padding-left: 10px !important; padding-right: 10px !important; }
-  .awb-composer-send { margin-left: auto; }
   .awb-composer-help { display: none; }
 }
 

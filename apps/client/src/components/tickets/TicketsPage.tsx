@@ -3,6 +3,7 @@ import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { usePageTab } from '../../hooks/usePageQuery';
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { api } from '../../api';
@@ -62,6 +63,7 @@ export default function TicketsPage() {
   const filters = useMemo(() => filtersFromSearch(searchParams), [searchParams, getLocale()]);
   const openTicketId = searchParams.get('ticket');
   const scrollToCommentId = searchParams.get('comment');
+  const [panelTab, setPanelTab] = usePageTab(['overview', 'conversation', 'activity'], 'overview', 'ticket_tab');
 
   const [view, setViewState] = useState<TicketView>(() => readTicketView(storage()));
   const setView = useCallback((next: TicketView) => {
@@ -113,6 +115,7 @@ export default function TicketsPage() {
       const next = new URLSearchParams(prev);
       next.set('ticket', id);
       next.delete('comment');
+      next.delete('ticket_tab');
       return next;
     });
   }, [setSearchParams]);
@@ -121,6 +124,7 @@ export default function TicketsPage() {
       const next = new URLSearchParams(prev);
       next.delete('ticket');
       next.delete('comment');
+      next.delete('ticket_tab');
       return next;
     });
   }, [setSearchParams]);
@@ -330,6 +334,8 @@ export default function TicketsPage() {
     activePanelTicket ? (
       <TicketPanel
         ticket={activePanelTicket}
+        selectedTab={panelTab}
+        onTabChange={setPanelTab}
         accountTickets={data.tickets}
         accountId={accountId}
         onClose={closeTicket}

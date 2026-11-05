@@ -1,6 +1,7 @@
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
-import React, { useState } from 'react';
+import React from 'react';
+import { usePageTab } from '../../hooks/usePageQuery';
 import type { Credential, Project } from '../../types';
 import { tokens } from '../../tokens';
 import { Badge, Button } from '../common';
@@ -51,7 +52,7 @@ export default function ProjectDetailPanel({
   showToast,
 }: ProjectDetailPanelProps) {
   useLocale();
-  const [tab, setTab] = useState<DetailTab>('settings');
+  const [tab, setTab] = usePageTab<DetailTab>(project ? TABS.map(item => item.key) : ['settings'], 'settings');
   const folderCount = (project?.host_folders || []).filter((f) => (f.path || '').trim()).length;
 
   return (

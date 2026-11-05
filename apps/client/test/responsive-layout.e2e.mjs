@@ -21,12 +21,13 @@ const events = Array.from({ length: 16 }, (_, i) => ({ id: `event-${i}`, seq: i 
 const project = { id: 'responsive-project', account_id: account.id, name: 'Responsive project', repo_url: 'https://example.test/' + 'long-repository-name'.repeat(8), default_branch: 'main', enabled: true };
 const ticket = { id: 'responsive-ticket', account_id: account.id, parent_id: null, title, status: 'todo', priority: 'medium', tags: ['ui'], project_id: project.id, position: 0, assignee: null, assignee_key: '', created_at: live.updated_at, updated_at: live.updated_at, description: '반응형 티켓 상세를 확인합니다.', depth: 0, channel_ids: [], comments: [], children: [], attachments: [], prerequisites: [], prerequisite_count: 0, on_done_action_ids: [], next_ticket_id: null, created_by: 'Test user', created_by_type: 'user', created_by_id: 'user-test', project: null };
 const room = { id: 'responsive-room', account_id: account.id, type: 'group', name: 'Responsive chat', created_at: live.updated_at, participants: [{ id: 'p1', participant_type: 'user', participant_id: 'user-test', participant_name: 'Test user' }], unread_count: 0, is_participant: true };
-const mission = { id: 'mission', account_id: account.id, title, team_id: 'responsive-team', team_name: 'Responsive team', status: 'running', briefing: '반응형 미션 상세', acceptance_criteria: '', room_id: room.id, user_chat_mode: 'open', steps: [], events: [], graph_spec: null, step_timeout_minutes: 30, counts: { total: 0, done: 0, inFlight: 0, failed: 0, awaitingUser: 0, pending: 0 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at };
+const mission = { id: 'mission', account_id: account.id, title, team_id: 'responsive-team', team_name: 'Responsive team', status: 'running', briefing: '반응형 미션 상세', completion_criteria: [], post_actions: [], acceptance_criteria: '', room_id: room.id, user_chat_mode: 'open', steps: [], events: [], graph_spec: null, step_timeout_minutes: 30, counts: { total: 0, done: 0, inFlight: 0, failed: 0, awaitingUser: 0, pending: 0 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at };
 const team = { id: 'responsive-team', account_id: account.id, name: 'Responsive team', enabled: true, members: [], orchestrator_spec: null };
 
 async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false } = {}) {
   const errors = [];
   const prompts = [];
+  const cancellations = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(({ accountId }) => {
     localStorage.setItem('auth_token', 'responsive-test-token');
@@ -48,6 +49,7 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path === '/voice/operators') body = { operators: [] };
     else if (path === '/agent-sessions/hosts') body = [host];
     else if (path.endsWith('/prompt')) { prompts.push(req.postDataJSON()); body = { turn_id: 'sent', live: { ...live, status: 'busy' } }; }
+    else if (path.endsWith('/cancel')) { cancellations.push(path); body = { ok: true }; }
     else if (path.endsWith('/session-responsive')) body = { session: live, live: { ...live, status: busy ? 'busy' : 'ready' }, events };
     else if (path.endsWith('/sessions')) body = [live];
     else if (path.endsWith('/settings') && path.startsWith('/agent-sessions/')) body = { manager_id: host.manager_id, cli: 'codex', credential: null, candidates: [], default_config: {}, known_config_options: live.config_options };
@@ -68,7 +70,7 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  return { errors, prompts };
+  return { errors, prompts, cancellations };
 }
 
 async function expectFits(page) {
@@ -77,6 +79,70 @@ async function expectFits(page) {
   });
   for (const el of overflow) expect(el.scroll, page.url()).toBeLessThanOrEqual(el.width + 1);
 }
+
+test('reload retains selected menus, details and mission steps', async ({ page }) => {
+  const f = await fixture(page, { withStep: true });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/projects');
+  await page.getByTestId(`project-row-${project.id}`).click();
+  await page.getByRole('tab', { name: ui('Host 폴더'), exact: true }).click();
+  await expect(page).toHaveURL(/project=responsive-project&tab=folders/);
+  await page.reload();
+  await expect(page.getByRole('tab', { name: ui('Host 폴더'), exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('project-detail-panel')).toContainText(project.name);
+
+  await page.goto('/missions/mission');
+  await page.getByRole('button', { name: 'Brief', exact: true }).click();
+  await expect(page).toHaveURL(/tab=brief/);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Brief', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.goto('/missions/mission?step=step-review');
+  await expect(page.getByRole('button', { name: 'Step session', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Step session', exact: true })).toBeVisible();
+
+  await page.goto('/tickets?ticket=responsive-ticket');
+  await page.getByRole('tab', { name: ui('기록'), exact: true }).click();
+  await expect(page).toHaveURL(/ticket_tab=activity/);
+  await page.reload();
+  await expect(page.getByRole('tab', { name: ui('기록'), exact: true })).toHaveAttribute('aria-selected', 'true');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/hosts');
+  await page.getByTestId('runtime-hosts-list').getByRole('button').first().click();
+  await expect(page.getByRole('button', { name: ui('← Host 목록'), exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: ui('← Host 목록'), exact: true })).toBeVisible();
+  expect(f.errors).toEqual([]);
+});
+
+test.describe('touch refresh', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test('pull reloads the current Skills tab through the shared app shell', async ({ page }) => {
+    const f = await fixture(page);
+    // The native Android app serves this same client; its bridge is not needed by this gesture.
+    await page.goto('/skills');
+    await page.getByRole('button', { name: /Proposals \(0\)/ }).click();
+    await expect(page).toHaveURL(/tab=proposals/);
+    await page.evaluate(() => { window.__beforePull = true; });
+    const header = await page.locator('.awb-page-header h1').boundingBox();
+    const client = await page.context().newCDPSession(page);
+    const x = header.x + 20;
+    const y = header.y + header.height / 2;
+    await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let dy = 20; dy <= 200; dy += 20) {
+      await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y + dy }] });
+    }
+    await expect(page.locator('.awb-refresh-indicator')).toHaveText('↻Release to refresh');
+    await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(() => page.evaluate(() => window.__beforePull)).toBeUndefined();
+    await expect(page).toHaveURL(/tab=proposals/);
+    await expect(page.getByRole('button', { name: /Proposals \(0\)/ })).toBeVisible();
+    await expect(page.getByText(ui('No proposals.'), { exact: true })).toBeVisible();
+    expect(f.errors).toEqual([]);
+  });
+});
 
 for (const size of [{ width: 320, height: 568 }, { width: 360, height: 740 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 768, height: 1024 }, { width: 1024, height: 768 }, { width: 1100, height: 800 }, { width: 1101, height: 800 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }, { width: 667, height: 375 }]) {
   test(`session composer and transcript fit ${size.width}×${size.height}`, async ({ page }, testInfo) => {
@@ -92,6 +158,19 @@ for (const size of [{ width: 320, height: 568 }, { width: 360, height: 740 }, { 
     expect(box.height).toBeLessThanOrEqual(90);
     expect(box.y + box.height).toBeLessThanOrEqual(size.height);
     await expectFits(page);
+    const actions = page.locator('.awb-composer-actions');
+    const cancel = actions.getByRole('button', { name: 'Cancel', exact: true });
+    const send = actions.getByRole('button', { name: 'Send', exact: true });
+    await expect(cancel).toBeInViewport();
+    await expect(send).toBeInViewport();
+    const cancelBox = await cancel.boundingBox();
+    const sendBox = await send.boundingBox();
+    expect(Math.abs(cancelBox.y - sendBox.y)).toBeLessThan(1);
+    expect(sendBox.x - cancelBox.x - cancelBox.width).toBeLessThanOrEqual(9);
+    if (size.width === 320) {
+      await cancel.click();
+      await expect.poll(() => f.cancellations.length).toBe(1);
+    } else await expect(cancel).toBeDisabled();
     await input.fill('/');
     await expect(page.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
     await expectFits(page);

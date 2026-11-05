@@ -542,44 +542,46 @@ export default function SessionComposer({ disabled, busy, placeholder, hint, com
             opacity: disabled ? 0.6 : 1,
           }}
         />
-        {busy && (
+        <div className="awb-composer-actions">
           <button
             type="button"
             onClick={onCancel}
+            disabled={!busy}
             style={{
               height: 40,
               padding: '0 14px',
               borderRadius: tokens.radii.lg,
               border: `1px solid ${tokens.colors.danger}`,
               background: 'transparent',
-              color: tokens.colors.dangerLight,
+              color: busy ? tokens.colors.dangerLight : tokens.colors.textMuted,
               fontSize: 13,
               fontWeight: 600,
-              cursor: 'pointer',
+              cursor: busy ? 'pointer' : 'not-allowed',
+              opacity: busy ? 1 : 0.5,
             }}
           >
             {translate('Cancel')}</button>
-        )}
-        <button
-          type="button"
-          className="awb-composer-send"
-          onClick={() => void submit()}
-          disabled={locked || !canSend || stillReading}
-          title={busy ? translate('진행 중인 턴에 바로 보냅니다 — 에이전트가 작업 중에 읽고 이어서 답합니다') : undefined}
-          style={{
-            height: 40,
-            padding: '0 16px',
-            borderRadius: tokens.radii.lg,
-            border: 'none',
-            background: locked || !canSend || stillReading ? tokens.colors.surfaceHover : tokens.gradients.accent,
-            color: locked || !canSend || stillReading ? tokens.colors.textMuted : '#fff',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: locked || !canSend || stillReading ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {sending ? translate('Sending…') : translate('Send')}
-        </button>
+          <button
+            type="button"
+            className="awb-composer-send"
+            onClick={() => void submit()}
+            disabled={locked || !canSend || stillReading}
+            title={busy ? translate('진행 중인 턴에 바로 보냅니다 — 에이전트가 작업 중에 읽고 이어서 답합니다') : undefined}
+            style={{
+              height: 40,
+              padding: '0 16px',
+              borderRadius: tokens.radii.lg,
+              border: 'none',
+              background: locked || !canSend || stillReading ? tokens.colors.surfaceHover : tokens.gradients.accent,
+              color: locked || !canSend || stillReading ? tokens.colors.textMuted : '#fff',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: locked || !canSend || stillReading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {sending ? translate('Sending…') : translate('Send')}
+          </button>
+        </div>
       </div>
       <div className="awb-composer-help" style={{ marginTop: 5, fontSize: 10.5, color: tokens.colors.textMuted }}>
         {mobileInput ? translate('Enter for a new line · Tap Send to send') : <>{busy ? translate('Enter sends into the running turn — the agent reads it mid-task') : translate('Enter to send')} {translate('· Shift+Enter for a new line · 📎 or paste images to attach')}</>}{showMic ? translate(' · 🎙 conversation mode: just talk, pause to send') : ''}{commands && commands.length ? translate(' · type / for {0} commands', { 0: commands.length }) : translate(' · slash commands go straight to the CLI')}

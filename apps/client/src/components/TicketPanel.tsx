@@ -19,6 +19,8 @@ import { computeDirtyTicketFields, draftFromTicket, settleSavedDraft, type Ticke
 
 export interface TicketPanelProps {
   ticket: Ticket;
+  selectedTab?: TicketPanelTab;
+  onTabChange?: (tab: TicketPanelTab) => void;
   /** Root tickets of the loaded account pool — pickers and tag suggestions. */
   accountTickets?: TicketCard[];
   accountId?: string;
@@ -46,7 +48,7 @@ export interface TicketPanelProps {
   onScrollToCommentConsumed?: () => void;
 }
 
-type Tab = 'overview' | 'conversation' | 'activity';
+export type TicketPanelTab = 'overview' | 'conversation' | 'activity';
 
 function findInTree(root: Ticket, id: string): Ticket | null {
   if (root.id === id) return root;
@@ -85,7 +87,7 @@ async function copyText(text: string): Promise<boolean> {
  * and 기록 (activity). Subtasks open in place with a back button.
  */
 export default function TicketPanel({
-  ticket, accountTickets, accountId,
+  ticket, accountTickets, accountId, selectedTab, onTabChange,
   onClose, onMove, onDelete, onCreateChild, onDeleteChild, onReparentChild, onSaveDraft,
   onAddComment, onSetCommentStatus, onSelectTicket, scrollToCommentId, onScrollToCommentConsumed,
 }: TicketPanelProps) {
@@ -102,7 +104,9 @@ export default function TicketPanel({
   // The ticket's own owning account wins — the page may list several accounts.
   const resolvedAccountId = active.account_id || accountId || getActiveAccountId() || '';
 
-  const [tab, setTab] = useState<Tab>(scrollToCommentId ? 'conversation' : 'overview');
+  const [localTab, setLocalTab] = useState<TicketPanelTab>(scrollToCommentId ? 'conversation' : 'overview');
+  const tab = selectedTab ?? localTab;
+  const setTab = (next: TicketPanelTab) => { setLocalTab(next); onTabChange?.(next); };
   useEffect(() => { if (scrollToCommentId) setTab('conversation'); }, [scrollToCommentId]);
 
   // ── Buffered edits ─────────────────────────────────────────────────
@@ -110,10 +114,12 @@ export default function TicketPanel({
   // what the user is typing.
   const [draft, setDraft] = useState<TicketDraft>(() => draftFromTicket(active));
   const [parkRequested, setParkRequested] = useState(false);
+  const previousTicketId = useRef(active.id);
   useEffect(() => {
     setDraft(draftFromTicket(active));
     setParkRequested(false);
-    if (!scrollToCommentId) setTab('overview');
+    if (previousTicketId.current !== active.id && !scrollToCommentId) setTab('overview');
+    previousTicketId.current = active.id;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.id]);
   const dirtyFields = computeDirtyTicketFields(draft, active);
@@ -235,7 +241,7 @@ export default function TicketPanel({
   const onPreview = useCallback((src: string, mimetype?: string) => setPreview({ src, mimetype }), []);
 
   const commentCount = (active.comments || []).filter(c => c.author_type !== 'system').length;
-  const tabs: Array<{ id: Tab; label: string; badge?: string; attention?: boolean }> = [
+  const tabs: Array<{ id: TicketPanelTab; label: string; badge?: string; attention?: boolean }> = [
     { id: 'overview', label: translate('개요'), attention: !!active.pending_user_action },
     { id: 'conversation', label: translate('대화'), badge: commentCount ? `${commentCount}${active.comments_has_more ? '+' : ''}` : undefined },
     { id: 'activity', label: translate('기록') },

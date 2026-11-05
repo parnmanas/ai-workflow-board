@@ -3,6 +3,7 @@ import { useLocale } from '../i18n/react';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
+import PullToRefresh from './PullToRefresh';
 import { useDialogFocus } from './useDialogFocus';
 import { ArtifactPanelProvider } from '../contexts/ArtifactPanelContext';
 import ArtifactPanel, { ArtifactToggleButton } from './ArtifactPanel';
@@ -200,9 +201,9 @@ export default function AppLayout() {
 
         {/* The desktop AWB brand bar is gone — Sidebar already carries the
             brand, and its header now holds the mute/artifact buttons. */}
-        <main className="awb-content">
+        <PullToRefresh disabled={drawerMode && drawerOpen}>
           <Outlet />
-        </main>
+        </PullToRefresh>
       </div>
       {/* 우측 Artifact 패널 — 데스크톱은 본문 옆 영역, 모바일은 오버레이 시트.
           닫혀 있으면 null 을 반환해 레이아웃에 영향 없음. */}

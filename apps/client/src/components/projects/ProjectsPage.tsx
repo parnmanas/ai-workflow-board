@@ -3,7 +3,7 @@ import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import { useAuth } from '../../contexts/AuthContext';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { usePageQuery } from '../../hooks/usePageQuery';
 import { api } from '../../api';
 import type { Credential, Project } from '../../types';
 import { useToast } from '../../contexts/ToastContext';
@@ -35,7 +35,7 @@ export default function ProjectsPage() {
   useLocale();
   const { currentAccountId } = useAuth();
   const accountId = currentAccountId || '';
-  const [searchParams] = useSearchParams();
+  const [searchParams, updateQuery] = usePageQuery();
   const { showToast } = useToast();
   const { projects: listed, loading, error, reload } = useProjects(accountId);
 
@@ -48,7 +48,8 @@ export default function ProjectsPage() {
     if (row && (row.updated_at || '') >= (lastSaved.updated_at || '')) setLastSaved(null);
   }, [listed, lastSaved]);
 
-  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get('project'));
+  const selectedId = searchParams.get('project');
+  const setSelectedId = useCallback((id: string | null) => updateQuery({ project: id, tab: null }), [updateQuery]);
   const [query, setQuery] = useState('');
   const selectedProject = selectedId && selectedId !== NEW ? projects.find((p) => p.id === selectedId) || null : null;
   const detailAccountId = selectedProject?.account_id || accountId;
@@ -88,13 +89,13 @@ export default function ProjectsPage() {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelectedId(null); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [isNarrow, selectedId]);
+  }, [isNarrow, selectedId, setSelectedId]);
 
   const handleSaved = useCallback((saved: Project, created: boolean) => {
     setLastSaved(saved);
     if (created) setSelectedId(saved.id);
     notifyProjectsChanged();
-  }, []);
+  }, [setSelectedId]);
 
   const runDelete = async (project: Project, force: boolean) => {
     setDeleting(true);

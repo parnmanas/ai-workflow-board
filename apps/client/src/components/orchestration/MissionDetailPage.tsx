@@ -13,6 +13,7 @@ import type {
 import { useToast } from '../../contexts/ToastContext';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { usePageQuery } from '../../hooks/usePageQuery';
 import { tokens } from '../../tokens';
 import PageHeader from '../PageHeader';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
@@ -57,13 +58,17 @@ export default function MissionDetailPage() {
   const accountId = mission?.id === missionId ? mission.account_id : currentAccountId || '';
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [query, updateQuery] = usePageQuery();
+  const selectedStepId = query.get('step');
+  const setSelectedStepId = (id: string | null) => updateQuery({ step: id, tab: null });
   /**
    * 오른쪽 패널이 무엇을 그리는가. `session` 이 기본이고, 선택된 step 이 있으면 그 step 의
    * 작업 세션, 없으면 미션 대화가 된다 — 탭을 하나 더 만들지 않고 선택 상태가 내용을
    * 가르는 구조다("step 을 고르면 그 세션, 선택을 풀면 메인 세션").
    */
-  const [tab, setTab] = useState<'session' | 'graph' | 'evidence' | 'brief'>('session');
+  const requestedTab = query.get('tab');
+  const tab = requestedTab && ['graph', 'evidence', 'brief'].includes(requestedTab) ? requestedTab : 'session';
+  const setTab = (next: 'session' | 'graph' | 'evidence' | 'brief') => updateQuery({ tab: next === 'session' ? null : next });
   const [busy, setBusy] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
@@ -277,7 +282,6 @@ export default function MissionDetailPage() {
           selectedId={selectedStepId}
           onSelect={(id) => {
             setSelectedStepId(id);
-            setTab('session');
             setStepsOpen(false);
           }}
           counts={mission.counts}
@@ -403,7 +407,6 @@ export default function MissionDetailPage() {
                       // 위상을 보다가 "얘는 뭘 하고 있지"로 이어지는 흐름이 자연스럽다.
                       onSelect={(s) => {
                         setSelectedStepId(s.id);
-                        setTab('session');
                       }}
                     />
                   </>
@@ -420,7 +423,6 @@ export default function MissionDetailPage() {
                   refreshKey={`${mission.updated_at}:${evidenceTotal}`}
                   onSelectStep={(id) => {
                     setSelectedStepId(id);
-                    setTab('session');
                   }}
                 />
               </div>

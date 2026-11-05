@@ -11,6 +11,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { Badge, Button, Card, Input } from '../common';
 import SkillProposalReview from './SkillProposalReview';
 import SkillAssignmentsPanel from '../knowledge/SkillAssignmentsPanel';
+import { usePageTab } from '../../hooks/usePageQuery';
 
 type AssignScope = 'account' | 'project' | 'runtime';
 
@@ -32,7 +33,7 @@ export default function SkillsPage() {
   const [proposals, setProposals] = useState<SkillProposal[]>([]);
   const [selected, setSelected] = useState<SkillDetail | null>(null);
   // 배정(범위별 현황)이 기본 — "누가 무엇을 받는가" 가 가장 먼저 묻는 질문이다(docs/skills.md "배정 범위").
-  const [tab, setTab] = useState<'assignments' | 'catalog' | 'proposals'>('assignments');
+  const [tab, setTab] = usePageTab(['assignments', 'catalog', 'proposals'], 'assignments');
   const [assignScope, setAssignScope] = useState<AssignScope>('account');
   const [assignProject, setAssignProject] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);

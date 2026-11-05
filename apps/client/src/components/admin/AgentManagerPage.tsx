@@ -1,6 +1,7 @@
 import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { usePageQuery } from '../../hooks/usePageQuery';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
 import { installedVersionBadge, managerUpdateAction, updateFailureBadge } from './managerUpdateAction';
@@ -851,7 +852,9 @@ export default function AgentManagerPage() {
   const [instances, setInstances] = useState<AgentManagerInstance[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, updateQuery] = usePageQuery();
+  const selectedId = query.get('instance');
+  const setSelectedId = useCallback((id: string | null) => updateQuery({ instance: id }), [updateQuery]);
   const [pairOpen, setPairOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -893,6 +896,7 @@ export default function AgentManagerPage() {
   // Auto-select the first instance once data arrives so the right pane has
   // something to render. Drops the selection if the instance disappears.
   useEffect(() => {
+    if (loading || loadError) return;
     if (instances.length === 0) {
       if (selectedId !== null) setSelectedId(null);
       return;
@@ -900,7 +904,7 @@ export default function AgentManagerPage() {
     if (!isMobile && (!selectedId || !instances.some((i) => i.instance_id === selectedId))) {
       setSelectedId(instances[0].instance_id);
     }
-  }, [instances, isMobile, selectedId]);
+  }, [instances, isMobile, selectedId, loading, loadError, setSelectedId]);
 
   const selected = instances.find((i) => i.instance_id === selectedId) || null;
   return (

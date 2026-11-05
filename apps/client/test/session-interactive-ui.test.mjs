@@ -15,6 +15,27 @@ import { buildTranscript } from '../src/components/sessions/sessionTranscript.lo
 
 const h = React.createElement;
 
+test('Cancel and Send stay adjacent; Cancel stops a running turn without clearing the draft', async () => {
+  const dom = setupDom({ width: 390 });
+  let cancelled = 0;
+  const sent = [];
+  const props = { disabled: false, busy: false, placeholder: 'Prompt…', commands: [], onSend: prompt => sent.push(prompt), onCancel: () => { cancelled++; } };
+  const view = mount(h(SessionComposer, props));
+  try {
+    const actions = () => [...view.container.querySelectorAll('.awb-composer-actions button')];
+    assert.deepEqual(actions().map(button => button.textContent.trim()), ['Cancel', 'Send']);
+    assert.equal(actions()[0].disabled, true);
+    typeInto(view.container.querySelector('textarea'), 'Keep this draft');
+    view.rerender(h(SessionComposer, { ...props, busy: true }));
+    assert.equal(actions()[0].disabled, false);
+    click(actions()[0]);
+    assert.equal(cancelled, 1);
+    assert.equal(view.container.querySelector('textarea').value, 'Keep this draft');
+    await act(async () => actions()[1].click());
+    assert.equal(sent[0].text, 'Keep this draft');
+  } finally { view.unmount(); dom.cleanup(); }
+});
+
 function change(element, value) {
   act(() => {
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
