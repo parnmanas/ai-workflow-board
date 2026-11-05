@@ -866,6 +866,36 @@ export class RoomMessagingService {
     };
   }
 
+  /** Internal subscription delivery, addressed to one active runtime in its existing room. */
+  async sendEventTrigger(roomId: string, accountId: string, runtimeKey: string, content: string, deliveryId: string): Promise<void> {
+    const room = await this.roomRepo.findOneBy({ id: roomId, account_id: accountId });
+    const part = await this.participantRepo.findOneBy({ room_id: roomId, participant_type: 'agent', participant_id: runtimeKey, left_at: IsNull() });
+    if (!room || !part?.runtime_spec) throw makeError(403, 'Event recipient is no longer an active room participant');
+    await this.membership.requireMissionRoomSpeaker(room, 'agent', runtimeKey);
+    const target = await this._resolveRtMentionTarget(roomId, null, runtimeKey);
+    if (!target) throw makeError(403, 'Event recipient runtime is unavailable');
+    const hostId = String(target.rtRuntime.manager_agent_id || '');
+    if (!this.connectivity.isReachable(hostId)) throw makeError(409, 'Event recipient Host is offline');
+    if (await this._blockMentionOnCapability(target.rtName, target.rtProfile, hostId, roomId, accountId)) {
+      throw makeError(409, 'Event recipient Host needs a compatible manager');
+    }
+    // Stable message id makes a retry reuse the room entry and manager dispatch deduplication key.
+    const message = await this.sendSystemMessage(roomId, accountId, content, deliveryId, [runtimeKey]);
+    const account = await this.accountRepo.findOneBy({ id: accountId });
+    const runProvision: RunProvision | undefined = account?.chat_workspace_folder_enabled
+      && !room.action_id && !room.orchestration_mission_id && !room.run_kind ? {
+        kind: 'chat', run_id: roomId, account_id: accountId,
+        workspace_folder: resolveWorkspaceFolder(null, 'chat', roomId), checkout_mode: 'reuse', repo: null,
+      } : undefined;
+    activityEvents.emit('chat_request', {
+      agent_id: runtimeKey, runtime: target.rtRuntime, account_id: accountId, user_id: 'system',
+      message_id: message.id, ticket_id: null, role_prompt: target.rtRolePrompt,
+      new_message: content, history: [], timestamp: new Date().toISOString(), room_id: roomId,
+      ...(runProvision ? { run_provision: runProvision } : {}),
+      ...(target.rtProfile ? { cli_runtime_profile: target.rtProfile } : {}),
+    });
+  }
+
   /**
    * Send a SYSTEM message to a room — synthetic source (no User / Agent
    * row behind it), used by in-process detectors and supervisors that
@@ -891,7 +921,7 @@ export class RoomMessagingService {
    * badge without joining against User/Agent. Caller supplies the
    * markdown content; length cap matches user-sent messages.
    */
-  async sendSystemMessage(roomId: string, accountId: string, content: string): Promise<any> {
+  async sendSystemMessage(roomId: string, accountId: string, content: string, messageId?: string, dispatchAgentIds?: string[]): Promise<any> {
     if (!content || typeof content !== 'string') {
       throw makeError(400, 'content is required');
     }
@@ -904,8 +934,11 @@ export class RoomMessagingService {
     const room = await this.roomRepo.findOne({ where: { id: roomId } });
     if (!room) throw makeError(404, 'Room not found');
 
-    const savedMsg = await this.messageRepo.save(
+    if (room.account_id !== accountId) throw makeError(403, 'Room account mismatch');
+    const existing = messageId ? await this.messageRepo.findOneBy({ id: messageId, room_id: roomId, account_id: accountId }) : null;
+    const savedMsg = existing ?? await this.messageRepo.save(
       this.messageRepo.create({
+        ...(messageId ? { id: messageId } : {}),
         room_id: roomId,
         account_id: accountId || room.account_id || '',
         sender_type: 'system',
@@ -930,6 +963,7 @@ export class RoomMessagingService {
       message_id: savedMsg.id,
       sender_type: 'system',
       sender_id: 'system',
+      ...(dispatchAgentIds?.length ? { dispatch_agent_ids: dispatchAgentIds } : {}),
       sender_name: 'System',
       // System alerts are first-class history (stale-WAIT detector etc.):
       // keep the default 'message' type so agents replaying history still

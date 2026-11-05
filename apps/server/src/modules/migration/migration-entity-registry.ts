@@ -78,6 +78,7 @@ export const SELF_FK_BACKFILL: Record<string, string> = {
 
 // 부모 → 자식 순서. 위 7개 실FK만 정확히 지키면 되고, 나머지는 참고용 배치.
 export const MIGRATION_ENTITY_ORDER: string[] = [
+  'WorkflowEvent', 'EventSubscription', 'EventDelivery',
   // 독립 루트
   'Account', 'User', 'SystemSetting', 'ClaudeBackendProfile', 'SkillTap', 'Skill',
   'Channel', 'Credential', 'WorkflowFunction', 'Resource',

@@ -97,6 +97,10 @@ export type AuthzTier = 'full' | 'caller';
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // Native session messaging additionally checks both sessions' current account/Host ownership.
   send_session_message: 'full',
+  list_event_types: 'full',
+  subscribe_to_event: 'full',
+  list_event_subscriptions: 'full',
+  cancel_event_subscription: 'full',
   open_session: 'full',
   // Session directory: resolveSessionCaller (full-scope Host key + owner permission) on every call.
   list_session_hosts: 'full',

@@ -447,6 +447,8 @@ export const TICKET_TOOL_EXCLUSIONS: Record<string, string> = {
   // Agent-authored messages and approval cards; no ticket mutation.
   request_ticket_unpend_approval: 'assistant', send_chat_room_message: 'assistant',
   send_session_message: 'assistant',
+  list_event_types: 'read', list_event_subscriptions: 'read',
+  subscribe_to_event: 'assistant', cancel_event_subscription: 'assistant',
   open_session: 'assistant', // Opens a native CLI session; no ticket/artifact mutation.
   // Native session directory lookups (hosts, folders, sessions, one session's settings).
   list_session_hosts: 'read', list_session_folders: 'read', list_sessions: 'read', get_session_info: 'read',

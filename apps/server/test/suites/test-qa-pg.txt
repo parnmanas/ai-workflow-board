@@ -14,6 +14,7 @@ test/business-mail-workflow.test.mjs
 test/business-mail.test.mjs
 test/business-workflow.test.mjs
 test/drop-agent-host-backfill.test.mjs
+test/event-subscriptions.test.mjs
 test/marketing-analytics.test.mjs
 test/marketing-approval-notify.test.mjs
 test/marketing-campaigns-http.test.mjs

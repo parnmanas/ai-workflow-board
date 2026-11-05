@@ -1,3 +1,4 @@
+import { EventSubscriptionsService } from '../event-subscriptions/event-subscriptions.service';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ApiKey } from '../../entities/ApiKey';
@@ -68,6 +69,6 @@ import { SessionDirectoryService } from '../agent-sessions/session-directory.ser
     BusinessModule,
   ],
   controllers: [McpController],
-  providers: [SessionMessagesService, SessionOpenService, SessionDirectoryService],
+  providers: [EventSubscriptionsService, SessionMessagesService, SessionOpenService, SessionDirectoryService],
 })
 export class McpModule {}

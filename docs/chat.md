@@ -116,3 +116,7 @@ chain always terminates. The broadcast `chat_room_message` carries
   other managers ignore it as unmanaged).
 - `chat_room_message` (room-scoped): history fan-out to all participants.
 - `user_mention` (user-scoped): sidebar badge + notification fan-out.
+
+## 이벤트 구독과 후속 작업
+
+세션·채팅의 MCP `subscribe_to_event`로 다른 Host의 세션 완료·실패, 티켓 변경, 채팅 메시지를 기다렸다가 같은 작업 문맥에서 후속 작업을 실행할 수 있다. 구독 조회·취소, 반복·만료, 권한과 전달 보장은 [이벤트 구독](event-subscriptions.md)을 참조한다.

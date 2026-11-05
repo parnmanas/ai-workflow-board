@@ -86,6 +86,7 @@ export const COMPACT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   // 정상 종료해도 웹 채팅에는 답변이 전달되지 않고 무응답으로 판정된다.
   'send_chat_room_message',
   'send_session_message',
+  'list_event_types', 'subscribe_to_event', 'list_event_subscriptions', 'cancel_event_subscription',
   'open_session',
   // 세션 주소를 찾는 도구 — 이것 없이는 send_session_message 에 넘길 주소를 사람이 알려 줘야 한다.
   'list_session_hosts',

@@ -1,3 +1,4 @@
+import { EventSubscriptionsService } from '../event-subscriptions/event-subscriptions.service';
 import { ApiTags } from '@nestjs/swagger';
 import { Controller, All, Req, Res, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -191,6 +192,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
     // 작업 제안 — operator 가 다른 세션에 시킬 일을 제안하고, 사용자 승인 뒤 보낸다(VoiceModule).
     private readonly operatorProposalService: OperatorProposalService,
     private readonly interruptedSessionsService: InterruptedSessionsService,
+    private readonly eventSubscriptionsService: EventSubscriptionsService,
     private readonly sessionMessagesService: SessionMessagesService,
     private readonly sessionOpenService: SessionOpenService,
     private readonly sessionDirectoryService: SessionDirectoryService,
@@ -312,6 +314,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       ontologyQueryService: this.ontologyQueryService,
       operatorDecisionService: this.operatorDecisionService,
       operatorProposalService: this.operatorProposalService,
+      eventSubscriptionsService: this.eventSubscriptionsService,
       sessionMessagesService: this.sessionMessagesService,
       sessionOpenService: this.sessionOpenService,
       sessionDirectoryService: this.sessionDirectoryService,

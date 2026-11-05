@@ -1,3 +1,4 @@
+import type { EventSubscriptionsService } from '../../event-subscriptions/event-subscriptions.service';
 /**
  * ToolContext — the runtime context passed to each MCP tool registration
  * function. Carries the shared DataSource plus the services that tools need,
@@ -250,6 +251,7 @@ export interface ToolContext {
   // 재시작으로 끊긴 작업(docs/voice-operator.md) — operator 가 끊긴 세션을 고정 문구로 잇는다. 같은 이유로
   // standalone context 에는 없다.
   interruptedSessionsService?: InterruptedSessionsService;
+  eventSubscriptionsService?: EventSubscriptionsService;
   sessionMessagesService?: SessionMessagesService;
   sessionOpenService?: SessionOpenService;
   sessionDirectoryService?: SessionDirectoryService;

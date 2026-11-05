@@ -181,3 +181,7 @@ export { BusinessTrademarkAction } from './BusinessTrademarkAction';
 export { BusinessMailConnection } from './BusinessMailConnection';
 export { BusinessMailMessage } from './BusinessMailMessage';
 export { BusinessMailTask } from './BusinessMailTask';
+
+export { WorkflowEvent } from './WorkflowEvent';
+export { EventSubscription } from './EventSubscription';
+export { EventDelivery } from './EventDelivery';
