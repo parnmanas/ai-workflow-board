@@ -1348,6 +1348,10 @@ export interface AgentSessionAuthPatch {
 }
 
 export interface AgentSessionStatePatch {
+  /** Process identity + monotonic state order, shared by events, heartbeat and RPC reads. */
+  state_id?: string;
+  state_seq?: number;
+  turn_id?: string;
   status?: string;
   cwd?: string;
   title?: string;

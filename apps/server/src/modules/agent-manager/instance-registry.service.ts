@@ -325,6 +325,10 @@ export interface AcpAdapterReport {
 }
 
 export interface AgentSessionHeartbeatEntry {
+  /** Process identity + monotonic state order, shared by events, heartbeat and RPC reads. */
+  state_id?: string;
+  state_seq?: number;
+  turn_id?: string;
   cli: string;
   session_id: string;
   status: string;

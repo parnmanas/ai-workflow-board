@@ -294,6 +294,10 @@ export interface TerminalHeartbeatEntry {
 
 /** 하트비트 `agent_sessions[]` 한 줄 — 서버 `InstanceRecord.agent_sessions` 와 같은 모양. */
 export interface AgentSessionHeartbeatEntry {
+  /** Process identity + monotonic state order, shared by events, heartbeat and RPC reads. */
+  state_id?: string;
+  state_seq?: number;
+  turn_id?: string;
   cli: string;
   session_id: string;
   status: string;

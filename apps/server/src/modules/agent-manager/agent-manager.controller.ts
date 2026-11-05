@@ -516,6 +516,9 @@ export class AgentManagerController {
           cli: String(e.cli).slice(0, 32),
           session_id: String(e.session_id).slice(0, 200),
           status: String(e.status).slice(0, 32),
+          ...(typeof e.state_id === 'string' && e.state_id && Number.isSafeInteger(e.state_seq) && e.state_seq >= 0
+            ? { state_id: e.state_id.slice(0, 100), state_seq: e.state_seq } : {}),
+          ...(typeof e.turn_id === 'string' ? { turn_id: e.turn_id.slice(0, 200) } : {}),
           // 새로 만든 세션의 MCP 연결 참조값(그 연결이 어느 세션인지 — AgentSessionsService.resolveMcpSessionRef).
           ...(typeof e.mcp_session_ref === 'string' && e.mcp_session_ref ? { mcp_session_ref: String(e.mcp_session_ref).slice(0, 200) } : {}),
         }))

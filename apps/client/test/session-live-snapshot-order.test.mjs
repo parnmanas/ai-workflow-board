@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { mergeLiveSnapshot } from '../src/components/sessions/sessionTranscript.logic.ts';
+import { SessionListUpdates } from '../src/components/sessions/sessionList.logic.ts';
 
 const snap = (over = {}) => ({
   manager_id: 'm-rolf',
@@ -80,4 +81,34 @@ test('시각을 파싱할 수 없으면 채택한다 — 순서를 모를 때 �
     mergeLiveSnapshot(snap({ status: 'busy', updated_at: '' }), snap({ status: 'ready' })).status,
     'ready',
   );
+});
+
+for (const [old, current] of [['ready', 'busy'], ['busy', 'ready'], ['busy', 'awaiting_permission']]) {
+  test(`list: delayed ${old} response preserves an intervening ${current} update`, () => {
+    const updates = new SessionListUpdates();
+    const checkpoint = updates.checkpoint();
+    updates.record(snap({ status: current }));
+    const row = { cli: 'claude', session_id: 's-1', cwd: '/srv/app', title: 't', source: 'cli', live_status: old, updated_at: '2026-10-02T00:00:00.000Z' };
+    const merged = updates.merge('m-rolf', 'claude', [row], checkpoint);
+    assert.equal(merged[0].live_status, current, 'native transcript timestamps do not order live state');
+    assert.equal(merged[0].source, 'cli');
+    assert.equal(updates.merge('m-rolf', 'claude', [row], updates.checkpoint())[0].live_status, old,
+      'a later fresh read can reconcile again instead of being pinned to an old SSE forever');
+  });
+}
+
+test('list: sessions created during the initial read survive its empty response, scoped by host and CLI', () => {
+  const updates = new SessionListUpdates();
+  const checkpoint = updates.checkpoint();
+  updates.record(snap({ status: 'busy' }));
+  assert.equal(updates.merge('m-rolf', 'claude', [], checkpoint)[0].live_status, 'busy');
+  assert.deepEqual(updates.merge('other-host', 'claude', [], checkpoint), []);
+  assert.deepEqual(updates.merge('m-rolf', 'codex', [], checkpoint), []);
+});
+
+test('list: an out-of-order live event cannot roll the dot back', () => {
+  const updates = new SessionListUpdates();
+  updates.record(snap({ status: 'ready', updated_at: '2026-10-01T00:00:20.000Z' }));
+  assert.equal(updates.record(snap({ status: 'busy' })), false);
+  assert.equal(updates.merge('m-rolf', 'claude', [], 0)[0].live_status, 'ready');
 });

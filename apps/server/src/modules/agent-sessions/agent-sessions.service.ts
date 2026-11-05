@@ -135,6 +135,10 @@ export const SESSION_CLI_CREDENTIAL_PREFIX: Record<string, string> = Object.from
 );
 
 export interface ManagerStatePatch {
+  /** Process identity + monotonic state order, shared by events, heartbeat and RPC reads. */
+  state_id?: string;
+  state_seq?: number;
+  turn_id?: string;
   status?: string;
   cwd?: string;
   title?: string;
@@ -172,6 +176,11 @@ interface LiveState {
   driver_user_id: string | null;
   messageChainDepth?: number;
   currentTurnId?: string;
+  pendingTurnId?: string;
+  pendingTurnSince?: number;
+  managerStateId?: string;
+  managerStateSeq?: number;
+  retiredManagerStates?: Set<string>;
   updated_at: number;
 }
 
@@ -1085,7 +1094,7 @@ export class AgentSessionsService implements OnModuleDestroy {
   // ─── 사용자 읽기 ───────────────────────────────────────────────────────
 
   async listSessions(accountId: string, userId: string, managerId: string, cli: string, accessibleAccountIds: readonly string[] = [accountId]): Promise<AgentSessionSummary[]> {
-    this.requireHost(accountId, managerId, cli);
+    const rec = this.requireHost(accountId, managerId, cli);
     const revisionBefore = this.liveRevision;
     const result = await this.rpc<{ sessions?: unknown }>(managerId, cli, 'list', { account_id: accountId }, userId);
     const list = Array.isArray(result?.sessions) ? result.sessions : [];
@@ -1103,8 +1112,22 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 매니저가 세션마다 실어 보내는 live_status 가 진실이다(프로세스는 거기 있다). 서버
       // 메모리는 그 답에 맞춰 고친다 — 매니저가 "없다" 고 하면 진행 중 상태를 idle 로.
       const reported = typeof raw?.live_status === 'string' && STATUS_SET.has(raw.live_status) ? (raw.live_status as string) : null;
-      const state = this.live.get(liveKey(managerId, cli, s.session_id));
-      if (state && state.revision <= revisionBefore) this.reconcileWithManager(state, reported, 'list');
+      let state = this.live.get(liveKey(managerId, cli, s.session_id));
+      if (!state && reported) {
+        state = await this.seedState(rec, managerId, cli, s.session_id, {
+          cwd: s.cwd, title: s.title, status: reported, driver_user_id: null,
+        }, raw);
+      }
+      if (state && state.revision <= revisionBefore) {
+        this.reconcileWithManager(state, reported, 'list', raw);
+      }
+      // Listing is an authorized read too. After a server restart a sidebar-only
+      // viewer otherwise never receives updates: no detail/open request reclaims the driver.
+      if (state && !state.driver_user_id) {
+        state.driver_user_id = userId;
+        this.touchState(state);
+        this.emitUpdate(state, 'listed');
+      }
       const status = state?.status ?? reported ?? undefined;
       out.push({ ...s, live_status: status });
     }
@@ -1201,7 +1224,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       title: summary?.title || (typeof reportedLive?.title === 'string' ? reportedLive.title : ''),
       status: reportedStatus ?? 'idle',
       driver_user_id: userId,
-    });
+    }, reportedLive ?? undefined);
     // 세션을 읽는 것 자체가 driver 를 (다시) 잡는다. driver 는 메모리에만 있으므로 서버가
     // 재시작하면 사라지는데, 그동안 매니저가 계속 보내오는 이벤트는 driver 가 없다는
     // 이유로 조용히 버려진다(서버는 세션을 저장하지 않는다). 진행 중이던 세션은 busy 라
@@ -1223,7 +1246,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         ...(typeof reportedLive.resume_supported === 'boolean' ? { resume_supported: reportedLive.resume_supported } : {}),
       });
     }
-    if (!advancedDuringRead) this.reconcileWithManager(state, reportedStatus, 'history');
+    if (!advancedDuringRead) this.reconcileWithManager(state, reportedStatus, 'history', reportedLive ?? undefined);
     return { session: summary, live: this.snapshot(state), events };
   }
 
@@ -1419,7 +1442,7 @@ export class AgentSessionsService implements OnModuleDestroy {
       title: typeof result?.title === 'string' ? result.title : title,
       status: typeof result?.status === 'string' ? result.status : 'ready',
       driver_user_id: userId,
-    });
+    }, result);
     // RPC 중에 상태가 앞서 나갔으면 open 결과의 status 는 **쓰지 않는다**(이미 과거다).
     // 구조 정보(mode·config_options·auth)는 그 세션의 정적 성질이라 그대로 반영한다.
     //
@@ -1428,7 +1451,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     this.applyPatch(state, {
       ...(advancedDuringOpen
         ? {}
-        : { status: typeof result?.status === 'string' ? result.status : 'ready' }),
+        : { status: typeof result?.status === 'string' ? result.status : 'ready',
+          state_id: result?.state_id, state_seq: result?.state_seq, turn_id: result?.turn_id }),
       current_mode: result?.current_mode ?? null,
       available_modes: Array.isArray(result?.available_modes) ? result.available_modes : [],
       // 매니저의 open 답에 실린 세션 설정·명령 — 화면이 SSE 패치를 기다리지 않고 바로 셀렉트를 그린다.
@@ -1505,6 +1529,8 @@ export class AgentSessionsService implements OnModuleDestroy {
     // 턴 중 입력은 새 턴을 열지 않는다 — 진행 중 상태(권한 대기 포함)는 매니저가 계속 알린다.
     if (opensTurn) {
       state.currentTurnId = turnId;
+      state.pendingTurnId = turnId;
+      state.pendingTurnSince = Date.now();
       state.status = state.status === 'idle' || state.status === 'closed' || state.status === 'error' ? 'starting' : 'busy';
       state.last_error = null;
       state.last_error_code = null;
@@ -1801,7 +1827,6 @@ export class AgentSessionsService implements OnModuleDestroy {
     const events = itemsInput
       .map((raw: any, i: number) => this.normalizeEvent(raw, i, true))
       .filter((e): e is AgentSessionEventRecord => !!e);
-    this.trackPending(key, events);
     let state = this.live.get(key);
     if (!state) {
       // 매니저가 먼저 말을 거는 경우(서버 재시작 뒤) — driver 없이 상태만 둔다. 상태는 배치에서 읽는다:
@@ -1809,12 +1834,17 @@ export class AgentSessionsService implements OnModuleDestroy {
       // 예전엔 무조건 busy 로 심어서 설정 변경 system 행 하나에도 "Working" 유령이 남았다.
       state = this.createStateFromManager(managerId, cli, sessionId, { cwd: '', title: '', status: inferStatusFromBatch(events, patch), driver_user_id: null });
     }
+    const accepted = patch ? this.applyPatch(state, patch) : true;
+    if (accepted) this.trackPending(key, events);
     // driver 가 없어도(서버 재시작 뒤 아무도 그 세션을 다시 열지 않았다) 서버 안에서는 흘려보낸다 — 작업 보고
     // (voice-announcer)가 듣는다. 사용자 SSE 는 event-registry 가 driver 에게만 보내므로 driver 가 없으면 아무에게도
     // 가지 않는다. 예전에는 여기서 막혀서, 배포 직후의 세션 소식이 operator 에게 보고되지 않았다(2026-10-04 실측).
     for (const event of events) {
-      if (event.type === 'turn' && event.payload?.phase === 'started') state.currentTurnId = event.turn_id;
-      if (event.type === 'turn' && event.payload?.phase === 'finished' && state.currentTurnId === event.turn_id) {
+      if (accepted && event.type === 'turn' && event.payload?.phase === 'started') {
+        state.currentTurnId = event.turn_id;
+        if (state.pendingTurnId === event.turn_id) state.pendingTurnId = undefined;
+      }
+      if (accepted && event.type === 'turn' && event.payload?.phase === 'finished' && state.currentTurnId === event.turn_id) {
         state.currentTurnId = undefined;
       }
       activityEvents.emit('agent_session_event', {
@@ -1828,8 +1858,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     let live: AgentSessionLiveSnapshot | null = null;
     if (patch && Object.keys(patch).length) {
-      this.applyPatch(state, patch);
-      live = this.emitUpdate(state, patch.reason || 'manager_patch');
+      live = accepted ? this.emitUpdate(state, patch.reason || 'manager_patch') : this.snapshot(state);
     } else {
       this.touchState(state);
     }
@@ -1925,7 +1954,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const key = liveKey(managerId, cli, sessionId);
     const state = this.live.get(key)
       ?? this.createStateFromManager(managerId, cli, sessionId, { cwd: '', title: '', status: 'idle', driver_user_id: null });
-    this.applyPatch(state, patch);
+    if (!this.applyPatch(state, patch)) return this.snapshot(state);
     return this.emitUpdate(state, patch.reason || 'manager_patch');
   }
 
@@ -1939,7 +1968,9 @@ export class AgentSessionsService implements OnModuleDestroy {
    *     진행 중일 수 있으므로 RPC open 타임아웃(120s) 동안 그대로 둔다.
    * 바뀌면 driver 에게 `agent_session_update` 를 보내 열려 있는 화면도 함께 고친다.
    */
-  private reconcileWithManager(state: LiveState, reportedStatus: string | null, reason: string): void {
+  private reconcileWithManager(state: LiveState, reportedStatus: string | null, reason: string, observation?: ManagerStatePatch): void {
+    if (observation && !this.acceptManagerState(state, observation)) return;
+    if (!reportedStatus && state.pendingTurnId && Date.now() - (state.pendingTurnSince ?? 0) < STARTING_GRACE_MS) return;
     // An unchanged heartbeat still supersedes an older in-flight read. Do not
     // refresh updated_at here: an absent process must not extend starting's grace.
     state.revision = ++this.liveRevision;
@@ -1950,9 +1981,13 @@ export class AgentSessionsService implements OnModuleDestroy {
       this.emitUpdate(state, reason);
       return;
     }
-    if (!IN_FLIGHT_STATUSES.has(state.status)) return;
+    if (!IN_FLIGHT_STATUSES.has(state.status) && state.status !== 'ready') return;
     if (state.status === 'starting' && Date.now() - state.updated_at < STARTING_GRACE_MS) return;
     state.status = 'idle';
+    state.pendingTurnId = undefined;
+    state.pendingTurnSince = undefined;
+    state.currentTurnId = undefined;
+    this.awaiting.delete(liveKey(state.manager_id, state.cli, state.session_id));
     this.touchState(state);
     this.emitUpdate(state, reason);
   }
@@ -1963,7 +1998,7 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 연결 단절로 마지막 패치를 못 받은 유령). `starting` 은 open 이 끝나기 전 하트비트가 먼저 올 수
    * 있으므로 open 타임아웃 동안 지킨다.
    */
-  reconcileWithHeartbeat(managerId: string, reported: Array<{ cli: string; session_id: string; status: string; mcp_session_ref?: string }>): number {
+  reconcileWithHeartbeat(managerId: string, reported: Array<ManagerStatePatch & { cli: string; session_id: string; status: string; mcp_session_ref?: string }>): number {
     // 새로 만든 세션의 MCP 연결 참조값 — 살아 있는 세션 목록 전체라 그대로 갈아 끼운다(죽은 세션의 참조는 사라진다).
     const refs = new Map<string, string>();
     for (const e of reported) {
@@ -1971,16 +2006,16 @@ export class AgentSessionsService implements OnModuleDestroy {
     }
     if (refs.size) this.mcpRefs.set(managerId, refs);
     else this.mcpRefs.delete(managerId);
-    const byKey = new Map<string, string>();
+    const byKey = new Map<string, ManagerStatePatch>();
     for (const e of reported) {
-      if (e && typeof e.session_id === 'string' && typeof e.cli === 'string' && STATUS_SET.has(e.status)) byKey.set(liveKey(managerId, e.cli, e.session_id), e.status);
+      if (e && typeof e.session_id === 'string' && typeof e.cli === 'string' && STATUS_SET.has(e.status)) byKey.set(liveKey(managerId, e.cli, e.session_id), e);
     }
     let changed = 0;
     for (const [key, state] of this.live) {
       if (state.manager_id !== managerId) continue;
-      const reportedStatus = byKey.get(key) ?? null;
+      const observation = byKey.get(key);
       const before = state.status;
-      this.reconcileWithManager(state, reportedStatus, 'heartbeat');
+      this.reconcileWithManager(state, observation?.status ?? null, 'heartbeat', observation);
       if (state.status !== before) changed += 1;
     }
     return changed;
@@ -2003,7 +2038,10 @@ export class AgentSessionsService implements OnModuleDestroy {
     for (const [key, state] of this.live) {
       if (state.manager_id !== managerId) continue;
       this.awaiting.delete(key); // 프로세스가 없으면 기다리던 요청도 없다
-      if (!IN_FLIGHT_STATUSES.has(state.status)) continue;
+      state.pendingTurnId = undefined;
+      state.pendingTurnSince = undefined;
+      state.currentTurnId = undefined;
+      if (!IN_FLIGHT_STATUSES.has(state.status) && state.status !== 'ready') continue;
       state.status = 'idle';
       this.touchState(state);
       this.emitUpdate(state, 'host_offline');
@@ -2063,6 +2101,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     cli: string,
     sessionId: string,
     seed: { cwd: string; title: string; status: string; driver_user_id: string | null },
+    observation?: ManagerStatePatch,
   ): Promise<LiveState> {
     const existing = this.live.get(liveKey(managerId, cli, sessionId));
     if (existing) return existing;
@@ -2070,7 +2109,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     // Manager events can create a state while the host name is being loaded.
     const arrived = this.live.get(liveKey(managerId, cli, sessionId));
     if (arrived) return arrived;
-    return this.createState(managerId, name, cli, sessionId, seed);
+    const state = this.createState(managerId, name, cli, sessionId, seed);
+    if (observation) this.acceptManagerState(state, observation);
+    return state;
   }
 
   private createState(
@@ -2107,10 +2148,41 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   private touchState(state: LiveState): void {
     state.revision = ++this.liveRevision;
-    state.updated_at = Date.now();
+    state.updated_at = Math.max(Date.now(), state.updated_at + 1);
   }
 
-  private applyPatch(state: LiveState, patch: ManagerStatePatch): void {
+  private acceptManagerState(state: LiveState, patch: ManagerStatePatch): boolean {
+    if (!patch.state_id || !Number.isSafeInteger(patch.state_seq) || patch.state_seq! < 0) {
+      // Older managers cannot correlate observations with a dispatched turn.
+      if (patch.status !== undefined) {
+        state.pendingTurnId = undefined;
+        state.pendingTurnSince = undefined;
+      }
+      return true;
+    }
+    if (state.retiredManagerStates?.has(patch.state_id)) return false;
+    // Equal observations can arrive via heartbeat before their event batch. The
+    // batch still carries permission requests/error details that must be applied.
+    if (state.managerStateId === patch.state_id && patch.state_seq! < (state.managerStateSeq ?? -1)) return false;
+    if (state.pendingTurnId) {
+      if (patch.turn_id !== state.pendingTurnId) {
+        if (Date.now() - (state.pendingTurnSince ?? 0) < STARTING_GRACE_MS) return false;
+        state.currentTurnId = undefined;
+      }
+      state.pendingTurnId = undefined;
+      state.pendingTurnSince = undefined;
+    }
+    if (state.managerStateId && state.managerStateId !== patch.state_id) {
+      (state.retiredManagerStates ??= new Set()).add(state.managerStateId);
+      if (state.retiredManagerStates.size > 8) state.retiredManagerStates.delete(state.retiredManagerStates.values().next().value!);
+    }
+    state.managerStateId = patch.state_id;
+    state.managerStateSeq = patch.state_seq;
+    return true;
+  }
+
+  private applyPatch(state: LiveState, patch: ManagerStatePatch): boolean {
+    if (!this.acceptManagerState(state, patch)) return false;
     if (patch.status !== undefined) {
       if (typeof patch.status !== 'string' || !STATUS_SET.has(patch.status)) throw new AgentSessionError(400, 'status_invalid');
       state.status = patch.status;
@@ -2156,6 +2228,7 @@ export class AgentSessionsService implements OnModuleDestroy {
         : null;
     }
     this.touchState(state);
+    return true;
   }
 
   private sweep(): void {

@@ -277,6 +277,9 @@ interface LiveSession {
   seq: number;
   /** 프로세스마다 다른 id 접두어 — 라이브 seq 는 프로세스마다 1 부터라 id 만으로 중복을 걸러야 한다. */
   nonce: string;
+  stateSeq: number;
+  publishedState?: AgentSessionStatePatch;
+  queuedStatus?: string;
   /** 이 프로세스에 적용된 CLI 설정 credential('' = 운영자 로그인). 바인딩이 바뀌면 재오픈한다. */
   credentialId: string;
   /** 자격증명의 출처 — 매니저가 아는 사실. 어댑터가 알려 주는 신원과 합쳐 `auth` 로 보고한다. */
@@ -605,13 +608,13 @@ export class AgentSessionRunner {
    * 하트비트용 — 살아 있는 세션 전체와 서버 contract 의 status. 닫히는 중/죽은 것은 뺀다. MCP 연결이 세션 id 가
    * 아닌 참조값으로 붙은 세션(새로 만든 세션)은 그 참조도 싣는다 — 서버가 그 연결이 어느 세션인지 안다.
    */
-  liveStates(): Array<{ cli: string; session_id: string; status: string; mcp_session_ref?: string }> {
+  liveStates(): Array<{ cli: string; session_id: string; status: string; state_id: string; state_seq: number; turn_id?: string; mcp_session_ref?: string }> {
     return Array.from(this.#live.values())
       .filter((live) => !live.exited && !live.closing && !!live.sessionId)
       .map((live) => ({
         cli: live.cli,
         session_id: live.sessionId,
-        status: this.#statusOf(live),
+        ...this.#reportedState(live),
         ...(live.mcpSessionRef && live.mcpSessionRef !== live.sessionId ? { mcp_session_ref: live.mcpSessionRef } : {}),
       }));
   }
@@ -710,7 +713,7 @@ export class AgentSessionRunner {
       log(`${tag} ${request.op} failed: ${message}`);
       const live = this.#live.get(this.#key(cli, sessionId));
       const failure: AgentSessionEventInput = { type: 'error', payload: { message, code: err?.code ?? undefined }, turn_id: request.turn_id };
-      const state: AgentSessionStatePatch = { status: live?.turn ? 'busy' : 'error', last_error: message, reason: `${request.op}_failed` };
+      const state: AgentSessionStatePatch = { status: live?.turn ? 'busy' : 'error', last_error: message, reason: `${request.op}_failed`, turn_id: request.turn_id };
       if (live) {
         this.#enqueue(live, [failure], state);
         await live.postChain;
@@ -727,7 +730,11 @@ export class AgentSessionRunner {
       switch (request.op) {
         case 'list': {
           const sessions = await this.#store.listSessions(cli);
-          const withLive = sessions.map((s) => ({ ...s, live_status: this.#live.get(this.#key(cli, s.session_id)) ? this.#statusOf(this.#live.get(this.#key(cli, s.session_id))!) : undefined }));
+          const withLive = sessions.map((s) => {
+            const live = this.#live.get(this.#key(cli, s.session_id));
+            const state = live ? this.#reportedState(live) : null;
+            return { ...s, ...(state ?? {}), live_status: state?.status };
+          });
           await this.#reply(requestId, op, { ok: true, result: { sessions: withLive } });
           return;
         }
@@ -1044,6 +1051,7 @@ export class AgentSessionRunner {
         idleTimer: null,
         postChain: Promise.resolve(),
         seq: 0,
+        stateSeq: 0,
         nonce: randomUUID().slice(0, 8),
         credentialId: request.credential_id || '',
         authSource: auth.source,
@@ -1589,6 +1597,17 @@ export class AgentSessionRunner {
     return 'ready';
   }
 
+  /** The same observation goes over every transport. While the final HTTP response
+   * is in flight, a heartbeat must not turn its published Ready back into Busy. */
+  #reportedState(live: LiveSession): { status: string; state_id: string; state_seq: number; turn_id?: string } {
+    return {
+      status: live.publishedState?.status ?? this.#statusOf(live),
+      state_id: live.nonce,
+      state_seq: live.publishedState?.state_seq ?? 0,
+      turn_id: live.publishedState?.turn_id,
+    };
+  }
+
   #summaryOf(live: LiveSession): SessionSummary {
     const now = new Date().toISOString();
     return { cli: live.cli, session_id: live.sessionId, cwd: live.cwd, title: live.title, created_at: now, updated_at: now, source: 'awb' };
@@ -1599,7 +1618,7 @@ export class AgentSessionRunner {
       session_id: live.sessionId,
       cwd: live.cwd,
       title: live.title,
-      status: this.#statusOf(live),
+      ...this.#reportedState(live),
       resume_supported: live.loadSupported,
       auth: live.authStatus,
       current_mode: live.currentMode,
@@ -1746,9 +1765,9 @@ export class AgentSessionRunner {
     } finally {
       this.#clearSilenceWatch(live);
       this.#clearTurnWatch(live);
-      // Heartbeats/history bypass the delivery queue. Keep the turn busy until
-      // its final output drains, or they advertise Ready while old tool/text
-      // events are still arriving (potentially minutes behind on a slow link).
+      // Keep the next prompt queued until the final delivery drains. Status is
+      // published when that batch starts, so heartbeat/history agree with it
+      // even while its HTTP acknowledgement is still in flight.
       await live.postChain;
       live.turn = null;
       this.#touch(live);
@@ -2460,8 +2479,19 @@ export class AgentSessionRunner {
       return { ...e, payload: boundedPayload(e.payload), seq: live.seq, id: `${live.sessionId}:live:${live.nonce}:${live.seq}`, created_at: now };
     });
     const ref = this.#ref(live.cli, live.sessionId);
-    live.delivery ??= new AgentSessionDelivery((batch, patch) => postAgentSessionEvents(this.#config, ref, batch, patch));
-    live.postChain = live.delivery.enqueue(stamped, state);
+    live.delivery ??= new AgentSessionDelivery((batch, patch) => {
+      if (patch) live.publishedState = patch;
+      return postAgentSessionEvents(this.#config, ref, batch, patch);
+    });
+    const patch = state ? {
+      ...state,
+      status: state.status ?? live.queuedStatus ?? this.#statusOf(live),
+      state_id: live.nonce,
+      state_seq: ++live.stateSeq,
+      turn_id: state.turn_id ?? live.turn?.turnId ?? '',
+    } : undefined;
+    if (patch) live.queuedStatus = patch.status;
+    live.postChain = live.delivery.enqueue(stamped, patch);
     return stamped;
   }
 

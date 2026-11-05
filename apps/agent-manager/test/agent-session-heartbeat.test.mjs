@@ -65,7 +65,7 @@ test('heartbeat forwards the runner live states with their contract status', asy
   const payloadPromise = stubFetch(t);
   const heartbeat = heartbeatWith({
     agentSessionsProvider: () => [
-      { cli: 'claude', session_id: 's-1', status: 'busy' },
+      { cli: 'claude', session_id: 's-1', status: 'busy', state_id: 'process-1', state_seq: 12, turn_id: 'turn-1' },
       { cli: 'codex', session_id: 's-2', status: 'awaiting_permission' },
       { bogus: true },
     ],
@@ -74,7 +74,7 @@ test('heartbeat forwards the runner live states with their contract status', asy
   heartbeat.start();
   const payload = await payloadPromise;
   assert.deepEqual(payload.agent_sessions, [
-    { cli: 'claude', session_id: 's-1', status: 'busy' },
+    { cli: 'claude', session_id: 's-1', status: 'busy', state_id: 'process-1', state_seq: 12, turn_id: 'turn-1' },
     { cli: 'codex', session_id: 's-2', status: 'awaiting_permission' },
   ], 'malformed entries are dropped');
 });
@@ -105,7 +105,10 @@ test('AgentSessionRunner.liveStates lists open sessions with their status and fo
   const sid = opened.result.session_id;
   const [ref] = mcpRefs;
   assert.match(ref, /^pending-[0-9a-f-]{36}$/, 'the MCP connection is fixed before session/new names the session — a unique ref, never "new"');
-  assert.deepEqual(runner.liveStates(), [{ cli: 'claude', session_id: sid, status: 'ready', mcp_session_ref: ref }],
+  const initial = runner.liveStates()[0];
+  assert.ok(initial.state_id && initial.state_seq > 0, 'every transport carries a process and state sequence');
+  assert.deepEqual(runner.liveStates(), [{ cli: 'claude', session_id: sid, status: 'ready', mcp_session_ref: ref,
+    state_id: initial.state_id, state_seq: initial.state_seq, turn_id: '' }],
     'the heartbeat tells the server which session that ref is');
   const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-1', text: 'hello' }));
   const started = Date.now();

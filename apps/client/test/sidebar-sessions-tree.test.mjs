@@ -29,13 +29,14 @@ import assert from 'node:assert/strict';
 
 import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
 import { installFakeEventSource } from './helpers/boardStream.mjs';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { ToastProvider } from '../src/contexts/ToastContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { NotificationProvider } from '../src/contexts/NotificationContext.tsx';
 import { ArtifactPanelProvider } from '../src/contexts/ArtifactPanelContext.tsx';
 import Sidebar from '../src/components/Sidebar.tsx';
+import SessionsPage from '../src/components/sessions/SessionsPage.tsx';
 
 const h = React.createElement;
 
@@ -99,7 +100,11 @@ function installFetchStub({ hosts, sessionsByCli, permissions, control = {} }) {
     if (sessionList && control.failSessionList) {
       return Promise.resolve({ ok: false, status: 504, json: async () => ({ error: 'The Runtime Host did not respond in time.' }) });
     }
-    if (sessionList) return json(sessionsByCli[decodeURIComponent(sessionList[2])] ?? []);
+    if (sessionList) {
+      const rows = sessionsByCli[decodeURIComponent(sessionList[2])] ?? [];
+      if (control.listGate) return control.listGate.then(() => json(rows));
+      return json(rows);
+    }
     if (path.endsWith('/agent-sessions/hosts')) return json([...hosts]);
     if (path.includes('/auth/me')) {
       return json({
@@ -150,6 +155,7 @@ async function mountSidebar(t, options = {}) {
     sessionsByCli = DEFAULT_SESSIONS_BY_CLI,
     permissions = ['agent_sessions.use'],
     control = {},
+    withSessionPage = false,
   } = options;
 
   const dom = setupDom({ width: 1280 });
@@ -200,6 +206,7 @@ async function mountSidebar(t, options = {}) {
                   rooms: [],
                   roomsLoading: false,
                 }),
+                withSessionPage ? h(Routes, null, h(Route, { path: '/sessions/:managerId', element: h(SessionsPage) })) : null,
               ),
             ),
           ),
@@ -545,3 +552,32 @@ test('⑭ 매니저가 다시 붙으면 — 호스트가 아직 목록에 없었
   assert.equal(hasRow(tree(), HOST_ROW_TITLE), true, '호스트가 돌아온다');
   assert.equal(hasRow(tree(), '재시작 뒤 세션'), true, '돌아온 호스트의 세션을 다시 물어 새 세션이 보여야 한다');
 });
+
+for (const [old, current, tone] of [['ready', 'busy', 'live'], ['busy', 'ready', 'queued']]) {
+  test(`a slow ${old} list cannot rewind the ${current} dot, including after a failed refresh`, async (t) => {
+    const control = {};
+    const { view, emitSessionUpdate, emitInstanceUpdate } = await mountSidebar(t, {
+      control, withSessionPage: true, entry: `/sessions/${MANAGER_ID}`,
+      sessionsByCli: { claude: [session({ session_id: 's-race', title: 'Status race', live_status: old })], codex: [] },
+    });
+    let release;
+    control.listGate = new Promise((resolve) => { release = resolve; });
+    t.after(() => release());
+    await emitInstanceUpdate('registered');
+    await emitSessionUpdate({
+      manager_id: MANAGER_ID, manager_name: HOST.name, cli: 'claude', session_id: 's-race',
+      cwd: AWB_CWD, title: 'Status race', status: current, updated_at: ago(0),
+    });
+    const dotTone = () => rowByTitle(hostsTree(view), 'Status race')?.querySelector('[data-activity-tone]')?.getAttribute('data-activity-tone');
+    assert.equal(dotTone(), tone, 'live update changes the actual rendered dot');
+    release();
+    await flush();
+    assert.equal(dotTone(), tone, 'old list response cannot undo the live dot');
+    assert.equal(view.container.querySelector('[data-session-status]')?.getAttribute('data-session-status'), current,
+      'the host session list agrees with the sidebar after the same delayed read');
+    control.listGate = null;
+    control.failSessionList = true;
+    await emitInstanceUpdate('registered');
+    assert.equal(dotTone(), tone, 'the fallback cache includes the latest live status');
+  });
+}

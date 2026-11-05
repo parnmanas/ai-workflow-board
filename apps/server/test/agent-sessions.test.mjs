@@ -772,6 +772,14 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   assert.ok((await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready' }])).status < 300);
   await stream.waitFor('agent_session_update', (d) => d?.session?.session_id === sid && d.session.status === 'ready' && d.reason === 'heartbeat', 4000);
 
+  // A delayed heartbeat must retain the runner's observation order through the HTTP controller.
+  const version = { state_id: 'interactive-process', turn_id: 'interactive-turn' };
+  await relay({ state: { status: 'busy', ...version, state_seq: 20 } });
+  await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'ready', ...version, state_seq: 21 }]);
+  await heartbeatWith([{ cli: 'codex', session_id: sid, status: 'busy', ...version, state_seq: 20 }]);
+  const latePatch = await relay({ state: { status: 'busy', ...version, state_seq: 20 } });
+  assert.equal(latePatch.live.status, 'ready', 'heartbeat and event patches share the same ordered observation');
+
   // 5b. 고른 설정은 호스트×CLI 에 기억되고, 이후 open/prompt payload 에 실려 매니저가 다시 건다.
   //     이게 없으면 어댑터 프로세스가 회수될 때마다(유휴/다른 세션 왕복) 사용자의 선택이 사라진다.
   const settingsUrl = `${base}/api/agent-sessions/hosts/${managerId}/codex/settings`;
@@ -1048,7 +1056,7 @@ test('세션 설정: provider 가 많은 OpenCode 의 긴 모델 목록을 자�
 // 않으므로 그 대화는 화면에서 통째로 빈다. 진행 중이던 세션은 busy 라 prompt 가 409 고 Connect 도
 // 안 나와서, driver 를 쓰기 동작으로만 잡던 예전 규칙에서는 되찾을 길이 아예 없었다(실측: 끝난
 // 작업이 "Working" 인 채로 남고 그 뒤 대화가 하나도 안 보였다). 이제 history 로 읽기만 해도 잡는다.
-test('server restart: reading the session re-claims the driver so the live stream resumes', async (t) => {
+for (const read of ['history', 'list']) test(`server restart: ${read} reclaims the driver so the live stream resumes`, async (t) => {
   const { app, port, modules } = await bootApp({ port: parseInt(process.env.PORT, 10) });
   t.after(async () => { await closeTestApp(app); });
   const { getDataSourceToken, AuthService, activityEvents } = modules;
@@ -1106,11 +1114,11 @@ test('server restart: reading the session re-claims the driver so the live strea
   // 1. 아직 아무도 driver 가 아니다 — 이 프레임은 갈 곳이 없다.
   assert.equal((await stream.drainOfType('agent_session_event', 300)).length, 0, 'no driver yet, so nothing is delivered');
 
-  // 2. 사용자가 세션 화면에 (다시) 들어온다 = history 읽기. 매니저가 여전히 busy 라고 답한다.
-  const detailCall = call(`${sessionsUrl}/${sid}`, { headers: ownerHeaders });
-  await answerNext('history', {
+  // Either a detail view or a sidebar-only list must reattach the authorized viewer.
+  const detailCall = call(read === 'history' ? `${sessionsUrl}/${sid}` : sessionsUrl, { headers: ownerHeaders });
+  await answerNext(read, {
     ok: true,
-    result: {
+    result: read === 'list' ? { sessions: [{ session_id: sid, cwd: '/home/parn/repo', title: 'Long turn', live_status: 'busy' }] } : {
       session: { session_id: sid, cwd: '/home/parn/repo', title: 'Long turn', updated_at: '2026-09-25T02:20:00.000Z', source: 'cli' },
       events: [textRow(1, 'still working')],
       truncated: false,
@@ -1119,8 +1127,12 @@ test('server restart: reading the session re-claims the driver so the live strea
   });
   const detail = await detailCall;
   assert.equal(detail.status, 200, detail.text);
-  assert.equal(detail.body.live.status, 'busy');
-  assert.equal(detail.body.live.driver_user_id, owner.id, '세션을 읽은 사용자가 driver 가 된다');
+  if (read === 'history') {
+    assert.equal(detail.body.live.status, 'busy');
+    assert.equal(detail.body.live.driver_user_id, owner.id, '세션을 읽은 사용자가 driver 가 된다');
+  } else {
+    assert.equal(detail.body[0].live_status, 'busy');
+  }
 
   // 3. 이후 매니저가 중계하는 이벤트·상태가 그 사용자에게 흐른다 — 턴이 끝나면 화면도 따라 끝난다.
   await relay([textRow(2, 'done at last')]);

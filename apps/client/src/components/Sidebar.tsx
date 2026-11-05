@@ -34,7 +34,7 @@ import { useAgentSessionsNav } from '../hooks/useAgentSessionsNav';
 import { useMarketingInbox } from '../hooks/useMarketingInbox';
 import { useRoomActivity } from '../hooks/useRoomActivity';
 import { sessionActivity } from '../activity';
-import { groupSessionsByCwd, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
+import { groupSessionsByCwd, SessionListUpdates, sessionPath, splitRecentCwdGroups, splitRecentSessions, upsertSessionInGroups, type CwdGroup } from './sessions/sessionList.logic';
 import { operatorForSession, useVoiceOperators } from '../voice/operator';
 import { useWakeState } from '../voice/wakeState';
 import WakeToggle from '../voice/WakeToggle';
@@ -355,6 +355,7 @@ export default function Sidebar({
   // 아직 다 붙지 않았을 때 목록 요청은 실패(host_offline·timeout)하는데, 예전에는 그 실패를 빈 목록으로
   // 저장하고 다시 묻지 않아서 그 호스트의 세션이 사이드바에서 사라진 채 남았다(운영 보고 2026-10-02).
   // 실패한 CLI 는 마지막으로 받은 목록을 유지하고, 잠시 뒤 다시 묻는다(횟수 제한).
+  const sessionUpdatesRef = React.useRef(new SessionListUpdates());
   const lastGoodByCliRef = React.useRef<Record<string, Record<string, AgentSessionSummary[]>>>({});
   const loadSeqRef = React.useRef<Record<string, number>>({});
   const retryRef = React.useRef<Record<string, { timer: number | null; attempts: number }>>({});
@@ -377,14 +378,14 @@ export default function Sidebar({
       ...prev,
       [managerId]: { groups: prev[managerId]?.groups ?? [], loading: true, loaded: prev[managerId]?.loaded ?? false },
     }));
+    const checkpoint = sessionUpdatesRef.current.checkpoint();
     const lastGood = lastGoodByCliRef.current[managerId] ?? {};
     const byCliMap: Record<string, AgentSessionSummary[]> = {};
-    const fetched: Record<string, AgentSessionSummary[]> = {};
     let failed = false;
     await Promise.all(host.clis.map(async (cli) => {
       try {
         const list = await api.listHostSessions(managerId, cli);
-        byCliMap[cli] = fetched[cli] = Array.isArray(list) ? list : [];
+        byCliMap[cli] = Array.isArray(list) ? list : [];
       } catch {
         failed = true;
         byCliMap[cli] = lastGood[cli] ?? [];
@@ -392,7 +393,11 @@ export default function Sidebar({
     }));
     // 그 사이 더 새 로드가 시작됐으면 그 결과를 기다린다(늦게 온 옛 응답이 덮지 않게).
     if (loadSeqRef.current[managerId] !== seq) return;
-    lastGoodByCliRef.current[managerId] = { ...lastGood, ...fetched };
+    for (const cli of host.clis) {
+      // The last-good cache also receives SSE; only updates during this request need overlaying.
+      byCliMap[cli] = sessionUpdatesRef.current.merge(managerId, cli, byCliMap[cli] ?? [], checkpoint);
+    }
+    lastGoodByCliRef.current[managerId] = { ...lastGood, ...byCliMap };
     setHostSessions((prev) => ({ ...prev, [managerId]: { groups: groupSessionsByCwd(byCliMap), loading: false, loaded: true } }));
     if (failed && retry.attempts < SESSION_LIST_RETRY_MAX) {
       retry.attempts += 1;
@@ -447,7 +452,9 @@ export default function Sidebar({
   // 보이지 않았다.
   useBoardStreamEvent('agent_session_update', React.useCallback((data: AgentSessionUpdateEvent) => {
     const live = data?.session;
-    if (!live) return;
+    if (!live || !sessionUpdatesRef.current.record(live)) return;
+    const cache = lastGoodByCliRef.current[live.manager_id];
+    if (cache) cache[live.cli] = sessionUpdatesRef.current.merge(live.manager_id, live.cli, cache[live.cli] ?? [], sessionUpdatesRef.current.checkpoint() - 1);
     setHostSessions((prev) => {
       const entry = prev[live.manager_id];
       // 아직 이 호스트의 목록을 불러온 적이 없으면 넣지 않는다 — 펼칠 때 서버에서 통째로

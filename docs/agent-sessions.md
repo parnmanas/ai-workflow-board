@@ -417,19 +417,27 @@ self-update·SIGTERM 으로 재시작하면(systemd 는 cgroup 전체에 신호�
 오지 못해 목록에 "Needs your approval" 유령이 남고 prompt 가 409 로 막히던 문제가 있었다. 그래서:
 
 - `list` RPC 답의 세션별 `live_status`, `history` RPC 답의 `live`(프로세스가 없으면 `null`)로 서버가 메모리를 **되맞춘다**.
-  매니저가 "없다" 고 하면 진행 중 상태는 idle 로 — `starting` 만은 open RPC 타임아웃(120s) 동안 지킨다.
+  매니저가 "없다" 고 하면 진행 중·준비(`ready`) 상태는 idle 로 — `starting`과 아직 매니저가 받지 않은 새 프롬프트는
+  open RPC 타임아웃(120s) 동안 지킨다. 서버 재시작 뒤 목록에서 처음 확인한 라이브 세션도 메모리에 등록하고,
+  driver가 없으면 목록을 읽은 사용자에게 연결한다. 상세 화면을 열지 않아도 이후 상태 변경이 사이드바에 전달된다.
 - `open`·`list`·`history`를 기다리는 동안 같은 세션에 새 이벤트나 상태가 도착했으면, 늦게 돌아온 RPC의 상태는
   적용하지 않는다. 서버 내부 관측 순번으로 비교하므로 같은 밀리초에 발생한 전환도 보존한다. 이전에는 `open`만
   보호해, 늦은 목록/기록 조회의 `ready`가 새 작업의 `busy`를 덮고 새 시각으로 화면까지 전달될 수 있었다.
   반대로 더 새로운 관측이 없으면 매니저의 상태를 적용해 유령 `busy`를 계속 복구한다.
+  브라우저의 목록도 요청을 시작한 뒤 받은 SSE를 응답 위에 반영하며, 실패 시 사용하는 마지막 목록에도 반영한다.
+  상세 상태 비교에 쓰는 서버 `updated_at`은 같은 세션 안에서 밀리초 단위로 항상 증가한다.
 - 매니저 인스턴스가 사라지면(`agent_instance_update` action=removed, 같은 identity 의 다른 인스턴스 없음) 그 장비의 진행 중
-  세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
-- **하트비트가 살아 있는 세션 전체를 싣는다** (`agent_sessions: [{cli, session_id, status}]`, 매니저 `InstanceMeta.agentSessionsProvider`
+  세션과 준비(`ready`) 세션을 모두 idle 로 되돌리고 driver 에게 `agent_session_update{reason:'host_offline'}` 를 보낸다.
+- **하트비트가 살아 있는 세션 전체를 싣는다** (`agent_sessions: [{cli, session_id, status, state_id, state_seq, turn_id}]`, 매니저 `InstanceMeta.agentSessionsProvider`
   → `AgentSessionRunner.liveStates()`). 서버는 매 하트비트(30초)마다 그 목록으로 메모리를 맞춘다 — 보고된 세션은 그 상태로,
-  보고에 없는 진행 중 세션은 idle 로(`reason:'heartbeat'`). 매니저 업데이트·재부팅·연결 단절·프로세스 사망 어느 경우든 30초
-  안에 화면이 실제와 같아진다. 비어 있어도 `[]` 를 보내는 이유가 이것이다(구버전 매니저는 필드가 없어 아무것도 바꾸지 않는다).
-- CLI가 턴을 끝내도 마지막 이벤트 전송이 대기 중이면 매니저는 `busy`를 유지한다. 하트비트·기록 조회가
-  이벤트 전송 대기열을 앞질러 `ready`를 보고하면 화면에 메시지와 도구 결과가 계속 추가되는데 상태만 Ready가 된다.
+  보고에 없는 진행 중·준비 세션은 idle 로(`reason:'heartbeat'`). 비어 있어도 `[]` 를 보내는 이유가 이것이다
+  (구버전 매니저가 `agent_sessions`를 생략하면 아무것도 바꾸지 않는다). 새 프롬프트의 전송 유예 동안은 예외다.
+- 이벤트 패치·하트비트·목록/기록/open RPC는 같은 `state_id`(프로세스 식별자), `state_seq`(상태 증가 순번),
+  `turn_id`(그 상태의 턴)를 공유한다. 서버는 더 낮은 순번과 이미 교체된 프로세스의 늦은 상태를 무시한다.
+  새 프롬프트를 보낸 직후에는 이전 턴의 준비 상태로 되돌리지 않는다. 필드는 선택적이라 구버전 매니저도 계속 연결되지만,
+  전송 경로 사이 순서 보장은 업데이트된 매니저에서 적용된다.
+- CLI가 턴을 끝내도 앞선 이벤트 전송이 대기 중이면 매니저는 `busy`를 유지한다. 마지막 상태 배치의 전송을 시작하면
+  하트비트·기록 조회도 그 배치와 같은 `ready` 및 순번을 보고한다. 완료 HTTP 응답을 기다리는 동안 다시 `busy`로 보고하지 않는다.
   느린 요청 뒤에 쌓인 출력은 최대 128행·512KiB로 묶되, 승인 요청·턴 완료 등 상태 패치 경계는 합치지 않는다.
   개별 이벤트의 기존 크기 제한과 전송 실패 처리 정책은 그대로다. 회귀: `agent-session-delivery.test.mjs`,
   `agent-session-runner.test.mjs`의 전송 지연 중 heartbeat/history 상태 검사.

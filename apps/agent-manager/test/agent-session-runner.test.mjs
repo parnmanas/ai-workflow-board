@@ -222,20 +222,30 @@ test('rpc replies survive a body cap in front of the server: history shrinks to 
   assert.match(image.error, /too large/);
 });
 
-test('heartbeat and history remain busy until the final turn delivery drains', async (t) => {
+test('heartbeat, history and list publish the same ordered state as the event delivery', async (t) => {
   const { cwd, store, server, runner } = await harness(t, {}, { FAKE_ACP_FAST_PROMPT: '1' });
   await runner.handle(request('open', { request_id: 'rpc-drain-open', session_id: null, cwd }));
   const sid = server.rpc('rpc-drain-open').result.session_id;
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   t.after(release);
+  let releaseOutput;
+  const outputBlocked = new Promise((resolve) => { releaseOutput = resolve; });
+  t.after(releaseOutput);
+  let outputStarted = false;
+  let finalPatch;
   let finalDeliveryStarted = false;
   let nativeTurnFinished = false;
   store.touchAwbSession = async () => { nativeTurnFinished = true; };
   const fetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const body = init?.body ? JSON.parse(init.body) : null;
+    if (body?.events?.some((e) => e.type === 'turn' && e.payload.phase === 'started')) {
+      outputStarted = true;
+      await outputBlocked;
+    }
     if (body?.events?.some((e) => e.type === 'turn' && e.payload.phase === 'finished')) {
+      finalPatch = body.state;
       finalDeliveryStarted = true;
       await blocked;
     }
@@ -243,11 +253,31 @@ test('heartbeat and history remain busy until the final turn delivery drains', a
   };
   const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 't-drain', text: 'hello' }));
   try {
-    await waitFor(() => finalDeliveryStarted && nativeTurnFinished, 'finished CLI with blocked delivery');
+    await waitFor(() => outputStarted && nativeTurnFinished, 'finished CLI with an output backlog');
     assert.equal(runner.liveStates()[0].status, 'busy', 'heartbeat must not overtake pending output');
     await runner.handle(request('history', { request_id: 'rpc-drain-history', session_id: sid }));
     assert.equal(server.rpc('rpc-drain-history').result.live.status, 'busy', 'history must not advertise premature Ready either');
+    const busy = runner.liveStates()[0];
+    releaseOutput();
+    await waitFor(() => finalDeliveryStarted, 'final delivery awaiting its HTTP acknowledgement');
+    const ready = runner.liveStates()[0];
+    assert.equal(ready.status, 'ready', 'an in-flight heartbeat cannot contradict the terminal event now being delivered');
+    assert.equal(ready.state_id, busy.state_id);
+    assert.ok(ready.state_seq > busy.state_seq);
+    assert.equal(ready.state_seq, finalPatch.state_seq);
+    assert.equal(ready.turn_id, 't-drain');
+    await runner.handle(request('history', { request_id: 'rpc-final-history', session_id: sid }));
+    const history = server.rpc('rpc-final-history').result.live;
+    await runner.handle(request('list', { request_id: 'rpc-final-list' }));
+    const listed = server.rpc('rpc-final-list').result.sessions.find((s) => s.session_id === sid);
+    for (const state of [history, listed]) {
+      assert.equal(state.status, 'ready');
+      assert.equal(state.state_id, ready.state_id);
+      assert.equal(state.state_seq, ready.state_seq);
+    }
+    assert.equal(listed.live_status, 'ready');
   } finally {
+    releaseOutput();
     release();
     await turn;
   }

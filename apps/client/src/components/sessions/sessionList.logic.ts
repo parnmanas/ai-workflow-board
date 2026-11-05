@@ -1,7 +1,7 @@
 /**
  * Agent Session 목록 순수 로직 — 사이드바/목록 페이지 공유. React 없이 node:test 로 구동.
  */
-import type { AgentSessionSummary } from '../../types';
+import type { AgentSessionLiveSnapshot, AgentSessionSummary } from '../../types';
 
 export function sortSessionsByActivity(list: AgentSessionSummary[]): AgentSessionSummary[] {
   return [...list].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
@@ -193,4 +193,38 @@ export function upsertSessionInGroups(
       };
   (byCli[patch.cli] ??= []).push(merged);
   return groupSessionsByCwd(byCli);
+}
+
+/** Live updates received after a list request starts outrank that request's snapshot.
+ * Native updated_at is transcript activity time, so it cannot order live status. */
+export class SessionListUpdates {
+  private sequence = 0;
+  private updates = new Map<string, { sequence: number; live: AgentSessionLiveSnapshot }>();
+
+  checkpoint(): number { return this.sequence; }
+
+  record(live: AgentSessionLiveSnapshot): boolean {
+    const key = JSON.stringify([live.manager_id, live.cli, live.session_id]);
+    const previous = this.updates.get(key)?.live;
+    if (previous && Date.parse(live.updated_at) < Date.parse(previous.updated_at)) return false;
+    this.updates.set(key, { sequence: ++this.sequence, live });
+    return true;
+  }
+
+  merge(managerId: string, cli: string, rows: AgentSessionSummary[], since: number): AgentSessionSummary[] {
+    const result = [...rows];
+    for (const { sequence, live } of this.updates.values()) {
+      if (sequence <= since || live.manager_id !== managerId || live.cli !== cli) continue;
+      const index = result.findIndex(row => row.session_id === live.session_id);
+      const old = index >= 0 ? result[index] : null;
+      const next: AgentSessionSummary = {
+        ...(old ?? { cli, session_id: live.session_id, source: 'awb', created_at: null }),
+        cwd: live.cwd || old?.cwd || '', title: live.title || old?.title || '',
+        updated_at: live.updated_at, live_status: live.status,
+      };
+      if (index >= 0) result[index] = next;
+      else result.push(next);
+    }
+    return result;
+  }
 }

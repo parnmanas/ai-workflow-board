@@ -33,7 +33,7 @@ import type { SessionPrompt, VoiceWakeBinding } from './SessionComposer';
 import SessionTranscript from './SessionTranscript';
 import SessionUsageLimits from './SessionUsageLimits';
 import { useSessionUsageRefresh } from './useSessionUsageRefresh';
-import { groupSessionsByCwd, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
+import { groupSessionsByCwd, SessionListUpdates, sessionPath, splitRecentSessions, type CwdGroup } from './sessionList.logic';
 import { acpSessionClis, useCliCatalog } from '../../cli/catalog';
 import { useReadRepliesSetting, useSpeechState, useVoiceConfig } from '../../voice/useVoice';
 import { speechPlayer, type TextSpeechStream } from '../../voice/speechPlayer';
@@ -301,12 +301,16 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
   const { hasPermission } = useAuth();
   const operators = useVoiceOperators(hasPermission('voice.use'));
   const [sessionsByCli, setSessionsByCli] = useState<Record<string, AgentSessionSummary[]>>({});
+  const listUpdatesRef = useRef(new SessionListUpdates());
+  const loadSequenceRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState<string | null>(null); // cli 이름
 
   const load = useCallback(async () => {
     if (!host) return;
+    const sequence = ++loadSequenceRef.current;
+    const checkpoint = listUpdatesRef.current.checkpoint();
     setLoading(true);
     const results: Record<string, AgentSessionSummary[]> = {};
     const errs: string[] = [];
@@ -319,22 +323,22 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
         results[cli] = [];
       }
     }));
+    if (loadSequenceRef.current !== sequence) return;
+    for (const cli of host.clis) results[cli] = listUpdatesRef.current.merge(managerId, cli, results[cli] ?? [], checkpoint);
     setSessionsByCli(results);
     setErrors(errs);
     setLoading(false);
   }, [host, managerId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadSequenceRef.current++; }; }, [load]);
 
   useBoardStreamEvent('agent_session_update', useCallback((data: AgentSessionUpdateEvent) => {
     const s = data?.session;
-    if (!s || s.manager_id !== managerId) return;
-    setSessionsByCli((prev) => {
-      const cli = s.cli;
-      const list = prev[cli];
-      if (!list) return prev;
-      return { ...prev, [cli]: list.map((row) => row.session_id === s.session_id ? { ...row, live_status: s.status, title: s.title || row.title } : row) };
-    });
+    if (!s || s.manager_id !== managerId || !listUpdatesRef.current.record(s)) return;
+    const checkpoint = listUpdatesRef.current.checkpoint() - 1;
+    setSessionsByCli((prev) => ({
+      ...prev, [s.cli]: listUpdatesRef.current.merge(managerId, s.cli, prev[s.cli] ?? [], checkpoint),
+    }));
   }, [managerId]));
 
   // 매니저 재시작/소멸(인스턴스 등록·제거) 뒤에는 모든 프로세스가 죽었으므로 목록을 다시 묻는다.
