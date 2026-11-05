@@ -59,7 +59,7 @@ for (const scenario of ['short', 'horizontal', 'upward', 'cancelled', 'multitouc
     touch(target, scenario === 'cancelled' ? 'touchcancel' : 'touchend', 100, 300, 0);
     await flushFrames();
     assert.equal(f.count(), 0);
-    assert.equal(document.querySelector('[role="status"]'), null);
+    assert.equal(Boolean(document.querySelector('[role="status"]')), false, 'cancelled gesture clears the refresh indicator');
   });
 }
 

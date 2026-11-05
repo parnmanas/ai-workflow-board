@@ -714,7 +714,7 @@ test('Codex native MCP attribution overrides shared config for new and resumed s
 });
 
 for (const resumed of [false, true]) {
-  test(`Codex ${resumed ? 'resume' : 'new'} uses the saved model and effort from the first ready state`, async (t) => {
+  test(`Codex ${resumed ? 'resume' : 'new'} uses the saved model and effort when opening completes`, async (t) => {
     const inherited = { model: 'gpt-6.1-sol', model_reasoning_effort: 'medium', features: { multi_agent: true } };
     const h = await credentialHarness(t, 'codex_api_key', { api_key: 'test-key' }, 'codex', {
       FAKE_ACP_CODEX_CONFIG: '1', FAKE_ACP_RECORDED_MODEL: 'gpt-6-astra', CODEX_CONFIG: JSON.stringify(inherited),
@@ -727,7 +727,10 @@ for (const resumed of [false, true]) {
     const opened = h.server.rpc('rpc-model-startup');
     assert.equal(opened.ok, true, JSON.stringify(opened));
     const sid = opened.result.session_id;
-    const ready = h.server.states(sid).find((s) => s.status === 'ready');
+    // Commands/auth patches also carry status=ready and can arrive before the
+    // opening snapshot. They are partial patches, not missing configuration.
+    const ready = h.server.states(sid).find((s) => s.reason === (resumed ? 'resumed' : 'opened'));
+    assert.equal(ready?.status, 'ready', 'opening publishes a ready snapshot');
     assert.equal(ready.config_options.find((o) => o.config_id === 'model').current_value, 'gpt-6-astra');
     assert.equal(ready.config_options.find((o) => o.config_id === 'reasoning_effort').current_value, 'xhigh');
     assert.deepEqual(JSON.parse((await h.capture()).CODEX_CONFIG), {
@@ -1191,8 +1194,11 @@ for (const timing of ['before-initialize', 'with-initialize']) {
           source, kind: 'account', label: 'Fake Max',
           account: { email: 'probe@example.com', organization: 'Fake Org', plan: 'max' },
         };
-        // Startup identity must already be in the ready patch; waiting cannot recover a lost push.
-        assert.deepEqual(server.states(sid).find((s) => s.status === 'ready')?.auth, expected);
+        // Inspect the opening snapshot, not an earlier commands-only ready patch.
+        // Startup identity must already be present; do not wait for a later auth push.
+        const ready = server.states(sid).find((s) => s.reason === (resumed ? 'resumed' : 'opened'));
+        assert.equal(ready?.status, 'ready', 'opening publishes a ready snapshot');
+        assert.deepEqual(ready.auth, expected);
         await runner.handle(request('history', { request_id: 'rpc-startup-history', session_id: sid }));
         assert.deepEqual(server.rpc('rpc-startup-history').result.live.auth, expected);
         await runner.handle(request('close', { session_id: sid }));
