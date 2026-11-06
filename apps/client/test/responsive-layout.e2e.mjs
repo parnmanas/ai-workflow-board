@@ -1,6 +1,7 @@
 // Geometry and input behavior in real Chromium; server/host responses are fixtures.
 import { test, expect } from '@playwright/test';
 import english from '../src/i18n/locales/en.json' with { type: 'json' };
+import korean from '../src/i18n/locales/ko.json' with { type: 'json' };
 const ui = key => english[key] ?? key;
 const uiPattern = key => new RegExp(ui(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\{\d+\\\}/g, '.*?'));
 import { cliCatalog } from '../src/cli/catalog.ts';
@@ -20,17 +21,18 @@ const live = { manager_id: host.manager_id, manager_name: host.name, cli: 'codex
 const events = Array.from({ length: 16 }, (_, i) => ({ id: `event-${i}`, seq: i + 1, type: i % 2 ? 'text' : 'user_prompt', turn_id: `turn-${i}`, created_at: live.updated_at, payload: { text: i % 2 ? '작업 내용을 확인했습니다.\n\n```ts\nconst example = "a very long line of code that should scroll within its own container";\n```' : '모바일 화면에서 세션 UI를 확인해 주세요.' } }));
 const project = { id: 'responsive-project', account_id: account.id, name: 'Responsive project', repo_url: 'https://example.test/' + 'long-repository-name'.repeat(8), default_branch: 'main', enabled: true };
 const ticket = { id: 'responsive-ticket', account_id: account.id, parent_id: null, title, status: 'todo', priority: 'medium', tags: ['ui'], project_id: project.id, position: 0, assignee: null, assignee_key: '', created_at: live.updated_at, updated_at: live.updated_at, description: '반응형 티켓 상세를 확인합니다.', depth: 0, channel_ids: [], comments: [], children: [], attachments: [], prerequisites: [], prerequisite_count: 0, on_done_action_ids: [], next_ticket_id: null, created_by: 'Test user', created_by_type: 'user', created_by_id: 'user-test', project: null };
-const room = { id: 'responsive-room', account_id: account.id, type: 'group', name: 'Responsive chat', created_at: live.updated_at, participants: [{ id: 'p1', participant_type: 'user', participant_id: 'user-test', participant_name: 'Test user' }], unread_count: 0, is_participant: true };
+const room = { id: 'responsive-room', account_id: account.id, type: 'group', name: 'Responsive chat', created_at: live.updated_at, participants: [{ id: 'p1', participant_type: 'user', participant_id: 'user-test', name: 'Test user' }], unread_count: 0, is_participant: true, can_remove_participants: true };
 const mission = { id: 'mission', account_id: account.id, title, team_id: 'responsive-team', team_name: 'Responsive team', status: 'running', briefing: '반응형 미션 상세', completion_criteria: [], post_actions: [], acceptance_criteria: '', room_id: room.id, user_chat_mode: 'open', steps: [], events: [], graph_spec: null, step_timeout_minutes: 30, counts: { total: 0, done: 0, inFlight: 0, failed: 0, awaitingUser: 0, pending: 0 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at };
 const missionStep = { id: 'step-review', step_key: 'review', title: '모바일에서 단계 세션 보기', instructions: 'Check the responsive UI', acceptance_criteria: '', depends_on: [], assignee_name: 'Ralf', assignee_online: true, status: 'running', position: 0, plan_version: 1, room_id: room.id, result_summary: '', artifacts: [], attempt: 1, max_attempts: 2, workspace_folder: cwd, visit: 1, verdict: '', retry_policy: 'auto', recovery_reason: '', last_heartbeat_at: null, confirm_decision: null, activity: null };
 const team = { id: 'responsive-team', account_id: account.id, name: 'Responsive team', enabled: true, members: [], orchestrator_spec: null };
 
-async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false, missionOverrides = {}, locale = 'en' } = {}) {
+async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false, missionOverrides = {}, roomOverrides = {}, roomRemovalError = false, canSendChat = true, locale = 'en' } = {}) {
   const errors = [];
   const prompts = [];
   const cancellations = [];
   const writes = [];
   let missionDetail = { ...mission, ...(withStep ? { steps: [missionStep], counts: { ...mission.counts, total: 1, inFlight: 1 } } : {}), ...missionOverrides };
+  let roomDetail = { ...room, ...roomOverrides };
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(({ accountId, locale }) => {
     localStorage.setItem('awb.locale', locale);
@@ -42,8 +44,8 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     const req = route.request();
     const path = new URL(req.url()).pathname.replace(/^\/api/, '');
     let body = [];
-    if (['POST', 'PATCH', 'DELETE'].includes(req.method())) writes.push({ path, method: req.method(), input: req.postDataJSON() });
-    if (path === '/auth/me') body = { id: 'user-test', name: 'Test user', email: 'test@example.test', role: 'admin', status: 'active', permissions: [], resolved_permissions: ['admin.access', 'admin.actions', 'agent_sessions.use', 'voice.use'], accounts: [account] };
+    if (['POST', 'PATCH', 'DELETE'].includes(req.method())) writes.push({ path, method: req.method(), input: req.postDataJSON(), accountId: req.headers()['x-account-id'] });
+    if (path === '/auth/me') body = { id: 'user-test', name: 'Test user', email: 'test@example.test', role: 'admin', status: 'active', permissions: [], resolved_permissions: ['admin.access', 'admin.actions', 'agent_sessions.use', 'voice.use', ...(canSendChat ? ['chat.send'] : [])], accounts: [account] };
     else if (path === '/cli-catalog') body = { clis: cliCatalog() };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
     // 아래의 `endsWith('counts')` 보다 먼저 와야 한다 — '/accounts' 도 'counts' 로 끝난다.
@@ -59,8 +61,14 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path.endsWith('/sessions')) body = [live];
     else if (path.endsWith('/settings') && path.startsWith('/agent-sessions/')) body = { manager_id: host.manager_id, cli: 'codex', credential: null, candidates: [], default_config: {}, known_config_options: live.config_options };
     else if (path.endsWith('/models')) body = { models: ['6.1 Sol'], models_by_cli: { codex: ['6.1 Sol'] }, labels: {}, available_models_at: live.updated_at };
-    else if (path === '/chat-rooms') body = [room];
-    else if (path === '/chat-rooms/responsive-room') body = room;
+    else if (path === '/chat-rooms') body = [roomDetail];
+    else if (path === '/chat-rooms/responsive-room') body = roomDetail;
+    else if (req.method() === 'DELETE' && /^\/chat-rooms\/responsive-room\/participants\/(user|agent)\//.test(path)) {
+      if (roomRemovalError) return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Not an active participant in this room' }) });
+      const [, participantType, participantId] = path.match(/\/participants\/(user|agent)\/(.+)$/);
+      roomDetail = { ...roomDetail, participants: roomDetail.participants.filter(p => p.participant_type !== participantType || p.participant_id !== decodeURIComponent(participantId)) };
+      body = { ok: true };
+    }
     else if (path.includes('/mention-candidates')) body = { users: [], agents: [] };
     else if (path.includes('/presence')) body = { viewers: [] };
     else if (path === '/tickets/responsive-ticket') body = { ...ticket, title: ticketTitle };
@@ -162,6 +170,104 @@ test('phone page menus expose host settings and chat actions without clipping', 
   await expect(page.getByRole('dialog')).toBeVisible();
   expect(f.errors).toEqual([]);
 });
+
+const chatTeammate = { id: 'member-user', participant_type: 'user', participant_id: 'shared-id', name: 'Teammate' };
+const chatReviewer = { id: 'member-agent', participant_type: 'agent', participant_id: 'shared-id', name: 'Ralf / Reviewer' };
+
+for (const size of [{ width: 320, height: 568, locale: 'en' }, { width: 390, height: 844, locale: 'ko' }, { width: 1280, height: 900, locale: 'en' }]) {
+  test(`chat participant removal, cancellation and live mentions in ${size.locale} at ${size.width}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    const text = key => (size.locale === 'ko' ? korean : english)[key] ?? key;
+    const participants = [...room.participants,
+      ...Array.from({ length: 11 }, (_, i) => ({ id: `member-${i}`, participant_type: 'agent', participant_id: `rt-${i}`, name: `Host ${i} / ${'a-long-runtime-name-'.repeat(5)}` })),
+      chatTeammate, chatReviewer];
+    const f = await fixture(page, { locale: size.locale, roomOverrides: { account_id: 'room-owner-account', participants, open_join: true } });
+    await page.goto('/chat/responsive-room');
+    const input = page.locator('.awb-chat-composer textarea');
+    await input.fill('@Reviewer');
+    await expect(page.getByRole('option').filter({ hasText: chatReviewer.name })).toBeVisible();
+    await input.fill('작성 중인 메시지');
+    const roster = page.locator('.awb-chat-participants');
+    expect((await roster.boundingBox()).height).toBeLessThanOrEqual(50);
+    await roster.getByRole('button', { name: text('Manage participants'), exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.locator('li')).toHaveCount(14);
+    await expect(dialog.locator('li').filter({ hasText: 'Test user' }).getByRole('button')).toHaveCount(0);
+    const removeRow = name => dialog.getByRole('button', { name: text('Remove {0} from this room').replace('{0}', name), exact: true });
+    await removeRow(chatReviewer.name).scrollIntoViewIfNeeded();
+    await expect(removeRow(chatReviewer.name)).toBeInViewport();
+    expect((await removeRow(chatReviewer.name).boundingBox()).height).toBeGreaterThanOrEqual(44);
+    await expectFits(page);
+    await page.screenshot({ path: testInfo.outputPath('chat-participants.png') });
+    await removeRow(chatReviewer.name).click();
+    await expect(dialog).toContainText(text('Remove {0} from this room? Existing messages will be kept.').replace('{0}', chatReviewer.name));
+    await dialog.getByRole('button', { name: text('Cancel'), exact: true }).click();
+    expect(f.writes.filter(w => w.method === 'DELETE')).toEqual([]);
+    await expect(dialog.locator('li')).toHaveCount(14);
+
+    await removeRow(chatReviewer.name).click();
+    await dialog.getByRole('button', { name: text('Remove participant'), exact: true }).click();
+    await expect(dialog.locator('li')).toHaveCount(13);
+    await expect(dialog.locator('li').filter({ hasText: chatReviewer.name })).toHaveCount(0);
+    await expect(removeRow(chatTeammate.name)).toBeVisible();
+    await expect(roster).toContainText('13');
+    await removeRow(chatTeammate.name).click();
+    await expect(dialog).toContainText(text('This room is open, so they can join again.'));
+    await dialog.getByRole('button', { name: text('Remove participant'), exact: true }).click();
+    await expect(dialog.locator('li')).toHaveCount(12);
+    await dialog.getByRole('button', { name: text('Close'), exact: true }).click();
+    await expect(input).toHaveValue('작성 중인 메시지');
+    await expect(roster).toContainText('12');
+    expect(f.writes.filter(w => w.method === 'DELETE').map(w => ({ path: w.path, accountId: w.accountId }))).toEqual([
+      { path: '/chat-rooms/responsive-room/participants/agent/shared-id', accountId: 'room-owner-account' },
+      { path: '/chat-rooms/responsive-room/participants/user/shared-id', accountId: 'room-owner-account' },
+    ]);
+    await input.fill('@Reviewer');
+    await expect(page.getByRole('listbox')).toBeVisible();
+    await expect(page.getByRole('option').filter({ hasText: chatReviewer.name })).toHaveCount(0);
+    await expectFits(page);
+    expect(f.errors).toEqual([]);
+  });
+}
+
+test('chat participant removal failure keeps the participant and allows cancellation', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const f = await fixture(page, { roomOverrides: { participants: [...room.participants, chatReviewer] }, roomRemovalError: true });
+  await page.goto('/chat/responsive-room');
+  // The room menu is another entry point on phones.
+  await page.locator('.awb-page-header .awb-session-menu-trigger').click();
+  await page.locator('.awb-session-menu-panel').getByRole('button', { name: 'Manage participants', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: `Remove ${chatReviewer.name} from this room`, exact: true }).click();
+  await dialog.getByRole('button', { name: 'Remove participant', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Not an active participant in this room');
+  await expect(dialog.getByRole('button', { name: 'Remove participant', exact: true })).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog.locator('li')).toHaveCount(2);
+  await expect(dialog).toContainText(chatReviewer.name);
+  await expect(page.locator('.awb-chat-participants')).toContainText('2');
+  expect(f.writes.filter(w => w.method === 'DELETE')).toHaveLength(1);
+  expect(f.errors).toEqual([]);
+});
+
+for (const access of ['managed', 'observer', 'no-send-permission']) {
+  test(`chat participant list is read-only for ${access}`, async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 568 });
+    const f = await fixture(page, { canSendChat: access !== 'no-send-permission', roomOverrides: {
+      participants: [...room.participants, chatReviewer], can_remove_participants: access === 'no-send-permission', is_participant: access !== 'observer',
+      ...(access === 'managed' ? { orchestration_mission_id: 'mission' } : {}),
+    } });
+    await page.goto('/chat/responsive-room');
+    await page.locator('.awb-chat-participants').getByRole('button', { name: 'Manage participants', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('Participants in this room cannot be removed here.');
+    await expect(dialog.locator('li')).toHaveCount(2);
+    await expect(dialog.locator('li button')).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    expect(f.writes.filter(w => w.method === 'DELETE')).toEqual([]);
+    expect(f.errors).toEqual([]);
+  });
+}
 
 test('phone mission primary action and menu retain lifecycle controls', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });

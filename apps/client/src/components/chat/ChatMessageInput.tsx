@@ -15,6 +15,8 @@ import { useMobileInput } from '../../hooks/useMobileInput';
 
 export interface ChatMessageInputProps {
   roomId: string;
+  /** Live room roster; removed participants disappear from mention suggestions immediately. */
+  participants?: MentionCandidate[];
   onSent: (msg: ChatRoomMessageItem) => void;
   isMobile: boolean;
 }
@@ -42,7 +44,7 @@ function makeLocalId(): string {
   return `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessageInputProps) {
+export default function ChatMessageInput({ roomId, participants, onSent, isMobile }: ChatMessageInputProps) {
   const mobileInput = useMobileInput();
   useLocale();
   const [text, setText] = useState('');
@@ -65,6 +67,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   // room open and refocus after send (see effects/handleSend below).
   const inputHandleRef = useRef<MentionTextareaHandle | null>(null);
   const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+  const hasRoomParticipants = participants !== undefined;
   // Stable ref so async upload callbacks (started from one render) can still
   // mutate the latest pendingAttachments without stale-closure footguns.
   const attachmentsRef = useRef<PendingAttachment[]>([]);
@@ -101,6 +104,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
   // ticket context we don't have in a free-form chat room, so they're
   // intentionally omitted here.
   useEffect(() => {
+    if (hasRoomParticipants) return;
     const accountId = getActiveAccountId() || '';
     if (!accountId) {
       setMentionCandidates([]);
@@ -118,7 +122,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
         ]);
       })
       .catch(() => setMentionCandidates([]));
-  }, []);
+  }, [hasRoomParticipants]);
 
   // Revoke object URLs on unmount to prevent memory leaks
   useEffect(() => {
@@ -427,7 +431,7 @@ export default function ChatMessageInput({ roomId, onSent, isMobile }: ChatMessa
             ref={inputHandleRef}
             value={text}
             onChange={setText}
-            candidates={mentionCandidates}
+            candidates={participants ?? mentionCandidates}
             onSubmit={handleSend}
             rows={1}
             // Intentionally NOT disabled during send: disabling a focused

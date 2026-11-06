@@ -55,7 +55,7 @@ function makeError(status: number, message: string): Error & { status: number } 
  * run 방. `setOpenJoin` 이 같은 조건으로 옵션 변경을 막는 것과 같은 근거다: 이 방들의
  * 참여자 집합은 사람의 초대가 아니라 도메인이 결정한다.
  */
-function isSystemManagedRoom(room: {
+export function isSystemManagedRoom(room: {
   action_id?: string | null;
   orchestration_mission_id?: string | null;
   orchestration_step_id?: string | null;
@@ -563,6 +563,45 @@ export class RoomMembershipService {
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
     });
+  }
+
+  /** Remove another participant without deleting their messages or membership history. */
+  async removeParticipant(roomId: string, accountId: string, userId: string, participantType: string, participantId: string): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      // Share the invitation/join lock so authorization and removal see one membership state.
+      if (this.dataSource.options.type === 'postgres') {
+        await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
+      }
+      const room = await em.findOne(ChatRoom, { where: { id: roomId, account_id: accountId } });
+      if (!room) throw makeError(404, 'Room not found');
+      const caller = await em.findOne(ChatRoomParticipant, {
+        where: { room_id: roomId, participant_type: 'user', participant_id: userId, left_at: IsNull() },
+      });
+      if (!caller) throw makeError(403, 'Not an active participant in this room');
+      if (isSystemManagedRoom(room)) throw makeError(400, 'Cannot remove participants from a system-managed room');
+      if (!['user', 'agent'].includes(participantType) || !participantId) throw makeError(400, 'Invalid participant');
+      if (participantType === 'user' && participantId === userId) throw makeError(400, 'Use Leave room to remove yourself');
+
+      // Include the type: users and runtimes can have the same ID. Retired rows stay intact.
+      const result = await em.update(ChatRoomParticipant, {
+        room_id: roomId, participant_type: participantType, participant_id: participantId, left_at: IsNull(),
+      }, { left_at: new Date() });
+      if (!result.affected) throw makeError(404, 'Participant is no longer in this room');
+    });
+
+    const memberIds = await this.getRoomMemberIds(roomId);
+    const agentMemberIds = await this.getRoomAgentMemberIds(roomId);
+    // The removed user needs this membership update too, but receives no later room messages.
+    if (participantType === 'user') memberIds.add(participantId);
+    activityEvents.emit('chat_room_update', {
+      room_id: roomId,
+      update_type: 'participant_left',
+      participant_id: participantId,
+      participant_type: participantType,
+      member_ids: memberIds,
+      agent_member_ids: agentMemberIds,
+    });
+    this.logService?.info('ChatRooms', `User ${userId} removed ${participantType} ${participantId} from room ${roomId}`);
   }
 
   /**

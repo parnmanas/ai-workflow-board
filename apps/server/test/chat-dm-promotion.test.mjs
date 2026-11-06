@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { ChatRoom } from '../dist/entities/ChatRoom.js';
 import { ChatRoomParticipant } from '../dist/entities/ChatRoomParticipant.js';
 import { ChatRoomMessage } from '../dist/entities/ChatRoomMessage.js';
@@ -599,5 +599,79 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
       () => messaging.sendMessage(room.id, WS, 'agent', HELPER, 'Helper', '난입'),
       (err) => err.status === 403,
     );
+  });
+
+  it('내보내기는 모든 active 행만 닫고 대화·예전 이력을 보존하며 당사자에게도 알린다', async () => {
+    const room = await seedRoom({ type: 'group' }, [{ type: 'user', id: ALICE }, { type: 'user', id: BOB }, { type: 'user', id: BOB }, { type: 'agent', id: BOT }]);
+    const message = await seedMessage(room.id, '보존할 대화');
+    const repo = dataSource.getRepository(ChatRoomParticipant);
+    const oldLeftAt = new Date('2025-01-01T00:00:00Z');
+    const retired = await repo.save(repo.create({ room_id: room.id, participant_type: 'user', participant_id: BOB, left_at: oldLeftAt }));
+    const seen = captureRoomUpdates();
+    try {
+      await membership.removeParticipant(room.id, WS, ALICE, 'user', BOB);
+      assert.equal(await repo.countBy({ room_id: room.id, participant_id: BOB, left_at: IsNull() }), 0);
+      assert.equal(await repo.countBy({ room_id: room.id, participant_id: BOB }), 3);
+      assert.equal((await repo.findOneBy({ id: retired.id })).left_at.toISOString(), oldLeftAt.toISOString());
+      assert.equal(await dataSource.getRepository(ChatRoomMessage).countBy({ id: message.id }), 1);
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].update_type, 'participant_left');
+      assert.equal(seen[0].participant_type, 'user');
+      assert.equal(seen[0].participant_id, BOB);
+      assert.ok(seen[0].member_ids.has(ALICE));
+      assert.ok(seen[0].member_ids.has(BOB), '내보내진 사용자도 입력창을 닫을 이벤트를 받는다');
+      assert.equal((await membership.getRoomMemberIds(room.id)).has(BOB), false, '이후 메시지의 수신자에는 남지 않는다');
+      await assert.rejects(() => messaging.sendMessage(room.id, WS, 'user', BOB, 'Bob', '나간 뒤 발언'), err => err.status === 403);
+      await assert.rejects(() => membership.removeParticipant(room.id, WS, ALICE, 'user', BOB), err => err.status === 404);
+      assert.equal(seen.length, 1, '이미 나간 사람에게 중복 이탈 이벤트를 만들지 않는다');
+    } finally { seen.stop(); }
+  });
+
+  it('같은 id의 user를 보존하면서 agent만 내보내고 runtime dispatch 대상에서도 뺀다', async () => {
+    const room = await seedRoom({ type: 'group' }, [{ type: 'user', id: ALICE }, { type: 'user', id: BOT }, { type: 'agent', id: BOT }]);
+    await membership.removeParticipant(room.id, WS, ALICE, 'agent', BOT);
+    const repo = dataSource.getRepository(ChatRoomParticipant);
+    assert.equal(await repo.countBy({ room_id: room.id, participant_id: BOT, participant_type: 'user', left_at: IsNull() }), 1);
+    assert.equal((await membership.getRoomAgentMemberIds(room.id)).has(BOT), false);
+    await assert.rejects(() => messaging.sendMessage(room.id, WS, 'agent', BOT, 'Bot', '나간 뒤 발언'), err => err.status === 403);
+  });
+
+  it('DM에서도 내보낸 뒤 같은 방에 다시 초대할 수 있고 새 참여 이력을 만든다', async () => {
+    const room = await seedRoom({ name: '대화' }, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+    const repo = dataSource.getRepository(ChatRoomParticipant);
+    const before = await repo.findOneBy({ room_id: room.id, participant_id: BOT });
+    await membership.removeParticipant(room.id, WS, ALICE, 'agent', BOT);
+    assert.equal((await roomOf(room.id)).id, room.id);
+    assert.equal((await roomOf(room.id)).name, '대화');
+    await invite(room.id, ALICE, [asAgent(BOT)]);
+    const active = await repo.findOneBy({ room_id: room.id, participant_id: BOT, left_at: IsNull() });
+    assert.ok(active);
+    assert.notEqual(active.id, before.id);
+    assert.ok((await repo.findOneBy({ id: before.id })).left_at);
+  });
+
+  it('내보내기는 계정·active 사용자·대상 타입을 확인하고 본인 나가기와 구분한다', async () => {
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+    const remove = (accountId, userId, type = 'agent', id = BOT) => membership.removeParticipant(room.id, accountId, userId, type, id);
+    await assert.rejects(() => remove(OTHER_WS, ALICE), err => err.status === 404);
+    await assert.rejects(() => remove(WS, OUTSIDER), err => err.status === 403);
+    await assert.rejects(() => remove(WS, BOT), err => err.status === 403, 'agent의 id가 사용자 호출 권한이 되지 않는다');
+    await assert.rejects(() => remove(WS, ALICE, 'system'), err => err.status === 400);
+    await assert.rejects(() => remove(WS, ALICE, 'user', ALICE), err => err.status === 400);
+    await membership.leaveRoom(room.id, ALICE);
+    await assert.rejects(() => remove(WS, ALICE), err => err.status === 403);
+    assert.ok((await membership.getRoomAgentMemberIds(room.id)).has(BOT));
+  });
+
+  it('시스템 소유 방은 내보내기를 거부하고 상세 응답도 그 제한을 알려준다', async () => {
+    for (const marker of [{ action_id: CAROL }, { orchestration_mission_id: CAROL }, { orchestration_step_id: CAROL }, { run_kind: 'qa' }, { run_kind: 'security' }]) {
+      const room = await seedRoom({ type: 'group', ...marker }, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+      await assert.rejects(() => membership.removeParticipant(room.id, WS, ALICE, 'agent', BOT), err => err.status === 400);
+      assert.equal((await crud.getRoomDetail(room.id, ALICE)).can_remove_participants, false);
+      assert.ok((await membership.getRoomAgentMemberIds(room.id)).has(BOT));
+    }
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+    assert.equal((await crud.getRoomDetail(room.id, ALICE)).can_remove_participants, true);
+    assert.equal((await crud.getRoomDetail(room.id, OUTSIDER)).can_remove_participants, false);
   });
 });

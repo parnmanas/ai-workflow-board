@@ -13,7 +13,7 @@ import type { ChatRoomListItem } from '../../../types';
 import type { MentionParticipant } from '../../common/Markdown';
 
 // 방 상세(getChatRoom) 응답의 참여자 행 — wire 는 participant_id / participant_type
-// 를 쓰고, (ChatRoomParticipantInfo 타입 선언과 달리) 평평한 `name` 을 내려준다.
+// 를 쓰고, 평평한 `name` 을 내려준다.
 // ChatPage 의 역대 매핑을 그대로 반영한다.
 export interface RoomDetailParticipantWire {
   participant_id: string;
@@ -115,9 +115,7 @@ export function countUserParticipants(participants: MentionParticipant[]): numbe
 
 export interface RefreshRosterDeps {
   // 방 상세 조회. observer 인자는 계정 관찰 모드에서 403 을 피하려 전달한다.
-  // 반환을 any 로 둔 이유: 서버 wire 는 평평한 `name` 을 내려주지만 선언 타입
-  // ChatRoomDetail.participants(ChatRoomParticipantInfo)는 participant_name 을 쓰는
-  // 기존 불일치가 있어, ChatPage 도 역대 `detail: any` 로 읽어 왔다(동작 보존).
+  // 로스터 투영은 서버가 해석한 name(Host/runtime 이름 포함)을 그대로 사용한다.
   getChatRoom: (roomId: string, observer: boolean) => Promise<any>;
   /** 응답 시점의 현재 활성 방 id (ChatPage 에선 activeRoomIdRef.current). */
   getActiveRoomId: () => string | null;
@@ -269,7 +267,8 @@ export interface ChatRoomUpdateDispatchDeps {
   setRooms: ChatRoomListSetter;
   /** makeRefreshActiveRoomParticipants 가 만든 활성 방 로스터 재조회 함수. */
   refreshActiveRoomParticipants: (roomId: string) => void;
-
+  /** 본인이 내보내졌으면 열린 방에서 즉시 나와 이전 메시지 입력을 닫는다. */
+  onRemovedFromRoom?: (roomId: string) => void;
 }
 
 /**
@@ -303,6 +302,12 @@ export function dispatchChatRoomUpdate(
     payload.update_type === 'participant_added' ||
     payload.update_type === 'participant_left'
   ) {
+    if (payload.update_type === 'participant_left' && payload.participant_type === 'user' && payload.participant_id === deps.currentUserId) {
+      deps.setRooms(prev => prev.filter(room => room.id !== payload.room_id));
+      deps.onRemovedFromRoom?.(payload.room_id);
+      void deps.listChatRooms().then(deps.setRooms).catch(() => {});
+      return;
+    }
     // 방 목록(현재 스코프 그대로) + 열려 있는 방의 로스터를 함께 갱신 —
     // 다른 사용자의 추가/이탈까지 실시간 반영.
     reflectParticipantChange(

@@ -450,6 +450,25 @@ export class ChatRoomsController {
     }
   }
 
+  @Delete(':roomId/participants/:participantType/:participantId')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async removeParticipant(
+    @Req() req: Request, @Res() res: Response,
+    @Param('roomId') roomId: string,
+    @Param('participantType') participantType: string,
+    @Param('participantId') participantId: string,
+  ) {
+    const user = (req as any).currentUser;
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
+    try {
+      await this.membership.removeParticipant(roomId, accountId, user.id, participantType, participantId);
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
   // Per-viewer Clear conversation (ticket 1ae77f55). Sets cleared_at on the
   // caller's participant row so their getMessages / listRooms preview /
   // unread badge ignore everything before now. Other participants are

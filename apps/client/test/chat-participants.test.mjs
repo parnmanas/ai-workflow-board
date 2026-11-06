@@ -301,6 +301,23 @@ test('dispatchChatRoomUpdate: participant_left(활성 방, flat shape) → 로�
   assert.deepEqual(roomsState.get().map((r) => r.id), ['A'], '방 목록도 갱신');
 });
 
+for (const participantType of ['user', 'agent']) {
+  test(`dispatchChatRoomUpdate: 내 id와 같은 ${participantType}의 이탈은 타입까지 구분한다`, async () => {
+    const roomsState = makeRoomsState([roomListItem('A')]);
+    const closed = [];
+    const refreshed = [];
+    dispatchChatRoomUpdate({
+      currentUserId: 'me', getActiveRoomId: () => 'A',
+      listChatRooms: async () => [], setRooms: roomsState.setRooms,
+      refreshActiveRoomParticipants: id => refreshed.push(id),
+      onRemovedFromRoom: id => closed.push(id),
+    }, { payload: { update_type: 'participant_left', room_id: 'A', participant_type: participantType, participant_id: 'me' } });
+    await flush();
+    assert.deepEqual(closed, participantType === 'user' ? ['A'] : []);
+    assert.deepEqual(refreshed, participantType === 'user' ? [] : ['A']);
+  });
+}
+
 test('dispatchChatRoomUpdate: participant_left(비활성 방) → 방 목록만 갱신, 로스터 미변경', async () => {
   let activeRoomId = 'A';
   let listCalls = 0;

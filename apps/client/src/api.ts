@@ -2252,6 +2252,12 @@ export const api = {
   leaveChatRoom: (roomId: string) =>
     request<void>(`/chat-rooms/${roomId}/participants/me`, { method: 'DELETE' }),
 
+  removeChatRoomParticipant: (roomId: string, accountId: string, participantType: 'user' | 'agent', participantId: string) =>
+    request<void>(`/chat-rooms/${encodeURIComponent(roomId)}/participants/${participantType}/${encodeURIComponent(participantId)}`, {
+      method: 'DELETE',
+      headers: { ...getAuthHeaders(), 'X-Account-Id': accountId },
+    }),
+
   // Per-viewer "Clear conversation" (ticket 1ae77f55). Sets the caller's
   // cleared_at on the participant row — every subsequent listRooms /
   // getMessages call ignores older history for this user. Other participants

@@ -15,9 +15,11 @@ import NewChatModal from './ParticipantPicker';
 import { useConfirm } from '../../contexts/ConfirmContext';
 import { useToast } from '../../contexts/ToastContext';
 import { type MentionParticipant } from '../common/Markdown';
+import type { MentionCandidate } from '../common/MentionTextarea';
 import ChatMessageInput from './ChatMessageInput';
 import { canInviteToRoom } from './utils/participantFlow';
 import ActiveTaskStrip from './ActiveTaskStrip';
+import RoomParticipantsModal from './RoomParticipantsModal';
 
 
 // ─── RoomHeaderActions ────────────────────────────────────────────────────────
@@ -31,6 +33,7 @@ interface RoomHeaderActionsProps {
   onLeave: () => void;
   onClear: () => void;
   onAddPeople: () => void;
+  onManageParticipants: () => void;
   /** 자유 참여(open join) 토글 — ticket 995a9519. */
   onToggleOpenJoin: () => void;
   /** 토글 요청이 진행 중인가. 중복 클릭을 막고 진행 상태를 보여준다. */
@@ -52,6 +55,7 @@ export function RoomHeaderActions({
   onLeave,
   onClear,
   onAddPeople,
+  onManageParticipants,
   onToggleOpenJoin,
   openJoinPending,
 }: RoomHeaderActionsProps) {
@@ -175,6 +179,8 @@ export function RoomHeaderActions({
           {room.open_join ? translate('Open Join: On') : translate('Open Join: Off')}
         </button>
       )}
+      <button onClick={onManageParticipants} style={ghostButton}>
+        {translate('Manage participants')}</button>
       {/* Rename is allowed for DMs too so users can tag multi-rooms with
           the same partner ("Roadmap" / "Casual" / "On-call"). */}
       <button onClick={onRenameStart} style={ghostButton}>
@@ -211,7 +217,7 @@ export interface ChatRoomViewProps {
   onMessageSent: (msg: ChatRoomMessageItem) => void;
   onLeaveRoom: (roomId: string) => void;
   onRoomRenamed: (roomId: string, name: string) => void;
-  onParticipantsAdded: (roomId: string) => void;
+  onParticipantsChanged: (roomId: string) => void;
   // Per-viewer Clear (ticket 1ae77f55) — parent wipes local message state
   // for the room and zeroes its sidebar metadata.
   onRoomCleared: (roomId: string) => void;
@@ -246,7 +252,7 @@ export default function ChatRoomView({
   onMessageSent,
   onLeaveRoom,
   onRoomRenamed,
-  onParticipantsAdded,
+  onParticipantsChanged,
   onRoomCleared,
   onOpenJoinChanged,
   isMobile,
@@ -265,6 +271,8 @@ export default function ChatRoomView({
   const { noteMentionsCleared } = useNotifications();
   const [isRenaming, setIsRenaming] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
+  const [participantsRoomId, setParticipantsRoomId] = useState<string | null>(null);
+  useEffect(() => { setParticipantsRoomId(null); }, [room?.id]);
   /** 자유 참여 토글 요청이 진행 중인가 (ticket 995a9519). */
   const [openJoinPending, setOpenJoinPending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -401,6 +409,7 @@ export default function ChatRoomView({
       onLeave={handleLeave}
       onClear={handleClear}
       onAddPeople={() => setShowAddPeople(true)}
+      onManageParticipants={() => setParticipantsRoomId(room.id)}
       onToggleOpenJoin={handleToggleOpenJoin}
       openJoinPending={openJoinPending}
     />
@@ -446,6 +455,7 @@ export default function ChatRoomView({
             onLeave={handleLeave}
             onClear={handleClear}
             onAddPeople={() => setShowAddPeople(true)}
+            onManageParticipants={() => setParticipantsRoomId(room.id)}
             onToggleOpenJoin={handleToggleOpenJoin}
             openJoinPending={openJoinPending}
           />
@@ -483,47 +493,49 @@ export default function ChatRoomView({
           participants 는 부모(ChatPage)가 방 상세를 조회해 내려주며, 참여자 추가/이탈 시
           즉시 재조회되어 이 로스터가 곧바로 갱신된다. */}
       {participants.length > 0 && (
-        <div
+        <div className="awb-chat-participants"
           style={{
             display: 'flex',
             alignItems: 'center',
-            flexWrap: 'wrap',
             gap: 6,
-            padding: '8px 16px',
+            padding: '0 12px',
             borderBottom: `1px solid ${tokens.colors.border}`,
             background: tokens.colors.surfaceCard,
             flexShrink: 0,
           }}
         >
-          <span style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: 600, color: tokens.colors.textSecondary, marginRight: 2 }}>
-            {translate('Participants ·')} {participants.length}
-          </span>
-          {participants.slice(0, MAX_VISIBLE_PARTICIPANT_CHIPS).map((p) => (
-            <span
-              key={`${p.type}:${p.id}`}
-              style={{
-                fontSize: tokens.typography.fontSizeXs,
-                color: tokens.colors.textPrimary,
-                background: tokens.colors.surface,
-                border: `1px solid ${tokens.colors.border}`,
-                borderRadius: tokens.radii.xl,
-                padding: '2px 8px',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {p.name}
-              {p.type === 'agent' && (
-                <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>{translate('agent')}</span>
-              )}
-            </span>
-          ))}
-          {participants.length > MAX_VISIBLE_PARTICIPANT_CHIPS && (
-            <span
-              title={participants.map((p) => p.name).join(', ')}
-              style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap' }}
-            >
-              +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} {translate('more')}</span>
-          )}
+          <button type="button" onClick={() => setParticipantsRoomId(room.id)} aria-label={translate('Manage participants')}
+            style={{ fontSize: tokens.typography.fontSizeXs, fontWeight: 600, color: tokens.colors.textSecondary, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
+            {translate('Participants ·')} {participants.length} ▾
+          </button>
+          <div className="awb-chat-participant-chips">
+            {participants.slice(0, MAX_VISIBLE_PARTICIPANT_CHIPS).map((p) => (
+              <span
+                key={`${p.type}:${p.id}`}
+                style={{
+                  fontSize: tokens.typography.fontSizeXs,
+                  color: tokens.colors.textPrimary,
+                  background: tokens.colors.surface,
+                  border: `1px solid ${tokens.colors.border}`,
+                  borderRadius: tokens.radii.xl,
+                  padding: '2px 8px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {p.name}
+                {p.type === 'agent' && (
+                  <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>{translate('agent')}</span>
+                )}
+              </span>
+            ))}
+            {participants.length > MAX_VISIBLE_PARTICIPANT_CHIPS && (
+              <button type="button" onClick={() => setParticipantsRoomId(room.id)}
+                title={participants.map((p) => p.name).join(', ')}
+                style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap', border: 'none', background: 'transparent', cursor: 'pointer' }}
+              >
+                +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} {translate('more')}</button>
+            )}
+          </div>
           {/* 대화 도중 참여자 추가 진입점 — 헤더의 "Add People" 과 같은 모달을 연다.
               DM 을 포함한 모든 방에서 보인다(티켓 70e62a9d). 아직 참여하지 않은 자유
               참여 방에서는 서버가 거부하므로 감춘다 — 헤더가 그 경우 버튼 묶음을 통째로
@@ -678,6 +690,7 @@ export default function ChatRoomView({
       {/* Message input */}
       <ChatMessageInput
         roomId={room.id}
+        participants={participants.filter((p): p is MentionCandidate => p.type === 'user' || p.type === 'agent')}
         onSent={onMessageSent}
         isMobile={isMobile}
       />
@@ -688,7 +701,7 @@ export default function ChatRoomView({
         onClose={() => setShowAddPeople(false)}
         onCreated={(_result) => {
           setShowAddPeople(false);
-          onParticipantsAdded(room.id);
+          onParticipantsChanged(room.id);
         }}
         addToRoomId={room.id}
         // 이미 방에 있는 참여자는 피커 후보에서 제외해 중복 선택을 막는다.
@@ -696,6 +709,13 @@ export default function ChatRoomView({
         // DM 에 초대하면 방이 group 으로 승격되고 되돌릴 수 없다 — 확정 전에 알린다.
         promotesDmToGroup={room.type === 'dm'}
       />
+      {participantsRoomId === room.id && <RoomParticipantsModal
+        key={room.id}
+        roomId={room.id}
+        currentUserId={currentUserId}
+        onClose={() => setParticipantsRoomId(null)}
+        onChanged={onParticipantsChanged}
+      />}
     </div>
   );
 }

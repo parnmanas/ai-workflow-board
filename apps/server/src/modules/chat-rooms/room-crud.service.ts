@@ -8,7 +8,7 @@ import { User } from '../../entities/User';
 
 import { LogService } from '../../services/log.service';
 import { activityEvents } from '../../services/activity.service';
-import { RoomMembershipService } from './room-membership.service';
+import { RoomMembershipService, isSystemManagedRoom } from './room-membership.service';
 import { resolveAgentDisplayNamesByIds, resolveRuntimeDisplayNames } from '../../utils/agent-name';
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
@@ -509,6 +509,9 @@ export class RoomCrudService {
       // 자유 참여 방은 비참여자도 조회할 수 있으므로(이 메서드는 원래부터 비참여
       // viewer 를 허용한다 — observer 흐름), 참여 여부를 응답에 명시한다.
       is_participant: participants.some(
+        p => p.participant_type === 'user' && p.participant_id === userId,
+      ),
+      can_remove_participants: !isSystemManagedRoom(room) && participants.some(
         p => p.participant_type === 'user' && p.participant_id === userId,
       ),
       created_at: room.created_at,

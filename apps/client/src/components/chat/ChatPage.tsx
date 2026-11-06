@@ -534,10 +534,18 @@ export default function ChatPage() {
         listChatRooms: () => api.listChatRooms(showAllRooms ? 'account' : undefined, accountId),
         setRooms,
         refreshActiveRoomParticipants,
+        onRemovedFromRoom: roomId => {
+          if (activeRoomIdRef.current !== roomId) return;
+          activeRoomIdRef.current = null;
+          setActiveRoomId(null);
+          setMessages([]);
+          setRoomParticipants([]);
+          navigate('/chat', { replace: true });
+        },
       },
       data,
     );
-  }, [user?.id, showAllRooms, refreshActiveRoomParticipants, accountId]));
+  }, [user?.id, showAllRooms, refreshActiveRoomParticipants, accountId, navigate]));
 
   function selectRoom(roomId: string) {
     setActiveRoomId(roomId);
@@ -653,7 +661,7 @@ export default function ChatPage() {
     markBadgeRead('chat', roomId);
   }
 
-  function handleParticipantsAdded(roomId: string) {
+  function handleParticipantsChanged(roomId: string) {
     // 방 목록 + (열려 있으면) 활성 방 로스터를 함께 갱신 — SSE 경로와 동일 반응.
     reflectParticipantChange(
       {
@@ -741,7 +749,7 @@ export default function ChatPage() {
         onLeaveRoom={handleLeaveRoom}
         onRoomRenamed={handleRoomRenamed}
         onOpenJoinChanged={handleOpenJoinChanged}
-        onParticipantsAdded={handleParticipantsAdded}
+        onParticipantsChanged={handleParticipantsChanged}
         onRoomCleared={handleRoomCleared}
         isMobile={isMobile}
         participantCount={participantCount}

@@ -38,6 +38,7 @@ const noopHeaderProps = {
   onLeave() {},
   onClear() {},
   onAddPeople() {},
+  onManageParticipants() {},
   onToggleOpenJoin() {},
   openJoinPending: false,
 };

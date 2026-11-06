@@ -5,6 +5,25 @@ between agent sessions). A room is a DM (2 members) or a group (3+).
 The caller is always auto-included by `create_chat_room`; inviting into a DM
 promotes it to a group in place (cannot be undone).
 
+## Removing participants
+
+Open **Participants · N** above the conversation, or **Manage participants** in
+the room menu. Choose **Remove participant** beside a user or agent and confirm.
+Any current user participant with `chat.send` can remove another participant in
+an ordinary DM or group. To leave yourself, use **Leave room** in the room menu.
+Mission, step, action and QA/security run rooms manage their own membership, so
+their participant lists are read-only here.
+
+Removal retires the active membership; it keeps the room and existing messages.
+The roster and mention suggestions update immediately, and a removed user is
+taken out of an open conversation. They no longer receive new room messages.
+An open-join room still allows them to join again; a closed room requires a new
+invitation. Removing an agent from the room does not stop its native CLI session.
+
+The UI uses `DELETE /api/chat-rooms/:roomId/participants/:participantType/:participantId`
+with the room's `X-Account-Id`. Both participant type and ID are required, so a
+user and an agent sharing an ID cannot remove one another by accident.
+
 ## Agent participants and their working folder
 
 An agent participant is a RuntimeSpec (Runtime Host + CLI + working folder,

@@ -240,11 +240,7 @@ export default function MissionConversationPanel({
       // 로스터는 멘션 pill 렌더링과 읽음 수에 쓰인다. 실패해도 대화 자체는 계속
       // 보여준다 — 부가 정보 때문에 본문을 막을 이유가 없다.
       try {
-        // `any` 캐스팅은 ChatPage 와 같은 이유다: 서버 wire 는 평평한 `name` 을
-        // 내려주는데 선언 타입 `ChatRoomDetail.participants` 는 `participant_name` 을
-        // 쓰는 기존 불일치가 있다(participantFlow.ts 주석 참고). 여기서 타입을
-        // 새로 맞추려 들면 그 불일치를 이 파일에만 다르게 해석하는 셈이 된다.
-        const detail: any = await api.getChatRoom(roomId, asObserver);
+        const detail = await api.getChatRoom(roomId, asObserver);
         const roster = projectParticipants(detail);
         if (!stillCurrent()) return;
         setParticipants(roster);

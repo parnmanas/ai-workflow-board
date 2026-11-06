@@ -1527,13 +1527,15 @@ export interface ChatRoomDetail {
   // ChatRoomListItem 과 같은 의미 (ticket 995a9519).
   open_join?: boolean;
   is_participant?: boolean;
+  can_remove_participants?: boolean;
 }
 
 export interface ChatRoomParticipantInfo {
   id: string;
   participant_type: 'user' | 'agent';
   participant_id: string;
-  participant_name: string;
+  name: string;
+  participant_name?: string;
   joined_at: string;
 }
 
