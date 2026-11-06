@@ -895,7 +895,7 @@ test('chat 옵션이 off 면 권한이 있어도 읽기 전용이고, 사유가 
         false,
         'off 에서 입력창이 열려 있으면 전송 순간에만 403 이 뜬다',
       );
-      assert.ok(textOf(view.container).includes(ui('이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ')), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
+      assert.ok(textOf(view.container).includes(ui('미션 대화가 꺼져 있습니다. 미션 메뉴의 User chat 을 ')), '읽기는 계속 가능하다는 사실이 문구에 있어야 한다');
     },
   );
 });

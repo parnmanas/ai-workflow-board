@@ -444,7 +444,7 @@ export default function MissionConversationPanel({
     if (userChatMode === 'off') {
       return {
         reason:
-          translate('이 미션은 대화 옵션이 꺼져 있어 읽기 전용입니다. 미션 화면 위쪽의 User chat 을 ') +
+          translate('미션 대화가 꺼져 있습니다. 미션 메뉴의 User chat 을 ') +
           translate('Open 또는 Participants only 로 바꾸면 다시 대화할 수 있습니다.'),
         testId: 'mission-conversation-chat-off-notice',
         canJoin: false,

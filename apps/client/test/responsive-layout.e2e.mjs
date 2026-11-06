@@ -22,22 +22,27 @@ const project = { id: 'responsive-project', account_id: account.id, name: 'Respo
 const ticket = { id: 'responsive-ticket', account_id: account.id, parent_id: null, title, status: 'todo', priority: 'medium', tags: ['ui'], project_id: project.id, position: 0, assignee: null, assignee_key: '', created_at: live.updated_at, updated_at: live.updated_at, description: '반응형 티켓 상세를 확인합니다.', depth: 0, channel_ids: [], comments: [], children: [], attachments: [], prerequisites: [], prerequisite_count: 0, on_done_action_ids: [], next_ticket_id: null, created_by: 'Test user', created_by_type: 'user', created_by_id: 'user-test', project: null };
 const room = { id: 'responsive-room', account_id: account.id, type: 'group', name: 'Responsive chat', created_at: live.updated_at, participants: [{ id: 'p1', participant_type: 'user', participant_id: 'user-test', participant_name: 'Test user' }], unread_count: 0, is_participant: true };
 const mission = { id: 'mission', account_id: account.id, title, team_id: 'responsive-team', team_name: 'Responsive team', status: 'running', briefing: '반응형 미션 상세', completion_criteria: [], post_actions: [], acceptance_criteria: '', room_id: room.id, user_chat_mode: 'open', steps: [], events: [], graph_spec: null, step_timeout_minutes: 30, counts: { total: 0, done: 0, inFlight: 0, failed: 0, awaitingUser: 0, pending: 0 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at };
+const missionStep = { id: 'step-review', step_key: 'review', title: '모바일에서 단계 세션 보기', instructions: 'Check the responsive UI', acceptance_criteria: '', depends_on: [], assignee_name: 'Ralf', assignee_online: true, status: 'running', position: 0, plan_version: 1, room_id: room.id, result_summary: '', artifacts: [], attempt: 1, max_attempts: 2, workspace_folder: cwd, visit: 1, verdict: '', retry_policy: 'auto', recovery_reason: '', last_heartbeat_at: null, confirm_decision: null, activity: null };
 const team = { id: 'responsive-team', account_id: account.id, name: 'Responsive team', enabled: true, members: [], orchestrator_spec: null };
 
-async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false } = {}) {
+async function fixture(page, { busy = false, withStep = false, ticketTitle = title, manyTags = false, missionOverrides = {}, locale = 'en' } = {}) {
   const errors = [];
   const prompts = [];
   const cancellations = [];
+  const writes = [];
+  let missionDetail = { ...mission, ...(withStep ? { steps: [missionStep], counts: { ...mission.counts, total: 1, inFlight: 1 } } : {}), ...missionOverrides };
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(({ accountId }) => {
+  await page.addInitScript(({ accountId, locale }) => {
+    localStorage.setItem('awb.locale', locale);
     localStorage.setItem('auth_token', 'responsive-test-token');
     localStorage.setItem('currentAccountId', accountId);
     window.EventSource = class extends EventTarget { readyState = 1; close() { this.readyState = 2; } };
-  }, { accountId: account.id });
+  }, { accountId: account.id, locale });
   await page.route('**/api/**', async route => {
     const req = route.request();
     const path = new URL(req.url()).pathname.replace(/^\/api/, '');
     let body = [];
+    if (['POST', 'PATCH', 'DELETE'].includes(req.method())) writes.push({ path, method: req.method(), input: req.postDataJSON() });
     if (path === '/auth/me') body = { id: 'user-test', name: 'Test user', email: 'test@example.test', role: 'admin', status: 'active', permissions: [], resolved_permissions: ['admin.access', 'admin.actions', 'agent_sessions.use', 'voice.use'], accounts: [account] };
     else if (path === '/cli-catalog') body = { clis: cliCatalog() };
     else if (path === '/auth/setup-status') body = { needs_setup: false };
@@ -49,7 +54,7 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path === '/voice/operators') body = { operators: [] };
     else if (path === '/agent-sessions/hosts') body = [host];
     else if (path.endsWith('/prompt')) { prompts.push(req.postDataJSON()); body = { turn_id: 'sent', live: { ...live, status: 'busy' } }; }
-    else if (path.endsWith('/cancel')) { cancellations.push(path); body = { ok: true }; }
+    else if (path.startsWith('/agent-sessions/') && path.endsWith('/cancel')) { cancellations.push(path); body = { ok: true }; }
     else if (path.endsWith('/session-responsive')) body = { session: live, live: { ...live, status: busy ? 'busy' : 'ready' }, events };
     else if (path.endsWith('/sessions')) body = [live];
     else if (path.endsWith('/settings') && path.startsWith('/agent-sessions/')) body = { manager_id: host.manager_id, cli: 'codex', credential: null, candidates: [], default_config: {}, known_config_options: live.config_options };
@@ -61,7 +66,16 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path === '/tickets/responsive-ticket') body = { ...ticket, title: ticketTitle };
     else if (path === '/projects' || path.endsWith('/projects')) body = [project];
     else if (path === '/agent-templates/hosts') body = [{ id: host.manager_id, name: host.name }];
-    else if (path === '/orchestration/missions/mission') body = withStep ? { ...mission, steps: [{ id: 'step-review', step_key: 'review', title: '모바일에서 단계 세션 보기', instructions: 'Check the responsive UI', acceptance_criteria: '', depends_on: [], assignee_name: 'Ralf', assignee_online: true, status: 'running', position: 0, plan_version: 1, room_id: room.id, result_summary: '', artifacts: [], attempt: 1, max_attempts: 2, workspace_folder: cwd, visit: 1, verdict: '', retry_policy: 'auto', recovery_reason: '', last_heartbeat_at: null, confirm_decision: null, activity: null }], counts: { ...mission.counts, total: 1, inFlight: 1 } } : mission;
+    else if (path === '/orchestration/missions/mission') {
+      if (req.method() === 'PATCH') missionDetail = { ...missionDetail, ...req.postDataJSON() };
+      body = missionDetail;
+    }
+    else if (/^\/orchestration\/missions\/mission\/(start|pause|resume|cancel|reopen|nudge)$/.test(path)) {
+      const nextStatus = { start: 'running', pause: 'paused', resume: 'running', cancel: 'cancelled', reopen: 'running' }[path.split('/').pop()];
+      if (nextStatus) missionDetail = { ...missionDetail, status: nextStatus };
+      body = missionDetail;
+    }
+    else if (path === '/orchestration/steps/step-review/session') body = { step_id: missionStep.id, step_key: missionStep.step_key, room_id: room.id, items: [{ id: 'step-message', at: live.updated_at, kind: 'agent', sender_type: 'agent', sender_id: 'agent', sender_name: 'Ralf', text: 'Checking the mobile work area.' }], has_more: false, next_before_id: null };
     else if (path === '/orchestration/missions/mission/events') body = { events: [], has_more: false, next_cursor: null };
     else if (path === '/orchestration/teams') body = [team];
     else if (path === '/orchestration/missions') body = [{ id: 'mission', title, team_name: team.name, status: 'running', counts: { total: 4, done: 1, inFlight: 2, failed: 0, awaitingUser: 1 }, plan_version: 1, created_at: live.updated_at, started_at: live.updated_at, live_steps: [] }];
@@ -70,7 +84,7 @@ async function fixture(page, { busy = false, withStep = false, ticketTitle = tit
     else if (path.includes('/unread') || path.endsWith('counts') || path.includes('/mentions')) body = { count: 0, total: 0, items: [], perRoom: {}, perTicket: {} };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
-  return { errors, prompts, cancellations };
+  return { errors, prompts, cancellations, writes };
 }
 
 async function expectFits(page) {
@@ -79,6 +93,172 @@ async function expectFits(page) {
   });
   for (const el of overflow) expect(el.scroll, page.url()).toBeLessThanOrEqual(el.width + 1);
 }
+
+for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 667, height: 375 }, { width: 768, height: 1024 }]) {
+  for (const locale of ['en', 'ko']) {
+    test(`phone mission work area and menu in ${locale} at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+      await page.setViewportSize(size);
+      const f = await fixture(page, { withStep: true, locale, missionOverrides: { title: title.repeat(5), team_name: 'Team / '.repeat(20), orchestrator_name: 'Host / CLI / Model '.repeat(10) } });
+      await page.goto('/missions/mission');
+      const input = page.locator('.awb-chat-composer textarea');
+      await expect(input).toBeVisible();
+      await input.fill('작성 중인 대화');
+      const header = page.locator('.awb-mission-header');
+      expect((await header.boundingBox()).height).toBeLessThanOrEqual(90);
+      const scroll = page.getByTestId('mission-conversation-scroll');
+      const content = await page.locator('.awb-content').boundingBox();
+      expect((await scroll.boundingBox()).y - content.y).toBeLessThanOrEqual(160);
+      expect((await scroll.boundingBox()).height).toBeGreaterThanOrEqual(size.height < 400 ? 60 : size.height * 0.38);
+      await expect(input).toBeInViewport();
+      const menu = header.locator('.awb-session-menu-trigger');
+      await menu.click();
+      const panel = header.locator('.awb-session-menu-panel');
+      await expect(panel).toContainText(title.repeat(5));
+      const bounds = await panel.boundingBox();
+      expect(bounds.x).toBeGreaterThanOrEqual(0);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(size.width);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(size.height);
+      // Settings and actions remain genuinely reachable even with long menu text.
+      await panel.getByTestId('mission-user-chat-mode').selectOption('participants_only');
+      await expect.poll(() => f.writes.some(w => w.path === '/orchestration/missions/mission' && w.input.user_chat_mode === 'participants_only')).toBe(true);
+      await page.keyboard.press('Escape');
+      await expect(input).toHaveValue('작성 중인 대화');
+      await page.locator('[aria-controls="mission-steps"]').click();
+      await page.getByTestId('rail-step-row').click();
+      await expect(page.getByTestId('step-session')).toBeVisible();
+      await expect(page.getByTestId('step-session-scroll')).toContainText('Checking the mobile work area.');
+      expect((await page.getByTestId('step-session-scroll').boundingBox()).height).toBeGreaterThan(50);
+      await page.screenshot({ path: testInfo.outputPath('mission-step.png') });
+      await page.locator('.awb-step-heading button').click();
+      await expect(page.getByTestId('mission-conversation-scroll')).toBeVisible();
+      await expectFits(page);
+      expect(f.errors).toEqual([]);
+      await page.screenshot({ path: testInfo.outputPath('mission-conversation.png') });
+    });
+  }
+}
+
+test('phone page menus expose host settings and chat actions without clipping', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const f = await fixture(page);
+  await page.goto(`/sessions/${host.manager_id}`);
+  const header = page.locator('.awb-page-header');
+  await expect(header.locator('h1')).toHaveText('Ralf');
+  expect((await header.locator('h1').boundingBox()).width).toBeGreaterThanOrEqual(64);
+  await header.locator('.awb-session-menu-trigger').click();
+  await header.getByRole('button', { name: 'Codex', exact: true }).click();
+  await expect(page.getByRole('region', { name: ui('CLI settings'), exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: ui('Session credential'), exact: true })).toBeInViewport();
+  await page.goto('/chat/responsive-room');
+  await header.locator('.awb-session-menu-trigger').click();
+  const menu = header.locator('.awb-session-menu-panel');
+  await expect(menu.getByRole('button', { name: 'Leave room', exact: true })).toBeInViewport();
+  await menu.getByRole('button', { name: 'Rename', exact: true }).click();
+  await page.getByPlaceholder('Room name', { exact: true }).fill('새 이름');
+  await expect(page.getByRole('button', { name: 'Rename Room', exact: true })).toBeInViewport();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await header.locator('.awb-session-menu-trigger').click();
+  await menu.getByRole('button', { name: 'Add People', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  expect(f.errors).toEqual([]);
+});
+
+test('phone mission primary action and menu retain lifecycle controls', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const f = await fixture(page, { missionOverrides: { status: 'draft' } });
+  await page.goto('/missions/mission');
+  const header = page.locator('.awb-mission-header');
+  await header.getByRole('button', { name: 'Start', exact: true }).click();
+  await header.getByRole('button', { name: 'Pause', exact: true }).click();
+  await header.getByRole('button', { name: 'Resume', exact: true }).click();
+  const menu = header.getByRole('button', { name: 'Mission menu', exact: true });
+  await menu.click();
+  await header.getByRole('button', { name: 'Nudge orchestrator', exact: true }).click();
+  const nudge = page.getByRole('dialog', { name: 'Nudge the orchestrator', exact: true });
+  await nudge.getByRole('textbox').fill('Check the mobile layout');
+  await nudge.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(nudge).toBeHidden();
+  await menu.click();
+  await header.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const cancel = page.getByRole('dialog', { name: 'Cancel mission?', exact: true });
+  await expect(cancel).toBeVisible();
+  // Opening the menu action still requires the existing confirmation.
+  expect(f.writes.some(w => w.path.endsWith('/cancel'))).toBe(false);
+  await cancel.getByRole('button', { name: 'Cancel mission', exact: true }).click();
+  await header.getByRole('button', { name: 'Reopen', exact: true }).click();
+  await expect(header.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
+  for (const action of ['start', 'pause', 'resume', 'nudge', 'cancel', 'reopen']) {
+    expect(f.writes.some(w => w.path === `/orchestration/missions/mission/${action}` && w.method === 'POST'), action).toBe(true);
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test('phone memory and terminal menus keep secondary actions reachable', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const f = await fixture(page);
+  const memory = { manager_id: host.manager_id, manager_name: host.name, hostname: host.hostname, platform: 'linux', generated_at: live.updated_at, project_dirs: [], content_budget_exhausted: false,
+    clis: [{ cli: 'codex', label: 'Codex', summary: 'CLI memory', detected: true, homes: [{ id: 'operator', kind: 'operator', path: '/home/test/.codex', display_path: '~/.codex', exists: true }], files: [], dirs: [], settings: {} }] };
+  const terminal = { manager_id: host.manager_id, manager_name: host.name, terminal_id: 'terminal-phone', shell: 'bash', shell_label: 'Bash', title: title.repeat(3), cwd, status: 'live', cols: 40, rows: 20, created_at: live.updated_at, updated_at: live.updated_at };
+  await page.route('**/api/cli-memory/**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(route.request().url().includes('/snapshot') ? memory : [{ ...host, supported: true }]) }));
+  await page.route('**/api/terminals/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    const body = path.endsWith('/terminal-phone') ? { terminal, data: '', seq: 1, truncated: false }
+      : path.endsWith('/resize') ? terminal : path.endsWith('/hosts') ? [{ ...host, shells: [] }] : [terminal];
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  await page.goto(`/memory/${host.manager_id}`);
+  const header = page.locator('.awb-page-header');
+  await expect(header.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  expect((await header.boundingBox()).height).toBeLessThanOrEqual(90);
+  await header.locator('.awb-session-menu-trigger').click();
+  await header.getByRole('button', { name: 'Import', exact: true }).click();
+  const importer = page.getByRole('dialog', { name: `Import memory into ${host.name}`, exact: true });
+  await expect(importer).toBeVisible();
+  await importer.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expectFits(page);
+  await page.screenshot({ path: testInfo.outputPath('memory-host.png') });
+
+  await page.goto(`/terminals/${host.manager_id}/${terminal.terminal_id}`);
+  await expect(header.locator('h1')).toHaveText(terminal.title);
+  expect((await header.boundingBox()).height).toBeLessThanOrEqual(90);
+  const back = header.getByRole('button', { name: 'All terminals', exact: true });
+  expect((await back.boundingBox()).width).toBeGreaterThanOrEqual(44);
+  await header.locator('.awb-session-menu-trigger').click();
+  await expect(header.locator('.awb-session-menu-panel')).toContainText(cwd);
+  await header.getByRole('button', { name: 'Close', exact: true }).click();
+  const closer = page.getByRole('dialog', { name: 'Close terminal?', exact: true });
+  await expect(closer.getByRole('button', { name: 'Close terminal', exact: true })).toBeInViewport();
+  await closer.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expectFits(page);
+  await page.screenshot({ path: testInfo.outputPath('terminal.png') });
+  await back.click();
+  await expect(page).toHaveURL(`/terminals/${host.manager_id}`);
+  expect(f.errors).toEqual([]);
+});
+
+test('phone mission pending decisions leave room for conversation and remain actionable', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const steps = Array.from({ length: 3 }, (_, i) => ({ ...missionStep, id: `confirm-${i}`, step_key: `confirm-${i}`, status: 'awaiting_user', title: `Review ${i + 1}`, instructions: 'Review this result carefully. '.repeat(12) }));
+  const approvals = Array.from({ length: 3 }, (_, i) => ({ id: `approval-${i}`, status: 'pending', route: 'user', requester_name: 'Ralf', tool_name: 'Shell', description: 'Run the verification command. '.repeat(12), input: 'npm run build', can_allow_session: true, created_at: live.updated_at }));
+  const f = await fixture(page, { missionOverrides: { steps, approvals, counts: { ...mission.counts, total: 3, awaitingUser: 3, awaitingApproval: 3 } } });
+  await page.goto('/missions/mission');
+  const scroll = page.getByTestId('mission-conversation-scroll');
+  await expect(scroll).toBeVisible();
+  expect((await scroll.boundingBox()).height).toBeGreaterThan(90);
+  const summary = page.locator('.awb-mission-summary');
+  expect((await summary.boundingBox()).height).toBeLessThanOrEqual(568 * 0.3);
+  const confirm = page.getByTestId('confirm-card').last();
+  await confirm.getByRole('textbox').fill('Ready to continue');
+  await confirm.getByRole('button', { name: 'Pass', exact: true }).click();
+  await expect.poll(() => f.writes.some(w => w.path === '/orchestration/steps/confirm-2/confirm' && w.input.verdict === 'pass')).toBe(true);
+  const approval = page.getByTestId('approval-card').last();
+  await approval.getByRole('textbox').fill('Need more detail');
+  await approval.getByRole('button', { name: 'Deny', exact: true }).click();
+  await expect.poll(() => f.writes.some(w => w.path === '/orchestration/approvals/approval-2/decide' && w.input.decision === 'deny')).toBe(true);
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport();
+  await expectFits(page);
+  expect(f.errors).toEqual([]);
+});
 
 test('reload retains selected menus, details and mission steps', async ({ page }) => {
   const f = await fixture(page, { withStep: true });
@@ -188,11 +368,20 @@ test(`main pages and new-session dialog fit width ${width}`, async ({ page }, te
   test.setTimeout(60_000);
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page);
-  for (const route of ['/sessions', `/sessions/${host.manager_id}`, '/tickets', '/tickets?ticket=responsive-ticket', '/projects', '/projects?project=responsive-project', '/missions', '/missions/mission', '/teams', '/chat', '/chat/responsive-room', '/hosts', '/terminals', '/settings', '/settings/defaults', '/settings/users', '/settings/credentials', '/settings/channels', '/settings/api-keys', '/settings/claude-profiles']) {
+  for (const route of ['/sessions', `/sessions/${host.manager_id}`, '/tickets', '/tickets?ticket=responsive-ticket', '/projects', '/projects?project=responsive-project', '/missions', '/missions/mission', '/teams', '/chat', '/chat/responsive-room', '/hosts', '/terminals', '/memory', '/skills', '/library', '/qa', '/security', '/schedules', '/actions', '/functions', '/resources', '/settings', '/settings/defaults', '/settings/users', '/settings/credentials', '/settings/channels', '/settings/api-keys', '/settings/claude-profiles']) {
     await page.goto(route);
     await expect(page.getByTestId('app-shell')).toBeVisible();
     await page.waitForTimeout(180);
     await expectFits(page);
+    const header = page.locator('.awb-page-header, .awb-mission-header');
+    if (await header.count()) {
+      expect((await header.first().boundingBox()).height, route).toBeLessThanOrEqual(104);
+      const heading = header.first().locator('h1');
+      expect((await heading.boundingBox()).width, route).toBeGreaterThanOrEqual(64);
+      for (const button of await header.first().locator('.awb-page-actions > button, .awb-session-menu-trigger').all()) {
+        if (await button.isVisible()) await expect(button).toBeInViewport();
+      }
+    }
     if (route.includes('ticket=') && width < 1101) {
       const detail = await page.getByRole('region', { name: 'Ticket detail' }).boundingBox();
       expect(detail.width).toBe(width < 768 ? width : width - 288);
@@ -285,6 +474,23 @@ test('composer follows a keyboard-sized visual viewport without applying pinch z
   await expect.poll(async () => (await page.getByTestId('app-shell').boundingBox()).height).toBe(390);
   await page.evaluate(() => window.resizeVisualViewport(844));
   await expect.poll(async () => (await page.getByTestId('app-shell').boundingBox()).height).toBe(844);
+  await page.goto('/missions/mission');
+  const message = page.getByRole('textbox', { name: 'Message', exact: true });
+  await message.fill('미션에서도 입력을 이어갑니다');
+  await page.evaluate(() => window.resizeVisualViewport(390));
+  await expect.poll(async () => (await page.getByTestId('app-shell').boundingBox()).height).toBe(390);
+  const send = page.locator('.awb-chat-composer').getByRole('button', { name: 'Send Message', exact: true });
+  for (const element of [message, send]) {
+    const bounds = await element.boundingBox();
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(390);
+  }
+  expect((await page.getByTestId('mission-conversation-scroll').boundingBox()).height).toBeGreaterThan(45);
+  await page.getByRole('button', { name: 'Mission menu', exact: true }).click();
+  const menuBox = await page.locator('.awb-mission-header .awb-session-menu-panel').boundingBox();
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(390);
+  await page.keyboard.press('Escape');
+  await expect(message).toHaveValue('미션에서도 입력을 이어갑니다');
+  await page.evaluate(() => window.resizeVisualViewport(844));
   await page.goto('/sessions?new=1');
   const dialog = page.getByRole('dialog', { name: 'New session', exact: true });
   await expect(dialog).toBeVisible();

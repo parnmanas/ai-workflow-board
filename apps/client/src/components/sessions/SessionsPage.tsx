@@ -357,10 +357,11 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
       <PageHeader
         title={hostName}
         description={host ? translate('{0} — sessions grouped by working directory', { 0: host.hostname }) : translate('This Runtime Host is not connected right now.')}
-        actions={(
+        actions={<Button variant="primary" size="sm" onClick={onNew}>{translate('New session')}</Button>}
+        moreActions={close => (
           <>
-            <Button variant="ghost" size="sm" onClick={() => navigate(`/sessions`)}>{translate('All hosts')}</Button>
-            <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>{translate('Reload')}</Button>
+            <Button variant="ghost" size="sm" onClick={() => { close(); navigate('/sessions'); }}>{translate('All hosts')}</Button>
+            <Button variant="ghost" size="sm" onClick={() => { close(); void load(); }} disabled={loading}>{translate('Reload')}</Button>
             {host && host.clis.map((cli) => {
               const bound = host.cli_settings?.[cli] ?? null;
               return (
@@ -368,14 +369,13 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
                   key={cli}
                   variant={showSettings === cli ? 'secondary' : 'ghost'}
                   size="sm"
-                  onClick={() => setShowSettings((v) => (v === cli ? null : cli))}
+                  onClick={() => { close(); setShowSettings((v) => (v === cli ? null : cli)); }}
                   title={bound ? translate('Signs in with "{0}"', { 0: bound.name }) : translate('Uses the host\'s own login')}
                 >
                   {bound ? `🔑 ${runtimeLabel(cli)}` : runtimeLabel(cli)}
                 </Button>
               );
             })}
-            <Button variant="primary" size="sm" onClick={onNew}>{translate('New session')}</Button>
           </>
         )}
       />

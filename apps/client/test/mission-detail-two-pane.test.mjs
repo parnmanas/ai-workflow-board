@@ -308,7 +308,7 @@ test('step 세션은 지시·CLI 하트비트·에이전트 보고·실행 이�
   assert.match(text, /빌드 통과했습니다/, '에이전트 보고가 보인다');
   assert.match(text, /Step dispatched to Coder.Muse/, '이 step 의 실행 이벤트가 같은 축에 있다');
   assert.doesNotMatch(text, /다른 step 의 이벤트/, '다른 step 의 이벤트는 섞이지 않는다');
-  assert.match(text, /Back to mission/, '선택을 푸는 길이 패널 안에도 있다');
+  assert.ok(container.querySelector('button[aria-label="Back to mission"]'), '선택을 푸는 길이 패널 안에도 있다');
   assert.equal(container.querySelectorAll('textarea, input[type="text"]').length, 0, 'step 방에는 쓰기 입구가 없다');
   assert.match(text, uiPattern('읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지 않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.'), '왜 쓸 수 없는지 화면이 설명한다');
 });

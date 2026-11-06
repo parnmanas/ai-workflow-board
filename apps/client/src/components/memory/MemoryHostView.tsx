@@ -294,13 +294,15 @@ export default function MemoryHostView({ managerId, hosts }: { managerId: string
         ? translate('{0} CLI{1} on {2}{3} · scanned {4}{5}', { 0: detected.length, 1: detected.length === 1 ? '' : translate('s'), 2: snapshot.hostname, 3: snapshot.platform ? ` · ${snapshot.platform}` : '', 4: new Date(snapshot.generated_at).toLocaleTimeString(getLocaleTag()), 5: snapshot.content_budget_exhausted ? translate(' · some large files load on open') : '' })
         : translate('Scanning memory files on this host…')}
       actions={(
+        <Button size="sm" variant="secondary" disabled={loading} onClick={() => void (async () => { if (await guardLeave()) { setEditorNonce((n) => n + 1); await load(); } })()}>
+          {loading ? translate('Scanning…') : translate('Refresh')}
+        </Button>
+      )}
+      moreActions={close => (
         <div style={{ display: 'flex', gap: 6 }}>
-          <Button size="sm" variant="ghost" onClick={() => navigate('/memory?tab=hosts')}>{translate('Hosts')}</Button>
-          <Button size="sm" variant="secondary" disabled={loading} onClick={() => void (async () => { if (await guardLeave()) { setEditorNonce((n) => n + 1); await load(); } })()}>
-            {loading ? translate('Scanning…') : translate('Refresh')}
-          </Button>
-          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'import' })}>{translate('Import')}</Button>
-          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => setModal({ kind: 'export' })}>{translate('Export')}</Button>
+          <Button size="sm" variant="ghost" onClick={() => { close(); navigate('/memory?tab=hosts'); }}>{translate('Hosts')}</Button>
+          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => { close(); setModal({ kind: 'import' }); }}>{translate('Import')}</Button>
+          <Button size="sm" variant="secondary" disabled={!snapshot} onClick={() => { close(); setModal({ kind: 'export' }); }}>{translate('Export')}</Button>
         </div>
       )}
     />

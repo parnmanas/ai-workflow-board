@@ -312,12 +312,12 @@ export default function TerminalsPage() {
           actions={(
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {current && <StatusPill status={current.status} />}
-              <Button variant="secondary" size="sm" onClick={() => navigate(`/terminals/${managerId}`)}>{translate('All terminals')}</Button>
-              {current && isLiveTerminal(current) && (
-                <Button variant="secondary" size="sm" onClick={() => void closeTerminal(current)}>{translate('Close')}</Button>
-              )}
+              <Button variant="secondary" size="sm" aria-label={translate('All terminals')} onClick={() => navigate(`/terminals/${managerId}`)}>←</Button>
             </div>
           )}
+          moreActions={current && isLiveTerminal(current) ? close => (
+            <Button variant="secondary" size="sm" onClick={() => { close(); void closeTerminal(current); }}>{translate('Close')}</Button>
+          ) : undefined}
         />
         <TerminalView managerId={managerId} terminalId={terminalId} onTerminalChange={setCurrent} />
         {modal}

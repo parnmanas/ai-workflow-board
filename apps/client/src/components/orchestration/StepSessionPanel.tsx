@@ -206,8 +206,8 @@ export default function StepSessionPanel({
       style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}
     >
       {/* ── 헤더: 이 step 이 무엇이고 지금 어떤 상태인가 ───────────────────── */}
-      <div style={{ padding: '10px 14px', borderBottom: `1px solid ${tokens.colors.border}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <div className="awb-step-header" style={{ padding: '8px 12px', borderBottom: `1px solid ${tokens.colors.border}` }}>
+        <div className="awb-step-heading">
           <span
             style={{
               padding: '2px 8px',
@@ -222,13 +222,11 @@ export default function StepSessionPanel({
           >
             {style.label}
           </span>
-          <span style={{ fontSize: 13.5, fontWeight: 600, color: tokens.colors.textPrimary }}>{step.title}</span>
-          <span style={{ fontSize: 10.5, fontFamily: 'monospace', color: tokens.colors.textMuted }}>
-            {step.step_key}
-          </span>
+          <span className="awb-step-title" title={step.title} style={{ color: tokens.colors.textPrimary }}>{step.title}</span>
           <button
             type="button"
             onClick={onClose}
+            aria-label={translate('Back to mission')}
             title={translate('선택을 풀고 미션 대화로 돌아갑니다')}
             style={{
               marginLeft: 'auto',
@@ -242,7 +240,7 @@ export default function StepSessionPanel({
               fontFamily: 'inherit',
             }}
           >
-            {translate('Back to mission')}</button>
+            ←</button>
         </div>
 
         <div
@@ -256,6 +254,7 @@ export default function StepSessionPanel({
             color: tokens.colors.textSecondary,
           }}
         >
+          <span style={{ fontFamily: 'monospace', overflowWrap: 'anywhere' }}>{step.step_key}</span>
           <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <span
               aria-hidden="true"
@@ -352,6 +351,7 @@ export default function StepSessionPanel({
           {showOrder ? '▾' : '▸'} {translate('Work order · done when · result')}</button>
         {showOrder && (
           <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <strong style={{ fontSize: 12, overflowWrap: 'anywhere', color: tokens.colors.textPrimary }}>{step.title}</strong>
             <Block title={translate('Work order')} text={step.instructions || translate('(no instructions recorded)')} />
             {step.acceptance_criteria && <Block title={translate('Done when')} text={step.acceptance_criteria} muted />}
             {step.result_summary && <Block title={translate('Reported result')} text={step.result_summary} />}
@@ -397,6 +397,7 @@ export default function StepSessionPanel({
       {/* ── 전사 ───────────────────────────────────────────────────────────── */}
       <div
         ref={scrollRef}
+        data-testid="step-session-scroll"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px 14px' }}
       >
         {hasMore && (
@@ -451,7 +452,8 @@ export default function StepSessionPanel({
 
       {/* 읽기 전용인 이유를 바닥에 한 줄로 남긴다 — 입력창이 없는 화면은 "고장난
           것"처럼 보이기 쉽고, 여기서 지시를 내리면 안 되는 근거가 설계에 있다. */}
-      <div
+      <details
+        className="awb-step-readonly"
         style={{
           padding: '7px 14px',
           borderTop: `1px solid ${tokens.colors.border}`,
@@ -460,7 +462,8 @@ export default function StepSessionPanel({
           lineHeight: 1.5,
         }}
       >
-        {translate('읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지 않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.')}</div>
+        <summary>{translate('Read-only')}</summary>
+        {translate('읽기 전용입니다. step 작업 방은 담당 agent 에게 내리는 지시 채널이라 사람이 참여하지 않습니다 — 방향을 바꾸려면 미션 대화에서 orchestrator 에게 말하세요.')}</details>
 
       {(() => {
         if (!lightboxId) return null;

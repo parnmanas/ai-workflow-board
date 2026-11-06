@@ -17,12 +17,17 @@ export function MissionIdentity({ id, onCopy }: { id: string; onCopy: () => void
   );
 }
 
-export default function MissionHeaderMenu({ mission, busy, onCopy, onEdit, onDelete }: {
+export default function MissionHeaderMenu({ mission, busy, onCopy, onEdit, onDelete, title, description, details, actions, settings }: {
   mission: Pick<OrchestrationMissionDetail, 'id' | 'status'>;
   busy: boolean;
   onCopy: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  title?: string;
+  description?: string;
+  details?: React.ReactNode;
+  actions?: (close: () => void) => React.ReactNode;
+  settings?: React.ReactNode;
 }) {
   useLocale();
   const canEdit = mission.status === 'draft';
@@ -32,9 +37,14 @@ export default function MissionHeaderMenu({ mission, busy, onCopy, onEdit, onDel
       {(close) => (
         <>
           <SessionMenuSection title={translate('Mission information')}>
+            {title && <strong>{title}</strong>}
+            {description && <p>{description}</p>}
+            {details}
             <MissionIdentity id={mission.id} onCopy={onCopy} />
           </SessionMenuSection>
+          {settings && <SessionMenuSection title={translate('Settings')}>{settings}</SessionMenuSection>}
           <SessionMenuSection title={translate('Actions')}>
+            {actions?.(close)}
             <SessionMenuItem
               icon="✎"
               label={translate('Edit mission')}

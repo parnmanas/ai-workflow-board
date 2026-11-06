@@ -97,7 +97,7 @@ export function RoomHeaderActions({
 
   if (isRenaming) {
     return (
-      <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
+      <div className="awb-room-rename" style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
         <input
           ref={renameInputRef}
           type="text"
@@ -418,6 +418,7 @@ export default function ChatRoomView({
     >
       {isRenaming ? (
         <div
+          className="awb-room-rename-header"
           style={{
             background: tokens.gradients.surfaceCard,
             borderBottom: `1px solid ${tokens.colors.border}`,
@@ -453,6 +454,7 @@ export default function ChatRoomView({
         <PageHeader
           title={roomDisplayName}
           description={undefined}
+          moreActions={close => <div onClick={event => { if ((event.target as HTMLElement).closest('button')) close(); }}>{headerActions}</div>}
           actions={
             <div style={{ display: 'flex', gap: tokens.spacing.sm, alignItems: 'center' }}>
               {/* 이 방이 지금 돌고 있나 — 사이드바의 방 행과 같은 어휘/색
@@ -472,7 +474,6 @@ export default function ChatRoomView({
                   ←
                 </button>
               )}
-              {headerActions}
             </div>
           }
         />

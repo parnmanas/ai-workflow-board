@@ -15,7 +15,7 @@ import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { usePageQuery } from '../../hooks/usePageQuery';
 import { tokens } from '../../tokens';
-import PageHeader from '../PageHeader';
+import { SessionMenuItem } from '../sessions/SessionHeaderMenu';
 import { Button, ConfirmDialog, EmptyState, Modal } from '../common';
 import { relativeTime } from '../../utils/time';
 import { copyPlainText } from '../../utils/clipboard';
@@ -184,87 +184,95 @@ export default function MissionDetailPage() {
    */
   const reopen = () =>
     act(() => api.reopenOrchestrationMission(mission.id, accountId), translate('미션을 다시 열었습니다 — orchestrator 를 깨웠습니다'));
+  const chatSettings = mission.room_id ? (
+    <label
+      style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: tokens.colors.textSecondary }}
+    >
+      {translate('User chat')}<select
+        value={mission.user_chat_mode}
+        disabled={busy}
+        data-testid="mission-user-chat-mode"
+        onChange={(e) =>
+          act(
+            () =>
+              api.updateOrchestrationMission(mission.id, {
+                account_id: accountId,
+                // 이 필드 하나만 보낸다 — 브리핑 필드를 함께 실으면 running
+                // 미션에서 서버의 draft 잠금이 409 를 낸다.
+                user_chat_mode: e.target.value as OrchestrationUserChatMode,
+              }),
+            translate('User chat updated'),
+          )
+        }
+        style={{
+          fontSize: 11,
+          padding: '2px 6px',
+          borderRadius: 4,
+          border: `1px solid ${tokens.colors.border}`,
+          background: tokens.colors.surface,
+          color: tokens.colors.textPrimary,
+        }}
+      >
+        <option value="open">{translate('Open')}</option>
+        <option value="participants_only">{translate('Participants only')}</option>
+        <option value="off">{translate('Off (read-only)')}</option>
+      </select>
+    </label>
+  ) : null;
   const evidenceTotal =
     mission.steps.reduce((n, s) => n + (s.evidence_count ?? 0), 0) + (mission.mission_evidence_count ?? 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
 
-      <PageHeader
-        title={mission.title}
-        description={`${mission.team_name}${mission.orchestrator_name ? translate(' · orchestrated by {0}', { 0: mission.orchestrator_name }) : ''}`}
-        actions={
-          <>
-            <Button variant="ghost" size="sm" onClick={() => navigate('/missions')}>
-              {translate('All missions')}</Button>
-            {mission.status === 'draft' && (
-              <>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  loading={busy}
-                  onClick={() => act(() => api.startOrchestrationMission(mission.id, accountId), translate('Orchestrator briefed'))}
-                >
-                  {translate('Start')}</Button>
-              </>
-            )}
-            {(mission.status === 'planning' || mission.status === 'running') && (
-              <>
-                <Button variant="secondary" size="sm" loading={busy} onClick={() => setShowNudge(true)}>
-                  {translate('Nudge orchestrator')}</Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={busy}
-                  onClick={() => act(() => api.pauseOrchestrationMission(mission.id, accountId), translate('Mission paused'))}
-                >
-                  {translate('Pause')}</Button>
-              </>
-            )}
-            {mission.status === 'paused' && (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={busy}
-                onClick={() => act(() => api.resumeOrchestrationMission(mission.id, accountId), translate('Mission resumed'))}
-              >
-                {translate('Resume')}</Button>
-            )}
-            {!['completed', 'failed', 'cancelled'].includes(mission.status) && (
-              <Button variant="danger" size="sm" onClick={() => setShowCancel(true)}>
-                {translate('Cancel')}</Button>
-            )}
-            {/*
-              종료된 미션을 되살린다. 새 미션을 만드는 것보다 이 버튼이 나은 이유는 계획·step
-              결과·타임라인·대화가 전부 그대로 남기 때문이다 — 이어서 하려는 사람에게 처음부터
-              다시 시작은 제일 비싼 길이다. 무엇을 다시 돌릴지는 그대로 orchestrator 가 정한다.
-            */}
-            {['completed', 'failed', 'cancelled'].includes(mission.status) && (
-              <Button variant="secondary" size="sm" loading={busy} onClick={() => void reopen()}>
-                {translate('Reopen')}</Button>
-            )}
-            <MissionHeaderMenu
-              mission={mission}
-              busy={busy}
-              onCopy={() => void copyMissionId()}
-              onEdit={() => setShowEdit(true)}
-              onDelete={() => setShowDelete(true)}
-            />
-          </>
-        }
-      />
+      <header className="awb-mission-header" style={{ background: tokens.gradients.surfaceCard, borderBottom: `1px solid ${tokens.colors.border}` }}>
+        <Button variant="ghost" size="sm" onClick={() => navigate('/missions')} aria-label={translate('All missions')} title={translate('All missions')}>←</Button>
+        <div className="awb-mission-heading-copy">
+          <h1 title={mission.title} style={{ color: tokens.colors.textPrimary }}>{mission.title}</h1>
+          <div title={mission.team_name} style={{ color: tokens.colors.textMuted }}>{mission.team_name}</div>
+        </div>
+        <div className="awb-mission-header-actions">
+          {mission.status === 'draft' && <Button variant="primary" size="sm" loading={busy}
+            onClick={() => act(() => api.startOrchestrationMission(mission.id, accountId), translate('Orchestrator briefed'))}>{translate('Start')}</Button>}
+          {(mission.status === 'planning' || mission.status === 'running') && <Button variant="secondary" size="sm" loading={busy}
+            onClick={() => act(() => api.pauseOrchestrationMission(mission.id, accountId), translate('Mission paused'))}>{translate('Pause')}</Button>}
+          {mission.status === 'paused' && <Button variant="primary" size="sm" loading={busy}
+            onClick={() => act(() => api.resumeOrchestrationMission(mission.id, accountId), translate('Mission resumed'))}>{translate('Resume')}</Button>}
+          {['completed', 'failed', 'cancelled'].includes(mission.status) && <Button variant="secondary" size="sm" loading={busy}
+            onClick={() => void reopen()}>{translate('Reopen')}</Button>}
+          <MissionHeaderMenu
+            mission={mission}
+            title={mission.title}
+            description={`${mission.team_name}${mission.orchestrator_name ? translate(' · orchestrated by {0}', { 0: mission.orchestrator_name }) : ''}`}
+            details={<p>{missionCountsLabel(mission)} · {missionTimeLabel(mission)}</p>}
+            busy={busy}
+            onCopy={() => void copyMissionId()}
+            onEdit={() => setShowEdit(true)}
+            onDelete={() => setShowDelete(true)}
+            settings={chatSettings}
+            actions={close => <>
+              {(mission.status === 'planning' || mission.status === 'running') && <SessionMenuItem icon="↗" label={translate('Nudge orchestrator')} disabled={busy}
+                onSelect={() => { close(); setShowNudge(true); }} />}
+              {!['completed', 'failed', 'cancelled'].includes(mission.status) && <SessionMenuItem icon="■" label={translate('Cancel')} disabled={busy}
+                onSelect={() => { close(); setShowCancel(true); }} />}
+            </>}
+          />
+        </div>
+      </header>
 
       {/*
         머리에 남는 것은 **한 줄짜리 상태**뿐이다. 브리핑·완료조건·계획 요약처럼 길고
         거의 변하지 않는 텍스트는 Brief 탭으로 내렸다 — 그것들이 화면 위쪽을 차지하고
         있으면 정작 지금 움직이는 것(진행 중인 step)을 보려고 매번 스크롤해야 한다.
       */}
-      <div style={{ padding: '10px 16px 0', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="awb-mission-summary">
         <StatusStrip mission={mission} />
-        {/* 미션 전체가 여기서 멈춰 있으므로 접지 않는다 — 사람이 답해야 진행된다. */}
-        <ConfirmRequestPanel steps={mission.steps} accountId={accountId} onDecided={() => load({ silent: true })} />
-        {/* 실행 승인 — 요청한 runtime 이 그 자리에서 멈춰 있으므로 확인 게이트처럼 접지 않는다. */}
-        <ApprovalRequestPanel approvals={mission.approvals} accountId={accountId} onDecided={() => load({ silent: true })} />
+        <div className="awb-mission-notices">
+          {/* 미션 전체가 여기서 멈춰 있으므로 접지 않는다 — 사람이 답해야 진행된다. */}
+          <ConfirmRequestPanel steps={mission.steps} accountId={accountId} onDecided={() => load({ silent: true })} />
+          {/* 실행 승인 — 요청한 runtime 이 그 자리에서 멈춰 있으므로 확인 게이트처럼 접지 않는다. */}
+          <ApprovalRequestPanel approvals={mission.approvals} accountId={accountId} onDecided={() => load({ silent: true })} />
+        </div>
       </div>
 
       {/*
@@ -272,166 +280,128 @@ export default function MissionDetailPage() {
         내용. 한 화면에 전부 쌓아 두던 이전 구조는 스크롤 위치가 곧 맥락이라, 대화를
         읽다가 step 상태를 보려면 화면을 잃어버렸다.
       */}
-      <div className="awb-mission-body" style={{ flex: 1, minHeight: 0, display: 'flex', marginTop: 10, borderTop: `1px solid ${tokens.colors.border}` }}>
-        {compact && <Button variant="secondary" size="sm" aria-expanded={stepsOpen} aria-controls="mission-steps" onClick={() => setStepsOpen((open) => !open)}>{translate('Steps (')}{mission.steps.length}) {stepsOpen ? '▴' : '▾'}</Button>}
+      <div className="awb-mission-body" style={{ borderTop: `1px solid ${tokens.colors.border}` }}>
         <div id="mission-steps" className="awb-mission-rail" hidden={compact && !stepsOpen}>
-        <MissionStepRail
-          steps={mission.steps}
-          graph={mission.graph_spec}
-          stepTimeoutMinutes={mission.step_timeout_minutes}
-          selectedId={selectedStepId}
-          onSelect={(id) => {
-            setSelectedStepId(id);
-            setStepsOpen(false);
-          }}
-          counts={mission.counts}
-          approvalsByStep={approvalsByStep(mission.approvals)}
-          planVersion={mission.plan_version}
-          emptyHint={
-            mission.status === 'draft'
-              ? 'Not started yet — the orchestrator has not been briefed.'
-              : mission.status === 'planning'
-                ? 'The orchestrator is working out the plan. Steps appear the moment it submits one.'
-                : 'No steps in this mission.'
-          }
-        />
+          <MissionStepRail
+            steps={mission.steps}
+            graph={mission.graph_spec}
+            stepTimeoutMinutes={mission.step_timeout_minutes}
+            selectedId={selectedStepId}
+            onSelect={(id) => {
+              setSelectedStepId(id);
+              setStepsOpen(false);
+            }}
+            counts={mission.counts}
+            approvalsByStep={approvalsByStep(mission.approvals)}
+            planVersion={mission.plan_version}
+            emptyHint={
+              mission.status === 'draft'
+                ? 'Not started yet — the orchestrator has not been briefed.'
+                : mission.status === 'planning'
+                  ? 'The orchestrator is working out the plan. Steps appear the moment it submits one.'
+                  : 'No steps in this mission.'
+            }
+          />
         </div>
 
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div
-            className="awb-mission-tabs"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-              padding: '6px 10px',
-              borderBottom: `1px solid ${tokens.colors.border}`,
-            }}
-          >
-            <Tab active={tab === 'session'} onClick={() => setTab('session')}>
-              {selectedStep ? translate('Step session') : translate('Mission conversation')}
-            </Tab>
-            <Tab active={tab === 'graph'} onClick={() => setTab('graph')}>
-              {translate('Plan graph')}</Tab>
-            <Tab active={tab === 'evidence'} onClick={() => setTab('evidence')}>
-              {translate('Evidence')}{evidenceTotal > 0 ? ` (${evidenceTotal})` : ''}
-            </Tab>
-            <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
-              {translate('Brief')}</Tab>
-            {/* 종료된 미션에서도 대화가 되므로(되살리기 입구) 이 옵션은 방이 있으면 보인다. */}
-            {tab === 'session' && !selectedStep && !!mission.room_id && (
-              <label
-                style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tokens.colors.textMuted }}
-              >
-                {translate('User chat')}<select
-                  value={mission.user_chat_mode}
-                  disabled={busy}
-                  data-testid="mission-user-chat-mode"
-                  onChange={(e) =>
-                    act(
-                      () =>
-                        api.updateOrchestrationMission(mission.id, {
-                          account_id: accountId,
-                          // 이 필드 하나만 보낸다 — 브리핑 필드를 함께 실으면 running
-                          // 미션에서 서버의 draft 잠금이 409 를 낸다.
-                          user_chat_mode: e.target.value as OrchestrationUserChatMode,
-                        }),
-                      translate('User chat updated'),
-                    )
-                  }
-                  style={{
-                    fontSize: 11,
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    border: `1px solid ${tokens.colors.border}`,
-                    background: tokens.colors.surface,
-                    color: tokens.colors.textPrimary,
-                  }}
-                >
-                  <option value="open">{translate('Open')}</option>
-                  <option value="participants_only">{translate('Participants only')}</option>
-                  <option value="off">{translate('Off (read-only)')}</option>
-                </select>
-              </label>
-            )}
-          </div>
+        <div
+          className="awb-mission-tabs"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '6px 10px',
+            borderBottom: `1px solid ${tokens.colors.border}`,
+          }}
+        >
+          {compact && <Button variant="secondary" size="sm" aria-expanded={stepsOpen} aria-controls="mission-steps" onClick={() => setStepsOpen((open) => !open)}>{translate('Steps (')}{mission.steps.length}) {stepsOpen ? '▴' : '▾'}</Button>}
+          <Tab active={tab === 'session'} onClick={() => setTab('session')}>
+            {selectedStep ? translate('Step session') : translate('Mission conversation')}
+          </Tab>
+          <Tab active={tab === 'graph'} onClick={() => setTab('graph')}>
+            {translate('Plan graph')}</Tab>
+          <Tab active={tab === 'evidence'} onClick={() => setTab('evidence')}>
+            {translate('Evidence')}{evidenceTotal > 0 ? ` (${evidenceTotal})` : ''}
+          </Tab>
+          <Tab active={tab === 'brief'} onClick={() => setTab('brief')}>
+            {translate('Brief')}</Tab>
+        </div>
 
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            {tab === 'session' ? (
-              selectedStep ? (
-                /*
-                  `key` 로 step 이 바뀌면 패널을 통째로 remount 한다 — 전사·스크롤 위치·
-                  페이징 커서가 이전 step 의 것으로 남지 않게 하는 가장 확실한 경계다.
-                */
-                <StepSessionPanel
-                  key={selectedStep.id}
-                  step={selectedStep}
-                  accountId={accountId}
-                  events={mission.events}
-                  stepTimeoutMinutes={mission.step_timeout_minutes}
-                  onClose={() => setSelectedStepId(null)}
-                />
-              ) : (
-                <MissionConversationPanel
-                  key={mission.id}
-                  missionId={mission.id}
-                  accountId={accountId}
-                  roomId={mission.room_id}
-                  events={mission.events}
-                  live={isLive}
-                  userChatMode={mission.user_chat_mode}
-                  onReopen={reopen}
-                />
-              )
-            ) : tab === 'graph' ? (
-              <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
-                {mission.steps.length === 0 ? (
-                  <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No steps to draw yet.')}</div>
-                ) : (
-                  <>
-                    <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 10 }}>
-                      {mission.counts.done}/{mission.counts.total} {translate('done · up to')} {mission.max_parallel_steps} {translate('in parallel')}{mission.graph_spec
-                        ? translate(' · graph: {0} nodes, {1} edges', { 0: mission.graph_spec.nodes.length, 1: mission.graph_spec.edges.length }) +
-                          (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
-                            ? translate(', {0} loop', { 0: mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length })
-                            : '') +
-                          translate(' · budget {0}/{1} runs', { 0: mission.total_visits, 1: mission.graph_spec.max_total_visits })
-                        : ''}
-                    </div>
-                    <PlanGraph
-                      steps={mission.steps}
-                      graph={mission.graph_spec}
-                      stepTimeoutMinutes={mission.step_timeout_minutes}
-                      selectedId={selectedStepId}
-                      // 그래프에서 카드를 고르면 곧바로 그 step 의 세션으로 넘어간다 —
-                      // 위상을 보다가 "얘는 뭘 하고 있지"로 이어지는 흐름이 자연스럽다.
-                      onSelect={(s) => {
-                        setSelectedStepId(s.id);
-                      }}
-                    />
-                  </>
-                )}
-              </div>
-            ) : tab === 'evidence' ? (
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                <MissionEvidencePane
-                  missionId={mission.id}
-                  accountId={accountId}
-                  steps={mission.steps}
-                  // 미션 상세가 갱신될 때마다(SSE/폴링) 갤러리도 다시 읽는다 — 새 증거는
-                  // 곧 updated_at 이나 증거 수의 변화로 드러난다.
-                  refreshKey={`${mission.updated_at}:${evidenceTotal}`}
-                  onSelectStep={(id) => {
-                    setSelectedStepId(id);
-                  }}
-                />
-              </div>
+        <div className="awb-mission-content">
+          {tab === 'session' ? (
+            selectedStep ? (
+              /*
+                `key` 로 step 이 바뀌면 패널을 통째로 remount 한다 — 전사·스크롤 위치·
+                페이징 커서가 이전 step 의 것으로 남지 않게 하는 가장 확실한 경계다.
+              */
+              <StepSessionPanel
+                key={selectedStep.id}
+                step={selectedStep}
+                accountId={accountId}
+                events={mission.events}
+                stepTimeoutMinutes={mission.step_timeout_minutes}
+                onClose={() => setSelectedStepId(null)}
+              />
             ) : (
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
-                <BriefPane mission={mission} teams={teams} onCopyId={() => void copyMissionId()} />
-              </div>
-            )}
-          </div>
+              <MissionConversationPanel
+                key={mission.id}
+                missionId={mission.id}
+                accountId={accountId}
+                roomId={mission.room_id}
+                events={mission.events}
+                live={isLive}
+                userChatMode={mission.user_chat_mode}
+                onReopen={reopen}
+              />
+            )
+          ) : tab === 'graph' ? (
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+              {mission.steps.length === 0 ? (
+                <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{translate('No steps to draw yet.')}</div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginBottom: 10 }}>
+                    {mission.counts.done}/{mission.counts.total} {translate('done · up to')} {mission.max_parallel_steps} {translate('in parallel')}{mission.graph_spec
+                      ? translate(' · graph: {0} nodes, {1} edges', { 0: mission.graph_spec.nodes.length, 1: mission.graph_spec.edges.length }) +
+                        (mission.graph_spec.edges.some((e) => e.kind === 'loop_back')
+                          ? translate(', {0} loop', { 0: mission.graph_spec.edges.filter((e) => e.kind === 'loop_back').length })
+                          : '') +
+                        translate(' · budget {0}/{1} runs', { 0: mission.total_visits, 1: mission.graph_spec.max_total_visits })
+                      : ''}
+                  </div>
+                  <PlanGraph
+                    steps={mission.steps}
+                    graph={mission.graph_spec}
+                    stepTimeoutMinutes={mission.step_timeout_minutes}
+                    selectedId={selectedStepId}
+                    // 그래프에서 카드를 고르면 곧바로 그 step 의 세션으로 넘어간다 —
+                    // 위상을 보다가 "얘는 뭘 하고 있지"로 이어지는 흐름이 자연스럽다.
+                    onSelect={(s) => {
+                      setSelectedStepId(s.id);
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          ) : tab === 'evidence' ? (
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              <MissionEvidencePane
+                missionId={mission.id}
+                accountId={accountId}
+                steps={mission.steps}
+                // 미션 상세가 갱신될 때마다(SSE/폴링) 갤러리도 다시 읽는다 — 새 증거는
+                // 곧 updated_at 이나 증거 수의 변화로 드러난다.
+                refreshKey={`${mission.updated_at}:${evidenceTotal}`}
+                onSelectStep={(id) => {
+                  setSelectedStepId(id);
+                }}
+              />
+            </div>
+          ) : (
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16 }}>
+              <BriefPane mission={mission} teams={teams} onCopyId={() => void copyMissionId()} />
+            </div>
+          )}
         </div>
       </div>
 
@@ -623,15 +593,9 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
             }}
           />
         )}
-        <span style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
-          {mission.counts.total > 0
-            ? translate('{0} done · {1} working · {2} waiting', { 0: mission.counts.done, 1: mission.counts.inFlight, 2: mission.counts.pending }) +
-              `${mission.counts.awaitingUser ? translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser }) : ''}` +
-              `${mission.counts.awaitingApproval ? translate(' · {0} awaiting your approval', { 0: mission.counts.awaitingApproval }) : ''}` +
-              `${mission.counts.failed ? translate(' · {0} failed', { 0: mission.counts.failed }) : ''}`
-            : mission.counts.awaitingApproval
-              ? translate('{0} awaiting your approval', { 0: mission.counts.awaitingApproval })
-              : translate('No steps yet')}
+        <span className="awb-mission-status-full" style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>{missionCountsLabel(mission)}</span>
+        <span className="awb-mission-status-short" aria-label={missionCountsLabel(mission)} style={{ fontSize: 11.5, color: tokens.colors.textSecondary }}>
+          {mission.counts.done}/{mission.counts.total} {translate('done')}
         </span>
         <div
           style={{
@@ -645,13 +609,7 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
         >
           <div style={{ width: `${pct}%`, height: '100%', background: style.color, transition: 'width 300ms ease' }} />
         </div>
-        <span style={{ fontSize: 11, color: tokens.colors.textMuted }}>
-          {mission.finished_at
-            ? translate('finished {0}', { 0: relativeTime(mission.finished_at) })
-            : mission.started_at
-              ? translate('started {0}', { 0: relativeTime(mission.started_at) })
-              : translate('created {0}', { 0: relativeTime(mission.created_at) })}
-        </span>
+        <span className="awb-mission-status-time" style={{ fontSize: 11, color: tokens.colors.textMuted }}>{missionTimeLabel(mission)}</span>
       </div>
 
       {mission.failure_reason && (
@@ -665,6 +623,21 @@ function StatusStrip({ mission }: { mission: OrchestrationMissionDetail }) {
       )}
     </div>
   );
+}
+
+function missionCountsLabel(mission: OrchestrationMissionDetail) {
+  return (mission.counts.total > 0
+    ? translate('{0} done · {1} working · {2} waiting', { 0: mission.counts.done, 1: mission.counts.inFlight, 2: mission.counts.pending })
+    : translate('No steps yet')) +
+    (mission.counts.awaitingUser ? translate(' · {0} needs your decision', { 0: mission.counts.awaitingUser }) : '') +
+    (mission.counts.awaitingApproval ? translate(' · {0} awaiting your approval', { 0: mission.counts.awaitingApproval }) : '') +
+    (mission.counts.failed ? translate(' · {0} failed', { 0: mission.counts.failed }) : '');
+}
+
+function missionTimeLabel(mission: OrchestrationMissionDetail) {
+  return mission.finished_at ? translate('finished {0}', { 0: relativeTime(mission.finished_at) })
+    : mission.started_at ? translate('started {0}', { 0: relativeTime(mission.started_at) })
+    : translate('created {0}', { 0: relativeTime(mission.created_at) });
 }
 
 function postActionStyle(status: string): { color: string; background: string } {

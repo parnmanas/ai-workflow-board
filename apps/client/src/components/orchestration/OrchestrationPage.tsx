@@ -135,7 +135,12 @@ export default function OrchestrationPage() {
         title={translate('Missions')}
         description={translate('Hand a whole task to a team of agents — the orchestrator plans it, delegates it, and reports back.')}
         actions={
-          <>
+          <Button variant="primary" onClick={() => setShowCreate(true)} disabled={teams.length === 0}>
+            {translate('New mission')}</Button>
+        }
+        moreActions={() => (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {translate('Filter missions')}
             <Select
               aria-label={translate('Filter missions')}
               options={[
@@ -145,10 +150,8 @@ export default function OrchestrationPage() {
               value={filter}
               onChange={(e) => setFilter(e.target.value as 'all' | 'active')}
             />
-            <Button variant="primary" onClick={() => setShowCreate(true)} disabled={teams.length === 0}>
-              {translate('New mission')}</Button>
-          </>
-        }
+          </label>
+        )}
       />
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 20 }}>
