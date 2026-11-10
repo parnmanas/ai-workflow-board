@@ -369,9 +369,16 @@ test('a work item that runs in an Agent Session shows the session beside the cur
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };
   });
   expect(wide.sideBySide).toBe(true);
-  expect(wide.sessionHeight).toBeGreaterThan(480);
-  // 작성란이 화면 밖으로 잘리지 않는다 — 세션 전체가 첫 화면에 들어온다.
+  // 세션이 창 높이를 끝까지 쓴다 — 아래에 빈 띠가 남거나 작성란이 잘리지 않는다. 페이지가 아니라 오른쪽 기록만 스크롤한다.
   expect(wide.sessionBottom).toBeLessThanOrEqual(wide.viewport);
+  expect(wide.viewport - wide.sessionBottom).toBeLessThan(40);
+  expect(await page.evaluate(() => { const c = document.querySelector('.business-content'); return c.scrollHeight <= c.clientHeight + 1; })).toBe(true);
+  for (const height of [700, 1160]) {
+    await page.setViewportSize({ width: 1600, height });
+    await expect.poll(() => page.evaluate(() => innerHeight - document.querySelector('.business-task-session').getBoundingClientRect().bottom)).toBeLessThan(40);
+    expect(await page.evaluate(() => innerHeight - document.querySelector('.business-task-session').getBoundingClientRect().bottom)).toBeGreaterThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1600, height: 900 });
   expect(wide.sessionWidth).toBeGreaterThan(wide.resultsWidth);
   expect(wide.overflow).toBe(false);
   if (process.env.BUSINESS_SESSION_SHOT) await page.screenshot({ path: process.env.BUSINESS_SESSION_SHOT });
