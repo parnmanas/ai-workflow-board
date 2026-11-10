@@ -310,7 +310,7 @@ Account 선택기나 메일 계정별 페이지는 없으며 회사·연결·주
 
 NestJS `/mcp`와 standalone HTTP(`MCP_TRANSPORT=http`)에 같은 비즈니스 서비스를 연결한다. 자동 수집 타이머와 OAuth callback·웹훅 수신은 AWB 웹 서버가 담당하며 standalone MCP 프로세스는 타이머를 중복 실행하지 않는다. 인증된 HTTP 세션의 수동 수집·검토·실행 도구는 양쪽에서 사용할 수 있다. 호출자 인증이 없는 로컬 stdio에서는 비즈니스 도구를 실행하지 못하므로 인증된 HTTP 연결을 사용한다. MCP HTTP 로거는 비즈니스 도구 이름만 남기고 신청자·메일·계약 인수를 생략한다.
 
-`test/business-mcp.test.mjs`는 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback(공급자 MCP 로그인의 붙여 넣기 완료 포함)은 전송용 예외이며, 메일 반자동 답장 승인은 인증된 사람만 수행하는 예외다. 같은 테스트에서 64개 비즈니스 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 핸들러는 이 대응표와 MCP 구현을 함께 추가해야 한다.
+`test/business-mcp.test.mjs`는 비즈니스 REST 핸들러의 MCP 대응을 검사한다. 공급자 서명 웹훅과 브라우저 OAuth callback(공급자 MCP 로그인의 붙여 넣기 완료 포함)은 전송용 예외이며, 메일 반자동 답장 승인은 인증된 사람만 수행하는 예외다. 업무 상세 진입 시 대화 화면을 준비하는 `taskSession`과 사용자가 응답 없는 실행을 중단으로 표시하는 `abandonRun`도 화면 전용 예외다. 에이전트는 `start_business_work`로 요청하고 `complete_business_task_run`으로 자신의 결과를 제출하며, 화면의 복구 동작으로 실행을 우회하지 않는다. 예외는 테스트의 `REST_ONLY`에 각각 사유를 기록한다. 같은 테스트에서 64개 비즈니스 도구를 실제 HTTP MCP로 호출하고 소유권·권한·revision·문서·불확실한 발송 대조를 검증한다. 새 비즈니스 REST 작업은 이 대응표와 MCP 구현을 함께 추가해야 한다. 화면·전송 전용 경로라면 `REST_ONLY`에 구체적인 제외 사유를 명시한다.
 
 ## 소유권과 저장
 

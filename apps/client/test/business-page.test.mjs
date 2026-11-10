@@ -513,8 +513,8 @@ test('work sections fold and unfold; the agent conversation starts folded and fo
   // 진행 과정: 펼친 채 시작, 접으면 필터와 본문이 사라지고 저장된다.
   assert.ok(panel('진행 과정과 변경 내역').querySelector('select'), 'filter visible while open');
   click(toggle('진행 과정과 변경 내역')); await flush();
-  assert.equal(panel('진행 과정과 변경 내역').querySelector('select'), null, 'filter hidden while folded');
-  assert.equal(panel('진행 과정과 변경 내역').querySelector('.business-fold-body'), null);
+  assert.equal(Boolean(panel('진행 과정과 변경 내역').querySelector('select')), false, '접으면 필터가 숨겨진다');
+  assert.equal(Boolean(panel('진행 과정과 변경 내역').querySelector('.business-fold-body')), false);
   assert.deepEqual(JSON.parse(localStorage.getItem(BUSINESS_FOLD_STORAGE_KEY)), { conversation: false, history: true });
 
   // 다른 업무를 열어도(다시 마운트) 같은 접힘이 복원된다.
@@ -524,7 +524,7 @@ test('work sections fold and unfold; the agent conversation starts folded and fo
   assert.equal(toggle('진행 과정과 변경 내역').getAttribute('aria-expanded'), 'false');
   // 작성란도 접힌다 — 접혀도 페이지 헤더의 주요 작업 버튼은 그대로라 에이전트에게 맡기는 경로가 막히지 않는다.
   click(toggle('에이전트에게 요청')); await flush();
-  assert.equal(panel('에이전트에게 요청').querySelector('textarea'), null);
+  assert.equal(Boolean(panel('에이전트에게 요청').querySelector('textarea')), false);
   assert.ok(button(container, '에이전트에게 맡기기'));
 });
 
@@ -546,8 +546,8 @@ test('a work item that runs in an Agent Session shows that session beside the cu
   } });
   click(button(container, '설립 계획 정하기')); await flush(); await flush();
   assert.ok(container.querySelector('.business-task-workspace'));
-  assert.equal(container.querySelector('.business-task-session'), null);
-  assert.equal(container.querySelector('.business-task-split'), null);
+  assert.equal(Boolean(container.querySelector('.business-task-session')), false);
+  assert.equal(Boolean(container.querySelector('.business-task-split')), false);
   assert.ok(container.querySelector('.business-task-flow > .business-panel'), 'panels keep their spacing wrapper');
   assert.equal(calls.some(([name]) => /AgentSession/i.test(name)), false);
 });
@@ -563,6 +563,6 @@ test('entering a previously delegated work item without a session asks the serve
   click(button(container, '설립 계획 정하기')); await flush(); await flush(); await flush();
   const ensures = calls.filter(([name]) => name === 'ensureBusinessTaskSession');
   assert.deepEqual(ensures.map(call => call.slice(1)), [['company-1', 'task-1']]);
-  assert.equal(container.querySelector('.business-task-session'), null);
+  assert.equal(Boolean(container.querySelector('.business-task-session')), false);
   assert.ok(container.querySelector('.business-task-workspace'));
 });

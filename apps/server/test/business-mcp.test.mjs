@@ -21,8 +21,7 @@ import { registerBusinessMailTools } from '../dist/modules/mcp/tools/business-ma
 import { MAIL_CONNECTORS } from '../dist/modules/business/mail/mail-registry.js';
 import { sessionStore } from '../dist/modules/mcp/internal/session-store.js';
 
-// Every business REST operation must have an MCP counterpart. Browser OAuth callbacks
-// and signed provider webhooks are transports, not agent-callable operations.
+// 비즈니스 REST 작업은 MCP 대응을 갖는다. 브라우저 전송과 사용자 화면 조작은 아래 사유로 제외한다.
 const REST_TO_MCP = {
   BusinessMailController: { connections: 'list_business_mail_connections', configure: 'configure_business_mail_connection', sync: 'sync_business_mail', list: 'list_business_mail', detail: 'get_business_mail', confirm: 'confirm_business_mail', send: 'send_business_mail', reply: 'get_business_mail_reply', startReply: 'start_business_mail_reply', replies: 'list_business_mail_replies', editReply: 'submit_business_mail_reply' },
   BusinessController: {
@@ -54,9 +53,15 @@ const REST_TO_MCP = {
     send: 'send_business_trademark_action', reconcile: 'reconcile_business_trademark_action', document: 'get_business_trademark_document',
   },
 };
-// Review approval is intentionally human-only: MCP sessions cannot authenticate a human decision.
-// Provider sign-in completion (redirect callback or pasted loopback address) is a browser OAuth step of the owner.
-const TRANSPORT_ONLY = ['BusinessMailController.decideReply', 'BusinessMcpController.complete', 'BusinessMcpCallbackController.callback', 'BusinessTrademarkIntegrationCallbacksController.callback', 'BusinessTrademarkIntegrationCallbacksController.webhook'];
+const REST_ONLY = {
+  'BusinessMailController.decideReply': '답장 승인은 인증된 사람만 수행한다.',
+  'BusinessMcpController.complete': '소유자가 브라우저에서 공급자 로그인을 완료한다.',
+  'BusinessMcpCallbackController.callback': '브라우저 OAuth 콜백이다.',
+  'BusinessTrademarkIntegrationCallbacksController.callback': '브라우저 OAuth 콜백이다.',
+  'BusinessTrademarkIntegrationCallbacksController.webhook': '공급자가 서명한 웹훅이다.',
+  'BusinessController.taskSession': '사용자가 업무 상세를 열 때 기존 업무의 대화 화면을 준비한다. 에이전트의 작업 요청은 start_business_work를 거친다.',
+  'BusinessController.abandonRun': '사용자가 응답 없는 실행을 중단으로 표시한다. 담당 에이전트는 complete_business_task_run으로 자기 결과를 제출한다.',
+};
 const approval = row => ({ payload_digest: row.payload_digest, revision: row.revision, confirm: true });
 
 test('Business MCP: full surface, real HTTP execution and live ownership', { timeout: 120000 }, async t => {
@@ -102,7 +107,7 @@ test('Business MCP: full surface, real HTTP execution and live ownership', { tim
       }
     }
     const mapped = Object.entries(REST_TO_MCP).flatMap(([controller, methods]) => Object.keys(methods).map(method => `${controller}.${method}`));
-    assert.deepEqual(actual.sort(), [...mapped, ...TRANSPORT_ONLY].sort(), 'new REST operations require an MCP mapping');
+    assert.deepEqual(actual.sort(), [...mapped, ...Object.keys(REST_ONLY)].sort(), '새 REST 작업에는 MCP 대응 또는 명시적인 화면·전송 전용 사유가 필요하다');
     for (const name of Object.values(REST_TO_MCP).flatMap(Object.values)) assert.ok(tools.some(t => t.name === name), name);
     assert.equal(tools.length, 64);
     for (const tool of tools) assert.ok(['caller', 'full'].includes(TOOL_AUTHZ_TABLE[tool.name]), tool.name);
