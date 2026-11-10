@@ -801,9 +801,31 @@ self-update 는 npm-global 설치 모드에서만 동작한다. 아래는 현재
 | 개시 | **설치를 스스로 시작하지 않는다.** 외부 트리거(관리자 UI 의 `update_manager` 명령 또는 `SIGUSR1`)가 있어야 한다 | `agent-manager-commands.ts`, `main.ts` |
 | 공급망 검증 | 대상 버전의 SLSA provenance 를 확인하고 증명이 없으면 **설치를 거부한다**(fail-closed) | `self-update.ts` → `parseProvenanceView()` |
 | 진행 중 작업 | **기다리지 않는다.** 계획된 재시작(업데이트·재기동·`restart_manager`)은 떠나기 직전에 끊길 작업을 `restart-resume.json` 에 저장하고 바로 재시작한다. 새 프로세스가 SSE 에 붙으면 AWB 에 넘기고(`POST /api/agent-manager/restart-resume`) 지운다 — 아래 "재시작으로 끊긴 작업" | `self-update.ts` → `setPlannedRestartHook()`, `restart-resume.ts` |
-| 재기동 | 분리된 임시 헬퍼가 매니저 종료를 기다렸다가 `npm i -g` 후 재기동한다 | `NPM_GLOBAL_UPDATER_SOURCE` |
+| 재기동 | Windows: 분리된 임시 헬퍼가 매니저 종료를 기다렸다가 `npm i -g` 후 재기동한다. 재기동은 **이 홈의 서비스**(예약 작업 · launchd 작업)가 있으면 그 서비스로(`schtasks /Run` · `launchctl kickstart`), 없을 때만 분리 자식(`--force`)으로 띄운다. systemd 는 exit 1 → `Restart=on-failure`. 아래 "한 장비의 여러 매니저" | `NPM_GLOBAL_UPDATER_SOURCE`, `reExecManager()`, `service-supervision.ts` |
 | 실행본 ≠ 설치본 | "현재 버전" 은 **부팅 때 잡은 실행 버전**(`setRunningVersion`)이다. 프로세스 밖에서 `npm i -g` 가 돌아 디스크(`dist/package.json`)만 새 버전이면 하트비트가 `installed_version` + `restart_required` 를 광고하고, `update_manager` 는 설치를 건너뛰고 **재기동만** 한다(디스크 빌드 기동 probe → 부팅 검증 arm → 끊길 작업 저장 → re-exec). 레지스트리가 실행 버전보다 새 것이 없으면 `upToDate` 로 ok ack | `self-update.ts` → `runNpmGlobalSelfUpdate()`, `UpdateChecker.status()` |
 | 직접 실행 보호 | 락 소유자가 systemd 감독 아래 있거나 contender 가 AWB 세션(`AWB_SESSION_ID`) 안이면 `--force` 는 소유자를 죽이지 않는다: 이 빌드가 더 새로우면 SIGUSR2 로 재기동을 **넘기고** exit 0(`EAGENTHANDOFF`), 아니면 거부 exit 2(`EAGENTSUPERVISED`). 단 handoff 는 **SIGUSR2 가 있는 플랫폼 전용**이다 — win32 에는 그 시그널이 없어 `process.kill` 이 던지므로, 그 플랫폼에서는 더 새 빌드여도 handoff 를 내지 않고 거부한다(거부 사유가 관리자 UI Restart / `restart_manager` 를 안내한다). 예전에는 시그널 실패를 삼킨 채 `EAGENTHANDOFF` → exit 0 을 내서 일어나지 않은 재기동을 성공으로 보고했다. 판정이 보는 플랫폼의 테스트 seam 은 `AWB_AGENT_MANAGER_PLATFORM` 이다. `AWB_AGENT_MANAGER_TAKEOVER=1` 일 때만 예전 takeover. 감독 판정은 **부모 프로세스**(`systemd --user`)로 한다 — INVOCATION_ID 는 데스크톱 앱의 자식 셸까지 물려받아 근거가 못 된다(테스트 seam `AWB_AGENT_MANAGER_SUPERVISOR`) | `agent-lockfile.ts` → `decideForceTakeover()`, `supervisor.ts` |
+
+### 한 장비의 여러 매니저 (2026-11-09)
+
+한 장비에 매니저를 여러 개(홈마다 하나, 서로 다른 AWB) 띄울 수 있다. 이들은 `npm i -g` 로 깔린
+**패키지 디렉터리 하나**를 나눠 쓰므로, 업데이트 상태도 그 설치본 하나에 묶는다
+(`host-shared.ts`). PC.VX(Windows, kakaovx + parnmanas) 실측에서 고친 것들이다.
+
+| 무엇 | 동작 | 근거 |
+|---|---|---|
+| 공유 디렉터리 | 매니저 홈들의 부모에 `awb-agent-manager-host/`. 홈 이름이 `awb-agent-manager[-<이름>]` 일 때만 생긴다(테스트 임시 홈끼리 핀을 나누지 않게). 관례 밖이면 `AWB_AGENT_MANAGER_HOST_DIR` 로 지정. 부팅 로그 첫머리에 공유 여부가 찍힌다 | `hostDirForHome()`, `describeHostSharing()` |
+| 설치는 한 번에 하나 | 같은 설치본에 대한 `npm install -g`·프로브·되돌리기를 장비 잠금(`locks/manager-install-*.lock`) 안에서 한다. Windows 는 매니저가 내려가기 **전에** 헬퍼 pid 이름으로 잠금을 잡아 둔다 — 그 틈에 예약 작업이 반쯤 바뀐 빌드로 매니저를 띄워 부팅 검증이 "부팅 2회" 로 세어지고 멀쩡한 v1.6.338 이 되돌려졌다(11-05). 잠금이 살아 있는 동안 부팅하는 매니저는 exit 75 로 물러나고 서비스가 다시 띄운다 | `lockSharedInstall()`, 헬퍼 `acquireLock`, `main.ts` |
+| 따라가기 | 다른 매니저가 **설치하고 부팅 검증까지 끝낸** 빌드가 디스크에 있으면 재시작해 싣는다(30초 주기, 디스크 진입점 probe 뒤, 버전당 2회까지). 설치 중·검증 중이면 기다리고, 사람이 셸에서 깐 빌드·`off`·다른 버전 고정 채널은 따라가지 않는다(예전처럼 "Restart to apply"). 따라간 재시작은 부팅 검증을 걸지 않는다 — 따라간 쪽 사정으로 공유 디스크를 되돌리면 멀쩡한 쪽까지 끌어내린다 | `shared-install-follow.ts`, `UpdateChecker.followSharedInstallNow()` |
+| 검증 표시 · 핀 공유 | 설치한 쪽이 `installs/<패키지 해시>/boot-verify.json` 에 `verifying` 을 남기고, 그 빌드로 하트비트를 성공한 매니저가 `verified` 로 바꾼다. 되돌린 버전의 핀은 자기 홈과 `installs/<해시>/self-update-pin.json` 양쪽에 쓰고, 핀 판정은 둘 중 최근 것을 본다. 이미 다른 매니저가 검증한 빌드로 `update_manager` 가 재기동만 할 때는 검증을 다시 걸지 않는다 | `writeHostVerify()`, `readEffectiveUpdatePin()` |
+| 서비스 이름 | 기본 홈은 예전 이름(`awb-agent-manager` · `com.awb.agent-manager`) 그대로, 다른 홈은 홈 이름에서 딴 접미사(`awb-agent-manager-parnmanas`). 예전엔 이름이 하나라 두 번째 `service install` 이 첫 작업을 덮었고, 재기동이 **다른 홈의 작업**을 깨워 정작 자기는 돌아오지 못했다(10-31 약 50시간 다운). Windows launcher 도 이제 `AWB_AGENT_MANAGER_HOME` 을 싣는다. 재기동 전에 작업 정의가 이 홈의 launcher 를 띄우는지 확인한다 | `serviceNameForHome()`, `taskXmlBelongsToHome()` |
+| 서비스로 재기동 | 업데이트·`restart_manager`·되돌리기 모두 이 홈의 서비스가 있으면 헬퍼가 이 pid 종료를 기다렸다가 서비스 명령으로 띄운다. Windows 의 자기 종료는 `process.emit('SIGTERM')` 으로 정리 처리기를 태워 exit 0 — `process.kill(self)` 는 처리기 없는 TerminateProcess(exit 1)라 RestartOnFailure 가 설치 도중 매니저를 띄웠다 | `reExecManager()`, `terminateSelfGracefully()` |
+| 서비스 밖 프로세스 | 예전 빌드의 재기동이 분리 자식으로 띄운 매니저는 서비스 밖이라, 서비스가 따로 띄운 프로세스가 락에 막혀 exit 2 를 반복했다(MacBook 10초마다 · PC.VX 1분마다, 하루 수천 건의 서버 오류 로그). 부팅 2분 뒤 "이 홈의 서비스가 있고 그 프로세스가 내가 아님" 이 **확인되면** 서비스로 한 번 넘긴다(6시간에 한 번) | `service-handback.ts` |
+| 셸 인용 | Windows 에서 절대 경로 실행 파일은 셸을 거치지 않는다 — `C:\Program Files\nodejs\node.exe` 가 cmd.exe 에서 끊겨 디스크 빌드 probe 가 늘 "배치 파일이 아닙니다" 로 실패했다(PC.VX 10-31) | `useShellFor()` |
+| CLI · ACP | CLI 설치본 업데이트와 ACP 어댑터 설치를 같은 장비 잠금으로 직렬화하고, 끝나면 `stamps/` 에 알린다 — 다른 매니저는 30초 안에 설치본·모델·어댑터를 다시 읽는다(예전엔 3시간). 운영자가 올리는 ACP 어댑터는 이제 `awb-agent-manager-host/acp-adapters` 하나에 설치하고, 예전 홈별 설치본도 후보로 본다(더 새 것) | `main.ts` `withCliUpdateLock`, `HostStampWatcher`, `bundled-acp.ts` |
+
+고친 빌드로 처음 올라가는 업데이트는 **옛 빌드의** 경로로 설치·재기동한다. 그래서 그 한 번은
+예전과 같이 서비스 밖에서 뜰 수 있다 — 위 "서비스 밖 프로세스" 가 2분 뒤 서비스로 넘긴다. 같은
+이유로 옛 빌드를 돌리는 매니저는 따라가기를 하지 않는다(디스크가 바뀌면 "Restart to apply").
 
 ### 재시작으로 끊긴 작업 (2026-10-22)
 
@@ -881,8 +903,11 @@ self-update 는 npm-global 설치 모드에서만 동작한다. 아래는 현재
 | 부팅 실패 (설치는 성공했으나 새 빌드가 하트비트 1회 성공에 실패) | **없음** | — | 즉시 이전 버전으로 복귀하고 그 버전으로 핀한다. 같은 버전을 다시 설치하지 않는다 |
 
 부팅 실패에 재시도를 두지 않는 이유는 단순하다 — 재시도가 곧 불량 버전 재설치 루프다.
-같은 이유로 **핀 해제는 사람만 한다.** 자동 해제 경로를 두면 루프가 되살아난다. 어느
-경로에서도 무한 재시도는 없다.
+같은 이유로 **핀 해제는 사람만 한다** — 예외는 하나, 핀이 가리키는 버전(또는 그보다 옛
+버전)으로 매니저가 떠서 **하트비트를 한 번 성공**했을 때다(`clearRefutedUpdateFailures`). 그
+관측이 "이 빌드는 부팅하지 못한다" 를 반증하고, 나쁜 빌드는 하트비트에 닿지 못하므로 루프를
+만들지 않는다. 지금 돌고 있는 버전의 실패는 하트비트로도 보고하지 않는다(`runningFailureFree`).
+어느 경로에서도 무한 재시도는 없다.
 
 **상한을 셀 곳이 지금은 없다 — 영속 상태가 정책의 전제다.** 설치는 분리된 헬퍼가 수행하고,
 부모 프로세스는 헬퍼를 spawn 한 뒤 **설치가 시작되기도 전에 종료한다**(`detached` spawn +

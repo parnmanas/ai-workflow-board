@@ -98,6 +98,20 @@ For system-scope removal, use `service uninstall --system`.
 - Windows user tasks start at logon. System scope uses a boot-time task running as `LocalSystem`; that account has different files, credentials, and PATH from your user. The service uses a hidden script wrapper to avoid a console window.
 - macOS uses launchd; logs are written to `/tmp/awb-agent-manager.log`.
 
+### Several managers on one machine
+
+One machine can run a manager per AWB server: give each its own home and install a service from that home.
+
+```bash
+# Windows (PowerShell); the default home stays %APPDATA%\awb-agent-manager
+$env:AWB_AGENT_MANAGER_HOME = "$env:APPDATA\awb-agent-manager-second"
+awb-agent-manager setup --url <awb-url> --token <pairing-token>
+awb-agent-manager service install   # registers task "awb-agent-manager-second"
+```
+
+- Name extra homes `awb-agent-manager-<name>` next to the default one. Their service is named after the home (`awb-agent-manager-<name>`, launchd `com.awb.agent-manager.<name>`), so it neither overwrites nor restarts the other manager's service.
+- The managers share the global npm install. Updating one installs the new build for all of them. The others restart into it once it has passed its boot check. CLI and ACP adapter updates are shared the same way. The shared state is kept in `awb-agent-manager-host/` beside the homes. For a home that does not follow the naming convention, set `AWB_AGENT_MANAGER_HOST_DIR`.
+
 See [process ownership](../../docs/agent-manager.md#process-and-session-ownership) and [self-update policy](../../docs/agent-manager.md#self-update-policy) before changing an existing service.
 
 ## Configuration

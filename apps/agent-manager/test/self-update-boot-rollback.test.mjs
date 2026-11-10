@@ -1144,7 +1144,7 @@ test('runSelfUpdate: 창 안에서는 백오프가 지난 재시도가 진행된
  * 재기동된 진입점은 `--force` 를 보고 로그를 남기므로, 되돌린 매니저가 실제로
  * 다시 떴는지를 간접 신호가 아니라 그 로그로 단언할 수 있다.
  */
-function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) {
+function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion, shared = false }) {
   const base = mkdtempSync(join(tmpdir(), 'awb-helper-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
 
@@ -1156,6 +1156,15 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
   const installLog = join(base, 'installs.txt');
   const relaunchLog = join(base, 'relaunch.txt');
   const pinPath = join(base, 'self-update-pin.json');
+  // 같은 설치본을 쓰는 다른 매니저와 나누는 상태(host-shared.ts) — 핀 · 설치 잠금 · 검증 표시.
+  const sharedDir = join(base, 'host', 'installs', 'k');
+  const sharedPinPath = shared ? join(sharedDir, 'self-update-pin.json') : '';
+  const lockPath = shared ? join(base, 'host', 'locks', 'manager-install.lock') : '';
+  const verifyPath = shared ? join(sharedDir, 'boot-verify.json') : '';
+  if (shared) {
+    mkdirSync(sharedDir, { recursive: true });
+    writeFileSync(verifyPath, JSON.stringify({ version: expectVersion, phase: 'verifying' }), 'utf8');
+  }
   const entrypoint = join(distDir, 'main.js');
   const versionFile = join(distDir, 'VERSION');
 
@@ -1233,6 +1242,10 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
       expectVersion,
       previousSpec,
       pinPath,
+      sharedPinPath,
+      lockPath,
+      verifyPath,
+      '',
       process.execPath,
       entrypoint,
     ],
@@ -1263,8 +1276,19 @@ function runHelper(t, { installSpec, expectVersion, previousSpec, badVersion }) 
     ? readFileSync(installLog, 'utf8').split('\n').filter(Boolean)
     : [];
   const pin = existsSync(pinPath) ? JSON.parse(readFileSync(pinPath, 'utf8')) : null;
+  const sharedPin = sharedPinPath && existsSync(sharedPinPath) ? JSON.parse(readFileSync(sharedPinPath, 'utf8')) : null;
   const finalVersion = existsSync(versionFile) ? readFileSync(versionFile, 'utf8').trim() : '';
-  return { status: r.status, installs, pin, finalVersion, relaunched, helperPath };
+  return {
+    status: r.status,
+    installs,
+    pin,
+    sharedPin,
+    lockLeft: Boolean(lockPath && existsSync(lockPath)),
+    verifyLeft: Boolean(verifyPath && existsSync(verifyPath)),
+    finalVersion,
+    relaunched,
+    helperPath,
+  };
 }
 
 test('헬퍼: 새 빌드가 뜨지 않으면 이전 버전을 다시 설치하고 핀을 남긴다', (t) => {
@@ -1288,6 +1312,38 @@ test('헬퍼: 새 빌드가 뜨지 않으면 이전 버전을 다시 설치하�
   assert.match(r.pin.reason, /2\.0\.0/, '핀 사유에 어떤 빌드가 문제였는지 남아야 한다');
   // 복귀했다는 사실이 종료 코드로도 드러난다.
   assert.equal(r.status, 1);
+});
+
+test('헬퍼: 핀은 실패한 버전(badVersion)을 담고 같은 설치본의 공유 상태에도 남는다', (t) => {
+  // 예전 헬퍼 핀은 badVersion 없이 `{ version, reason }` 만 써서 readUpdatePin 이 스킵 대상을 찾지 못했다
+  // — 헬퍼가 되돌린 버전이 다음 tick 에 다시 오퍼됐다.
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: 'awb-agent-manager@1.0.0',
+    badVersion: '2.0.0',
+    shared: true,
+  });
+  assert.deepEqual(r.installs, ['2.0.0', '1.0.0']);
+  assert.equal(r.pin.badVersion, '2.0.0');
+  assert.match(r.pin.reason, /\(bad build v2\.0\.0\)/);
+  assert.deepEqual(r.sharedPin, r.pin, '같은 설치본을 쓰는 다른 매니저도 같은 핀을 본다');
+  assert.equal(r.lockLeft, false, '설치가 끝나면 잠금을 푼다');
+  assert.equal(r.verifyLeft, false, '되돌렸으면 검증 대기 표시를 지운다 — 기다리던 쪽이 되돌린 디스크로 판단한다');
+});
+
+test('헬퍼: 정상 설치는 공유 잠금을 풀고 검증 대기 표시는 남긴다(새 매니저의 하트비트가 검증한다)', (t) => {
+  const r = runHelper(t, {
+    installSpec: 'awb-agent-manager@2.0.0',
+    expectVersion: '2.0.0',
+    previousSpec: 'awb-agent-manager@1.0.0',
+    badVersion: 'never-matches',
+    shared: true,
+  });
+  assert.deepEqual(r.installs, ['2.0.0']);
+  assert.equal(r.sharedPin, null);
+  assert.equal(r.lockLeft, false);
+  assert.equal(r.verifyLeft, true);
 });
 
 test('헬퍼: 새 빌드가 정상이면 되돌리지 않고 핀도 만들지 않는다', (t) => {

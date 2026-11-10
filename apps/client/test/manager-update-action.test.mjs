@@ -52,3 +52,15 @@ test('update failure badge: skipped version shows why it is not offered; new ver
   });
   assert.equal(history.label, '(v1.6.265 failed before)');
 });
+
+test('update failure badge: a failure of the running (or an older) version is not shown', () => {
+  // PC.VX 2026-11-09: 핀이 남은 구버전 매니저가 그 버전을 멀쩡히 돌리며 "(up to date) ⚠ (v1.6.338 skipped)" 를 보였다.
+  const running = {
+    plugin_version: '1.6.338', latest_version: '1.6.338', update_available: false,
+    update_skipped_version: '1.6.338', update_failed_version: '1.6.338',
+    update_failure_reason: 'boot verification failed for v1.6.338 (bad build v1.6.338)',
+  };
+  assert.equal(updateFailureBadge(running), null);
+  assert.equal(updateFailureBadge({ ...running, plugin_version: '1.6.340', update_skipped_version: null }), null, '지나온 버전의 실패도 숨긴다');
+  assert.equal(updateFailureBadge({ ...running, plugin_version: '1.6.336', update_skipped_version: '1.6.338' }).label, '(v1.6.338 skipped)', '아직 올라가지 못한 버전의 실패는 보인다');
+});

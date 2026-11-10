@@ -68,6 +68,18 @@ export function managerUpdateAction(inst: ManagerUpdateActionInput): ManagerUpda
   return { kind: 'latest', label: translate('최신'), title: translate('올릴 것이 없다.') };
 }
 
+/** `a` 가 `b` 보다 새롭지 않은가(x.y.z 코어만). 둘 중 하나라도 못 읽으면 false. */
+function notNewerThan(a: string, b: string): boolean {
+  const pa = /^(\d+)\.(\d+)\.(\d+)/.exec(a);
+  const pb = /^(\d+)\.(\d+)\.(\d+)/.exec(b);
+  if (!pa || !pb) return false;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d) return d < 0;
+  }
+  return true;
+}
+
 /** 버전 옆 배지 문구 — restart 가 필요할 때만. */
 export function installedVersionBadge(inst: ManagerUpdateActionInput): string | null {
   if (!inst.restart_required || !inst.installed_version) return null;
@@ -82,6 +94,10 @@ export function updateFailureBadge(inst: ManagerUpdateActionInput): { label: str
   const failed = inst.update_failed_version;
   const reason = inst.update_failure_reason;
   if (!failed && !reason) return null;
+  // 지금 돌고 있는 버전(또는 이미 지나온 옛 버전)의 실패는 아무것도 막지 않는다 — 그 버전으로 매니저가
+  // 떠서 하트비트를 보내고 있다. 구버전 매니저는 이 판정 없이 핀을 그대로 보고하므로 화면에서도 거른다
+  // (PC.VX: "v1.6.338 (up to date) ⚠ (v1.6.338 skipped)").
+  if (failed && notNewerThan(failed, inst.plugin_version)) return null;
   const skipped = inst.update_skipped_version;
   return {
     label: skipped && skipped === failed ? translate('(v{0} skipped)', { 0: failed }) : translate('(v{0} failed before)', { 0: failed || '?' }),

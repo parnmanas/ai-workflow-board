@@ -55,18 +55,43 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, win32 as win32Path } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { log } from './logging.js';
 import { detectSupervisor } from './supervisor.js';
 import { AGENT_MANAGER_HOME } from './constants.js';
 import { WINDOWS_TASK_NAME } from './service-install.js';
+import { detectServiceSupervision, type ServiceSupervision } from './service-supervision.js';
 import { isPidAlive } from './orphan-cleanup.js';
+import {
+  HostLockBusyError,
+  acquireHostLock,
+  clearHostVerify,
+  defaultHostDir,
+  hostLockPath,
+  hostVerifyPath,
+  hostVerifyPending,
+  installStateDir,
+  liveHostLockHolder,
+  managerInstallLockName,
+  readHostVerify,
+  writeHostVerify,
+  type HostLockHolder,
+} from './host-shared.js';
+import {
+  clearFollowAttempts,
+  evaluateSharedInstallFollow,
+  readFollowAttempts,
+  recordFollowAttempt,
+  type FollowDecision,
+} from './shared-install-follow.js';
 import {
   BOOT_VERIFY_TIMEOUT_MS,
   MAX_INSTALL_ATTEMPTS,
   clearBootVerificationRecord,
+  clearRefutedUpdatePin,
+  readEffectiveUpdatePin,
   evaluateBootProbe,
   evaluateBootVerification,
   evaluateInstallRetryGate,
@@ -158,9 +183,14 @@ export function isPinnedBadVersion(pin: UpdatePinRecord | null, version: string 
  * AI agent·대시보드에 보여줄 실패 투영. 핀 사유가 있으면 그것을, 없으면 진행 중
  * 부팅 기록의 실패 사유를 쓴다. 둘 다 없으면 null — "실패 없음"과 "모름"을
  * 구분하기 위해 빈 문자열이 아니라 null 로 둔다.
+ *
+ * 핀은 같은 설치본을 쓰는 인스턴스들이 나누는 핀까지 본다(sharedDir, host-shared.ts).
  */
-export function failureProjection(stateDir?: string): { failed: string | null; reason: string | null } {
-  const pin = readUpdatePin(stateDir);
+export function failureProjection(
+  stateDir?: string,
+  sharedDir: string | null = null,
+): { failed: string | null; reason: string | null } {
+  const pin = readEffectiveUpdatePin(stateDir, sharedDir);
   if (pin?.badVersion) return { failed: pin.badVersion, reason: pin.reason || null };
   const record = readBootVerificationRecord(stateDir);
   if (
@@ -171,6 +201,33 @@ export function failureProjection(stateDir?: string): { failed: string | null; r
     return { failed: record.targetVersion || null, reason: record.reason };
   }
   return { failed: null, reason: null };
+}
+
+/**
+ * 지금 돌고 있는 버전은 "실패한 버전" 으로 보고하지 않는다. 그 버전으로 이 프로세스가 떠 있다는
+ * 사실이 "부팅하지 못한다" 를 반증한다 — 첫 하트비트 성공이 그 핀을 지우기 전(부팅 직후 한
+ * 주기)에도 화면이 "(up to date) ⚠ (vX skipped)" 처럼 모순되지 않게 한다.
+ */
+export function runningFailureFree(
+  failure: { failed: string | null; reason: string | null },
+  runningVersion: string,
+): { failed: string | null; reason: string | null } {
+  if (!failure.failed || !/^\d+\.\d+\.\d+/.test(runningVersion)) return failure;
+  // 지금 버전이거나 그보다 옛 버전의 실패는 더 이상 아무것도 막지 않는다 — 이미 그 버전을
+  // 지나왔다(자동 경로는 내려가지 않는다). 남겨 두면 "(vX failed before)" 가 영원히 붙는다.
+  return compareSemver(failure.failed, runningVersion) <= 0 ? { failed: null, reason: null } : failure;
+}
+
+/**
+ * 같은 설치본을 쓰는 인스턴스들과 나누는 디렉터리. `hostDir` 를 직접 주면 그것, stateDir 만
+ * 준 호출(테스트의 격리 주입)은 공유하지 않음, 둘 다 없으면 이 홈의 공유 디렉터리.
+ */
+export function resolveSharedDirs(opts: { stateDir?: string; hostDir?: string | null }): {
+  hostDir: string | null;
+  installDir: string | null;
+} {
+  const hostDir = opts.hostDir !== undefined ? opts.hostDir : opts.stateDir ? null : defaultHostDir();
+  return { hostDir, installDir: hostDir ? installStateDir(hostDir) : null };
 }
 
 /** `awb-agent-manager@<channel>` — the npm spec for the active channel. */
@@ -424,6 +481,11 @@ export interface SelfUpdateOpts {
    *  (`$AWB_AGENT_MANAGER_HOME`). 테스트가 tmp 디렉터리로 격리하기 위한 주입점.  */
   stateDir?: string;
   /**
+   * 같은 설치본을 쓰는 다른 매니저와 나누는 디렉터리(host-shared.ts). null 이면 나누지 않는다.
+   * 생략하면: stateDir 를 주입한 호출(테스트 격리)은 null, 아니면 이 홈의 공유 디렉터리.
+   */
+  hostDir?: string | null;
+  /**
    * 지금이 유지보수 창 안인지 (ticket 23753dc7 — 정책 G 의 설치 실패 재시도
    * 게이트 입력). 생략하면 `AWB_AGENT_MANAGER_UPDATE_WINDOW` 를 읽어 판정한다
    * (미설정이면 항상 창 안 = 현행 동작). 테스트가 벽시계에 의존하지 않도록 값을
@@ -555,6 +617,10 @@ export function readInstalledVersion(): string {
 
 export function restartRequiredFor(running: string, installed: string): boolean {
   if (!/^\d+\.\d+\.\d+/.test(running) || !/^\d+\.\d+\.\d+/.test(installed)) return false;
+  // 0.0.0 은 "읽지 못했다" 다(readInstalledVersion 의 대체값) — npm 이 패키지를 갈아끼우는 동안
+  // dist/package.json 이 잠깐 없다. PC.VX 실측: 다른 매니저의 설치 도중
+  // "installed build v0.0.0 on disk differs from running v1.6.336" 이 찍혔다.
+  if (installed === '0.0.0') return false;
   return compareSemver(installed, running) !== 0;
 }
 
@@ -617,12 +683,22 @@ export function compareSemver(a: string, b: string): number {
  * detection at construction time. Args here are fixed literals — no user input —
  * so shell quoting is a non-issue.
  */
+/**
+ * Windows 에서 셸을 거칠지. `npm` 같은 맨 이름은 `npm.cmd` shim 을 PATH 에서 찾으려면 셸이 필요하지만,
+ * 절대 경로(`process.execPath` 등)를 셸로 넘기면 cmd.exe 가 공백에서 끊는다 — PC.VX 의 node 는
+ * `C:\Program Files\nodejs\node.exe` 라, 새 빌드 진입점 검사가 매번 "'C:\Program'은(는) … 배치 파일이
+ * 아닙니다" 로 실패했고 "다른 매니저가 이미 깐 빌드로 재기동" 경로가 늘 막혔다(10-31).
+ */
+export function useShellFor(cmd: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' && !win32Path.isAbsolute(cmd);
+}
+
 function runSyncShell(cmd: string, args: string[], timeoutMs: number): RunResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
-    shell: process.platform === 'win32',
+    shell: useShellFor(cmd),
   });
   return {
     ok: r.status === 0 && !r.error,
@@ -647,13 +723,12 @@ function runAsync(
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     // Windows requires shell:true to resolve npm.cmd / git.exe shims via
-    // PATH. POSIX is fine without shell, which keeps argument quoting
-    // unambiguous for paths containing spaces.
-    const isWin = process.platform === 'win32';
+    // PATH — but only for bare names (useShellFor): an absolute executable path
+    // goes straight to CreateProcess so its spaces survive.
     const child = spawn(cmd, args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: isWin,
+      shell: useShellFor(cmd),
       windowsHide: true,
       env: process.env,
     });
@@ -713,6 +788,17 @@ export class UpdateChecker {
   #windowRaw: string | null;
   /** 승인 기록/핀을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
   #stateDir: string | undefined;
+  /** 같은 설치본을 쓰는 인스턴스들과 나누는 설치본 상태 디렉터리(핀·검증 표시). 공유 꺼짐이면 null. */
+  #hostDir: string | null;
+  #installDir: string | null;
+  /** 다른 매니저가 올린 빌드로 따라가기(shared-install-follow.ts). */
+  #followTimer: NodeJS.Timeout | null = null;
+  #followIntervalMs: number;
+  #followSeen: { version: string; atMs: number } | null = null;
+  #lastFollowLogLine: string | null = null;
+  #followRunning = false;
+  #restartForFollow: () => Promise<SelfUpdateResult>;
+  #probeInstalled: (expectVersion: string) => Promise<EntrypointProbeResult>;
   /** 직전에 로그로 남긴 판정 — 같은 판정을 tick 마다 반복해 찍지 않기 위한 값. */
   #lastPolicyLogLine: string | null = null;
   /** 테스트 주입용 시계. 생략하면 실제 시각. */
@@ -738,6 +824,14 @@ export class UpdateChecker {
       installedVersion?: () => string;
       /** 복귀 핀 파일을 읽을 디렉터리. 생략하면 매니저 홈. 테스트 격리용. */
       stateDir?: string;
+      /** 같은 설치본을 쓰는 인스턴스와 나누는 디렉터리. SelfUpdateOpts.hostDir 와 같은 규칙. */
+      hostDir?: string | null;
+      /** 따라가기 판정 주기. 기본 30초(하트비트 주기). */
+      followIntervalMs?: number;
+      /** 따라가기 재시작(테스트 주입). 기본 restartManager. */
+      restartForFollow?: () => Promise<SelfUpdateResult>;
+      /** 따라가기 전에 디스크의 진입점이 뜨는지 확인(테스트 주입). */
+      probeInstalled?: (expectVersion: string) => Promise<EntrypointProbeResult>;
       /** ticket 9408b308 — 정책/창 주입(테스트용). 생략하면 환경변수를 읽는다. */
       updatePolicy?: string;
       updateWindow?: string;
@@ -760,6 +854,19 @@ export class UpdateChecker {
     this.#policy = resolveUpdatePolicy(opts.updatePolicy);
     this.#windowRaw = opts.updateWindow ?? process.env[UPDATE_WINDOW_ENV] ?? null;
     this.#stateDir = opts.stateDir;
+    const shared = resolveSharedDirs({ stateDir: opts.stateDir, hostDir: opts.hostDir });
+    this.#hostDir = shared.hostDir;
+    this.#installDir = shared.installDir;
+    this.#followIntervalMs = opts.followIntervalMs ?? 30_000;
+    this.#restartForFollow = opts.restartForFollow ?? (() => restartManager({ log: this.#log }));
+    this.#probeInstalled =
+      opts.probeInstalled ??
+      ((expectVersion) =>
+        probeInstalledEntrypoint({
+          expectVersion,
+          // 재시작은 지금 프로세스의 진입점을 다시 띄운다 — 그 파일이 새 빌드로 뜨는지 본다.
+          entrypoint: process.argv[1] || null,
+        }));
     this.#now = opts.now ?? (() => new Date());
     this.#runUpdate = opts.runUpdate ?? runSelfUpdate;
     this.#verifyProvenance =
@@ -833,7 +940,10 @@ export class UpdateChecker {
     // 실패 투영은 tick 없이도 최신으로 — 핀 삭제 같은 외부 변화를 다음 하트비트가
     // 곧바로 반영한다(체커 5분 주기를 기다리지 않는다). 스킵이 풀리면 available 도
     // 같은 기준으로 다시 계산한다.
-    const failure = failureProjection(this.#stateDir);
+    const failure = runningFailureFree(
+      failureProjection(this.#stateDir, this.#installDir),
+      this.#status.current_version,
+    );
     const update_skipped_version =
       failure.failed && this.#status.latest_version === failure.failed ? failure.failed : null;
     let update_available = this.#status.update_available;
@@ -855,6 +965,14 @@ export class UpdateChecker {
 
   start(): void {
     if (this.#stopped || this.#timer) return;
+    // 따라가기는 npm 도달 여부·채널과 무관하게 돈다 — 디스크가 다른 매니저의 손으로 바뀌는 것은
+    // 이 인스턴스의 업데이트 설정과 상관없다(off/고정 채널은 판정이 막는다).
+    if (!this.#followTimer && this.#installDir) {
+      this.#followTimer = setInterval(() => {
+        void this.followSharedInstallNow().catch(() => undefined);
+      }, this.#followIntervalMs);
+      this.#followTimer.unref?.();
+    }
     if (this.#status.install_mode !== 'npm-global') {
       this.#log('UpdateChecker: npm is not reachable — auto-update disabled (upgrade manually)');
       return;
@@ -889,6 +1007,68 @@ export class UpdateChecker {
     if (this.#timer) {
       clearInterval(this.#timer);
       this.#timer = null;
+    }
+    if (this.#followTimer) {
+      clearInterval(this.#followTimer);
+      this.#followTimer = null;
+    }
+  }
+
+  /**
+   * 같은 설치본을 쓰는 다른 매니저가 올리고 검증한 빌드가 디스크에 있으면 재시작해 그것을
+   * 싣는다(shared-install-follow.ts). 주기 타이머가 부르고, 테스트가 직접 부른다.
+   * 판정 결과를 돌려준다.
+   */
+  async followSharedInstallNow(): Promise<FollowDecision> {
+    if (this.#stopped || this.#followRunning) return { action: 'none' };
+    this.#followRunning = true;
+    try {
+      const s = this.status();
+      const nowMs = this.#now().getTime();
+      if (!s.restart_required) {
+        this.#followSeen = null;
+        if (this.#lastFollowLogLine) this.#lastFollowLogLine = null;
+        return { action: 'none' };
+      }
+      if (this.#followSeen?.version !== s.installed_version) {
+        this.#followSeen = { version: s.installed_version, atMs: nowMs };
+      }
+      const home = this.#stateDir ?? AGENT_MANAGER_HOME;
+      const decision = evaluateSharedInstallFollow({
+        running: s.current_version,
+        installed: s.installed_version,
+        channel: s.update_channel,
+        channelOff: isAutoUpdateDisabled(s.update_channel),
+        restartInFlight: selfUpdateInFlight,
+        installLockHolder: liveHostLockHolder(this.#hostDir, managerInstallLockName()),
+        verify: readHostVerify(this.#installDir),
+        ownHome: home,
+        pinnedBadVersion: readEffectiveUpdatePin(this.#stateDir, this.#installDir)?.badVersion || null,
+        firstSeenAtMs: this.#followSeen.atMs,
+        nowMs,
+        attempts: readFollowAttempts(home, s.installed_version),
+      });
+      if (decision.action !== 'none') {
+        const line = `shared install: ${decision.detail}`;
+        if (line !== this.#lastFollowLogLine) {
+          this.#lastFollowLogLine = line;
+          this.#log(`Self-update: ${line}`);
+        }
+      }
+      if (decision.action !== 'follow') return decision;
+      const probe = await this.#probeInstalled(decision.version);
+      recordFollowAttempt(home, decision.version, nowMs);
+      if (!probe.ok) {
+        this.#log(
+          `Self-update: shared install: v${decision.version} on disk does not start (${probe.detail}) — staying on v${s.current_version}`,
+        );
+        return { action: 'blocked', reason: 'attempts_exhausted', detail: probe.detail };
+      }
+      const result = await this.#restartForFollow();
+      this.#log(`Self-update: shared install: ${result.summary}`);
+      return decision;
+    } finally {
+      this.#followRunning = false;
     }
   }
 
@@ -1102,12 +1282,14 @@ export class UpdateChecker {
         return;
       }
       const current = this.#status.current_version;
-      const pin = readUpdatePin(this.#stateDir);
+      const pin = readEffectiveUpdatePin(this.#stateDir, this.#installDir);
       let update_available = compareSemver(latest, current) > 0;
       // 핀의 실패 버전이 최신이면 오퍼하지 않는다 — 새 버전은 이 판정과 무관하다.
-      const update_skipped_version = pin?.badVersion && latest === pin.badVersion ? latest : null;
+      // 지금 돌고 있는 버전은 "실패한 버전" 이 아니다(runningFailureFree).
+      const update_skipped_version =
+        pin?.badVersion && latest === pin.badVersion && pin.badVersion !== current ? latest : null;
       if (update_skipped_version) update_available = false;
-      const failure = failureProjection(this.#stateDir);
+      const failure = runningFailureFree(failureProjection(this.#stateDir, this.#installDir), current);
       this.#status = {
         ...this.#status,
         latest_version: latest,
@@ -1292,7 +1474,7 @@ async function runSelfUpdateLocked(
   }
   // 복귀 핀은 채널을 동결하지 않는다 — 실패한 버전의 자동 재설치만 막는다.
   // 새 버전이 올라오면 핀과 무관하게 정상 오퍼·설치된다. 핀 해제는 사람 몫(파일 삭제).
-  const pin = readUpdatePin(opts.stateDir);
+  const pin = readEffectiveUpdatePin(opts.stateDir, resolveSharedDirs(opts).installDir);
   let channel = rawChannel;
   if (pin?.badVersion) {
     out(
@@ -1323,29 +1505,42 @@ async function runSelfUpdateLocked(
  *   1. wait (bounded) for the manager pid to exit — running `npm i -g` only
  *      after the manager is gone dodges the Windows self-overwrite EBUSY/EPERM
  *      (a live node process holding files inside its own global package dir);
- *   2. `npm install -g awb-agent-manager@latest`;
- *   3. relaunch the manager (`node <main.js> … --force`) regardless of the
- *      install outcome — on failure the prior build comes back, so the operator
- *      is never left with no manager;
- *   4. delete itself.
+ *   2. take the host-shared install lock (host-shared.ts — **same file format**)
+ *      so another manager on this machine that uses the same global install
+ *      never runs `npm install -g` at the same time, and does not follow a
+ *      half-installed build;
+ *   3. `npm install -g awb-agent-manager@<verified version>`, probe the new
+ *      entrypoint, roll back + pin on failure (the pin carries `badVersion` and
+ *      is written to this manager's home AND the shared install state);
+ *   4. release the lock and relaunch the manager — through its scheduled task
+ *      when it has one (so the new process is supervised), otherwise as a
+ *      detached `node <main.js> … --force`. The relaunch happens regardless of
+ *      the install outcome, so the operator is never left with no manager;
+ *   5. delete itself.
  *
  * Kept dependency-free (node builtins only) and free of backticks / `${…}` so
  * it embeds cleanly in this template literal. argv:
- *   [node, self, managerPid, npmSpec, nodePath, managerScript, ...restartArgs]
+ *   [node, self, managerPid, npmSpec, expectVersion, previousSpec, pinPath,
+ *    sharedPinPath, lockPath, verifyPath, relaunchJson, nodePath, managerScript,
+ *    ...restartArgs]
+ * An empty npmSpec means "relaunch only": wait for the manager to exit, then
+ * relaunch it through its service (used by restarts of a service-supervised
+ * manager — the service's own instance cannot be re-run while it is alive).
  */
 const NPM_GLOBAL_UPDATER_SOURCE = `// Auto-generated by awb-agent-manager self-update (npm-global mode). Safe to delete.
 import { spawn, spawnSync } from 'node:child_process';
-import { unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
-const [, selfPath, managerPidStr, npmSpec, expectVersion, previousSpec, pinPath, nodePath, managerScript, ...restartArgs] = process.argv;
+const [, selfPath, managerPidStr, npmSpec, expectVersion, previousSpec, pinPath, sharedPinPath, lockPath, verifyPath, relaunchJson, nodePath, managerScript, ...restartArgs] = process.argv;
 const managerPid = Number.parseInt(managerPidStr, 10);
 const isWin = process.platform === 'win32';
 
-function managerAlive() {
-  if (!Number.isFinite(managerPid) || managerPid <= 0) return false;
-  try { process.kill(managerPid, 0); return true; } catch { return false; }
+function pidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return Boolean(e && e.code === 'EPERM'); }
 }
+function managerAlive() { return pidAlive(managerPid); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function npmInstall(spec) {
   const r = spawnSync('npm', ['install', '-g', '--ignore-scripts', spec], {
@@ -1356,6 +1551,46 @@ function npmInstall(spec) {
 function globalRoot() {
   const r = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: isWin, windowsHide: true });
   return r.status === 0 ? String(r.stdout || '').trim() : '';
+}
+function removeQuietly(p) { if (!p) return; try { unlinkSync(p); } catch { /* gone */ } }
+function writeJson(p, value) {
+  if (!p) return;
+  try { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, JSON.stringify(value, null, 2) + '\\n', 'utf8'); } catch { /* best effort */ }
+}
+// host-shared.ts 의 잠금과 같은 형식 — 'wx' 로 만든 쪽이 쥔다. 쥔 pid 가 죽었거나 30분을
+// 넘겼으면 낡은 잠금이다. 15분 안에 못 쥐면 설치를 건너뛰고(다른 매니저가 설치 중) 이전
+// 빌드를 다시 띄운다 — 다음 부팅이 설치 실패로 센다.
+async function acquireLock(p) {
+  if (!p) return function () {};
+  try { mkdirSync(dirname(p), { recursive: true }); } catch { /* exists */ }
+  const deadline = Date.now() + 15 * 60000;
+  for (;;) {
+    try {
+      writeFileSync(p, JSON.stringify({ pid: process.pid, purpose: 'manager-install (updater helper)', home: process.env.AWB_AGENT_MANAGER_HOME || '', at_ms: Date.now() }), { encoding: 'utf8', flag: 'wx' });
+      return function () {
+        try { const cur = JSON.parse(readFileSync(p, 'utf8')); if (cur && cur.pid === process.pid) unlinkSync(p); } catch { /* gone */ }
+      };
+    } catch (e) {
+      if (!e || (e.code !== 'EEXIST' && e.code !== 'EPERM')) return null;
+    }
+    let holder = null;
+    try { holder = JSON.parse(readFileSync(p, 'utf8')); } catch { holder = null; }
+    // 매니저가 종료 직전에 이 헬퍼 이름으로 잡아 둔 잠금이다 — 이미 쥔 것이다.
+    if (holder && Number(holder.pid) === process.pid) {
+      return function () {
+        try { const cur = JSON.parse(readFileSync(p, 'utf8')); if (cur && cur.pid === process.pid) unlinkSync(p); } catch { /* gone */ }
+      };
+    }
+    let stale;
+    if (holder && Number.isFinite(Number(holder.pid))) {
+      stale = !pidAlive(Number(holder.pid)) || Date.now() - Number(holder.at_ms) > 30 * 60000;
+    } else {
+      try { stale = Date.now() - statSync(p).mtimeMs > 10000; } catch { stale = true; }
+    }
+    if (stale) { removeQuietly(p); continue; }
+    if (Date.now() >= deadline) return null;
+    await sleep(1000);
+  }
 }
 // previousSpec 은 부모가 provenance 를 이미 검증한 정확한 버전만 온다(검증 실패
 // 시 빈 문자열). 헬퍼는 부모가 죽은 뒤에 돌아 레지스트리 판정을 스스로 할 수
@@ -1381,41 +1616,59 @@ function entrypointStarts(entry, want) {
   // Small grace so the OS finishes releasing handles from the dying process.
   await sleep(750);
 
-  // 2. Reinstall globally. shell:true on Windows resolves the npm.cmd shim.
+  // 2. 같은 설치본을 쓰는 다른 매니저와 설치를 한 번에 하나로. 재기동만 할 때는 잠그지 않는다.
+  const releaseLock = npmSpec ? await acquireLock(lockPath) : function () {};
+
+  // 3. Reinstall globally. shell:true on Windows resolves the npm.cmd shim.
   // --ignore-scripts: same reason as the POSIX path — provenance covers our own
   // tarball, not the transitive tree's install scripts. Bin linking is npm core,
   // not a lifecycle script, so the shim below is still created.
-  const ok = npmInstall(npmSpec);
+  const ok = !npmSpec ? true : releaseLock ? npmInstall(npmSpec) : false;
 
-  // 3. 설치가 됐다면 새 진입점이 실제로 뜨는지 확인하고, 못 뜨면 이전 버전으로
-  // 되돌린 뒤 채널을 그 버전으로 핀한다. 되돌리기가 실패해도 아래 4단계가
-  // 그대로 재기동하므로 운영자가 매니저 없는 상태로 남지는 않는다.
-  let root = ok ? globalRoot() : '';
+  // 설치가 됐다면 새 진입점이 실제로 뜨는지 확인하고, 못 뜨면 이전 버전으로
+  // 되돌린 뒤 그 버전을 실패로 핀한다(이 매니저의 홈과 공유 상태 양쪽). 되돌리기가
+  // 실패해도 아래가 그대로 재기동하므로 운영자가 매니저 없는 상태로 남지는 않는다.
+  let root = ok && npmSpec ? globalRoot() : '';
   let rolledBack = false;
-  if (ok && previousSpec) {
+  if (ok && npmSpec && previousSpec) {
     const entry = root ? join(root, 'awb-agent-manager', 'dist', 'main.js') : '';
     if (!entrypointStarts(entry, expectVersion)) {
       if (npmInstall(previousSpec)) {
         rolledBack = true;
         root = globalRoot();
       }
-      if (pinPath) {
-        const version = String(previousSpec).split('@').pop();
-        try {
-          writeFileSync(pinPath, JSON.stringify({
-            version: version,
-            reason: 'installed build ' + String(expectVersion) + ' failed to start (helper probe)',
-            pinnedAtMs: Date.now(),
-          }, null, 2) + '\\n', 'utf8');
-        } catch { /* 핀을 못 써도 재기동은 계속한다 */ }
-      }
+      const version = String(previousSpec).split('@').pop();
+      const pin = {
+        version: version,
+        badVersion: String(expectVersion),
+        reason: 'installed build ' + String(expectVersion) + ' failed to start (helper probe) (bad build v' + String(expectVersion) + ')',
+        pinnedAtMs: Date.now(),
+      };
+      writeJson(pinPath, pin);
+      writeJson(sharedPinPath, pin);
     }
   }
+  // 이 버전의 검증 대기 표시는 설치가 안 됐거나 되돌렸으면 끝났다.
+  if (npmSpec && (!ok || rolledBack)) removeQuietly(verifyPath);
+  if (releaseLock) releaseLock();
 
-  // 4. Relaunch the globally installed manager. A legacy service unit may still
-  // point at a source checkout's main.js; resolve npm root -g and relaunch the
-  // package we just installed rather than jumping back into that stale tree.
-  // (No backticks in this string — it is embedded in a template literal.)
+  // 4. Relaunch the manager. 이 홈의 서비스(예약 작업 · launchd 작업)가 있으면 그것으로 띄워
+  // 새 프로세스가 감독 안에서 태어나게 한다 — 분리 자식으로 띄우면 서비스 밖이라, 서비스가 따로
+  // 띄운 프로세스가 락에 막혀 계속 exit 2 로 끝나고(PC.VX · MacBook 실측) 업데이트 직후의
+  // 부팅이 두 번으로 세어진다. 서비스가 이미 돌고 있으면 그 명령은 아무 일도 하지 않는다.
+  let relaunch = null;
+  try { relaunch = relaunchJson ? JSON.parse(relaunchJson) : null; } catch { relaunch = null; }
+  if (Array.isArray(relaunch) && relaunch.length > 0) {
+    const run = spawnSync(String(relaunch[0]), relaunch.slice(1).map(String), { stdio: 'ignore', windowsHide: true });
+    if (run.status === 0 && !run.error) {
+      removeQuietly(selfPath);
+      process.exit(ok && !rolledBack ? 0 : 1);
+    }
+  }
+  // A legacy service unit may still point at a source checkout's main.js; resolve
+  // npm root -g and relaunch the package we just installed rather than jumping
+  // back into that stale tree. (No backticks in this string — it is embedded in a
+  // template literal.)
   let restartScript = managerScript;
   if (ok || rolledBack) {
     if (root) restartScript = join(root, 'awb-agent-manager', 'dist', 'main.js');
@@ -1432,7 +1685,7 @@ function entrypointStarts(entry, want) {
   }
 
   // 5. Best-effort self-cleanup of this temp helper file.
-  try { unlinkSync(selfPath); } catch { /* already gone */ }
+  removeQuietly(selfPath);
   process.exit(ok && !rolledBack ? 0 : 1);
 })();
 `;
@@ -1589,7 +1842,8 @@ async function runNpmGlobalSelfUpdate(
   const current = getRunningVersion();
   const channelSpec = npmChannelSpec(channel);
   const ports = resolvePorts(opts, out);
-  const installed = ports.installedVersion() || current;
+  let installed = ports.installedVersion() || current;
+  const shared = resolveSharedDirs(opts);
   out(
     `Self-update: npm-global mode (running v${current}` +
       `${installed !== current ? `, installed v${installed}` : ''}) — target ${channelSpec}`,
@@ -1629,7 +1883,7 @@ async function runNpmGlobalSelfUpdate(
   // 복귀 핀이 가리키는 실패 버전은 자동·수동(버전 지정이 없어 같은 경로) 막론하고
   // 설치하지 않는다 — 재시도 루프 방지(정책 G). 새 버전은 이 게이트와 무관하다.
   // 해제(해당 버전 재시도)는 핀 파일 삭제 = 사람만 한다.
-  const badPin = readUpdatePin(opts.stateDir);
+  const badPin = readEffectiveUpdatePin(opts.stateDir, resolveSharedDirs(opts).installDir);
   if (verdict.version && isPinnedBadVersion(badPin, verdict.version)) {
     const summary =
       `npm-global update skipped: v${verdict.version} failed before and is pinned against reinstall` +
@@ -1639,10 +1893,28 @@ async function runNpmGlobalSelfUpdate(
     return { changed: false, summary };
   }
 
+  // 같은 설치본을 쓰는 다른 매니저가 지금 설치하고 있으면 끝날 때까지 기다린 뒤 다시 본다 —
+  // 두 `npm install -g` 가 한 전역 prefix 를 두고 경쟁하면 서로의 설치를 깨뜨린다. 그쪽이 같은
+  // 버전을 올렸다면 아래에서 재기동만 하게 된다.
+  if (shared.hostDir && !opts.noReExec) {
+    const waited = await waitForSharedInstallIdle(shared.hostDir, out);
+    if (!waited.idle) {
+      const summary =
+        `npm-global update deferred: another manager on this machine is still installing ` +
+        `(pid=${waited.holder?.pid ?? '?'}${waited.holder?.home ? `, ${waited.holder.home}` : ''}) — try again when it finishes`;
+      out(`Self-update: ${summary}`);
+      return { changed: false, summary, deferred: true };
+    }
+    if (waited.waitedMs > 0) {
+      installed = ports.installedVersion() || installed;
+      out(`Self-update: shared install finished after ${Math.round(waited.waitedMs / 1000)}s — disk now has v${installed}`);
+    }
+  }
+
   // 디스크에 이미 대상(또는 그보다 새) 빌드가 있으면 설치는 건너뛰고 **재기동만** 한다.
   // 프로세스 밖에서 `npm i -g` 가 먼저 돈 경우다(rolf 에서 세션이 그렇게 했다) — 예전엔
   // 디스크 값을 "현재" 로 읽어 "이미 최신" 으로 끝냈고, 실행 중 프로세스는 옛 코드로
-  // 남았다.
+  // 남았다. 같은 장비의 다른 매니저가 먼저 올린 경우도 여기로 온다.
   const restartOnly = !!verdict.version && compareSemver(installed, verdict.version) >= 0;
 
   // ticket 9408b308: 운영자가 명시적으로 지시한 개시라면, 여기서 확정된 대상
@@ -1704,14 +1976,31 @@ async function runNpmGlobalSelfUpdate(
     // 설치 경로와 같은 부팅 검증을 건다: 새 빌드가 하트비트 한 번을 못 내면 실행 중이던
     // 버전으로 되돌린다. 되돌릴 대상의 provenance 를 확인하지 못하면 검증 없이 재기동한다
     // (설치는 이미 끝난 상태라 거부해 봐야 옛 코드로 남을 뿐이다).
-    const rollbackSpec = await resolveVerifiedRollbackSpec({
-      previousVersion: current,
-      verifyProvenance: ports.verifyProvenance,
-      out,
-    });
-    if (rollbackSpec) {
+    //
+    // 같은 장비의 다른 매니저가 설치한 빌드면 그쪽이 검증을 맡는다(이미 검증했거나 하는 중).
+    // 여기서 또 검증을 걸면 이 인스턴스의 사정(서버가 잠시 안 보임 등)으로 공유 디스크를
+    // 되돌려 멀쩡히 도는 그쪽까지 끌어내린다.
+    const sharedVerify = readHostVerify(shared.installDir);
+    const verifiedElsewhere =
+      sharedVerify &&
+      sharedVerify.version === installed &&
+      (sharedVerify.phase === 'verified' || hostVerifyPending(sharedVerify, installed));
+    const rollbackSpec = verifiedElsewhere
+      ? ''
+      : await resolveVerifiedRollbackSpec({
+          previousVersion: current,
+          verifyProvenance: ports.verifyProvenance,
+          out,
+        });
+    if (verifiedElsewhere) {
+      out(
+        `Self-update: v${installed} on disk was installed by another manager on this machine ` +
+          `(${sharedVerify!.home || 'unknown home'}, ${sharedVerify!.phase}) — restarting into it without arming a second boot verification`,
+      );
+    } else if (rollbackSpec) {
       const record = newInstallRecord({ previousVersion: current, targetVersion: installed, nowMs: Date.now(), carryFrom: null });
       writeBootVerificationRecord(withAwaitingBoot(record, Date.now()), opts.stateDir);
+      writeHostVerify(shared.installDir, { version: installed, previous_version: current, phase: 'verifying' });
       out(`Self-update: boot verification armed for v${installed} (rollback target v${current} if no heartbeat succeeds)`);
     } else {
       out(`Self-update: no verified rollback target for v${current} — restarting into v${installed} without boot verification`);
@@ -1801,44 +2090,61 @@ async function runNpmGlobalSelfUpdate(
   // 아직 대기 중이거나 설치 중인데도 systemd가 5초 뒤 예전 패키지를 다시
   // 띄웠고, 그 시점엔 이미 명령이 성공을 보고한 뒤였다.
   if (process.platform !== 'win32') {
-    const installed = await ports.install(installSpec);
-    if (!installed.ok) {
-      // ticket 23753dc7 (정책 G): POSIX 는 설치를 인-프로세스로 돌아 실패를
-      // 직접 본다. 그 자리에서 카운터를 올려 영속화한다 — 다음 시도가 다른
-      // 프로세스일 수 있으므로 메모리에 남기면 상한이 성립하지 않는다.
-      if (installRecord) {
-        const failed = withInstallFailure(installRecord, Date.now(), installed.detail);
-        writeBootVerificationRecord(failed, opts.stateDir);
-        out(`Self-update: ${failed.reason}`);
-      }
-      const summary = `npm-global update failed: ${installed.detail}`;
+    // 같은 설치본을 쓰는 다른 매니저와 설치·프로브·되돌리기를 한 번에 하나로 묶는다. 잠금을 쥔
+    // 동안 그쪽은 기다리고(waitForSharedInstallIdle), 따라가기도 멈춘다.
+    let releaseShared: () => void;
+    try {
+      releaseShared = await lockSharedInstall(shared.hostDir, out);
+    } catch (err: any) {
+      const summary = `npm-global update deferred: ${err?.message ?? err}`;
       out(`Self-update: ${summary}`);
-      return { changed: false, summary };
+      return { changed: false, summary, deferred: true };
     }
-    // 리뷰 지적 1 — **재기동을 넘기기 전에** 새 진입점을 한 번 띄워 본다.
-    // 구문 오류·누락 모듈·최상위 import 예외로 죽는 빌드는 매니저 런타임 안의
-    // 어떤 검증에도 도달하지 못하므로, 아직 이전 빌드를 메모리에 들고 살아
-    // 있는 지금이 그런 실패를 관측할 수 있는 유일한 지점이다.
-    if (installRecord) {
-      const probe = await ports.probe({ expectVersion: targetVersion });
-      if (!probe.ok) {
-        out(
-          `Self-update: new build v${targetVersion} failed to start — ${probe.detail}; ` +
-            `not restarting into it`,
-        );
-        // 재기동하지 않는다. 되돌리고 나면 이 프로세스가 그대로 이전 버전이라
-        // 재기동할 이유가 없고, 하지 않는 편이 훨씬 안전하다.
-        const rolled = await runRollbackInstall(opts, out, installRecord, null, {
-          restartAfter: false,
-        });
-        const summary =
-          `npm-global update rolled back: v${targetVersion} failed to start (${probe.detail})`;
+    try {
+      const installed = await ports.install(installSpec);
+      if (!installed.ok) {
+        // ticket 23753dc7 (정책 G): POSIX 는 설치를 인-프로세스로 돌아 실패를
+        // 직접 본다. 그 자리에서 카운터를 올려 영속화한다 — 다음 시도가 다른
+        // 프로세스일 수 있으므로 메모리에 남기면 상한이 성립하지 않는다.
+        if (installRecord) {
+          const failed = withInstallFailure(installRecord, Date.now(), installed.detail);
+          writeBootVerificationRecord(failed, opts.stateDir);
+          out(`Self-update: ${failed.reason}`);
+        }
+        const summary = `npm-global update failed: ${installed.detail}`;
         out(`Self-update: ${summary}`);
-        return { changed: rolled.kind === 'rollback', summary };
+        return { changed: false, summary };
       }
-      out(`Self-update: new build v${targetVersion} starts cleanly — ${probe.detail}`);
-      // 프로브를 통과했다. 남은 판정은 "재기동 뒤 하트비트 1회 성공"이다.
-      writeBootVerificationRecord(withAwaitingBoot(installRecord, Date.now()), opts.stateDir);
+      // 리뷰 지적 1 — **재기동을 넘기기 전에** 새 진입점을 한 번 띄워 본다.
+      // 구문 오류·누락 모듈·최상위 import 예외로 죽는 빌드는 매니저 런타임 안의
+      // 어떤 검증에도 도달하지 못하므로, 아직 이전 빌드를 메모리에 들고 살아
+      // 있는 지금이 그런 실패를 관측할 수 있는 유일한 지점이다.
+      if (installRecord) {
+        const probe = await ports.probe({ expectVersion: targetVersion });
+        if (!probe.ok) {
+          out(
+            `Self-update: new build v${targetVersion} failed to start — ${probe.detail}; ` +
+              `not restarting into it`,
+          );
+          // 재기동하지 않는다. 되돌리고 나면 이 프로세스가 그대로 이전 버전이라
+          // 재기동할 이유가 없고, 하지 않는 편이 훨씬 안전하다.
+          const rolled = await runRollbackInstall(opts, out, installRecord, null, {
+            restartAfter: false,
+            sharedLockHeld: true,
+          });
+          const summary =
+            `npm-global update rolled back: v${targetVersion} failed to start (${probe.detail})`;
+          out(`Self-update: ${summary}`);
+          return { changed: rolled.kind === 'rollback', summary };
+        }
+        out(`Self-update: new build v${targetVersion} starts cleanly — ${probe.detail}`);
+        // 프로브를 통과했다. 남은 판정은 "재기동 뒤 하트비트 1회 성공"이다.
+        writeBootVerificationRecord(withAwaitingBoot(installRecord, Date.now()), opts.stateDir);
+        // 같은 설치본을 쓰는 다른 매니저는 이 검증이 끝날 때까지 따라오지 않는다.
+        writeHostVerify(shared.installDir, { version: targetVersion, previous_version: current, phase: 'verifying' });
+      }
+    } finally {
+      releaseShared();
     }
     const summary = `npm-global update installed ${installSpec}; restarting manager`;
     out(`Self-update: ${summary}`);
@@ -1884,6 +2190,8 @@ async function runNpmGlobalSelfUpdate(
   // rollbackSpec 은 위 게이트에서 이미 확보했다 — trackable 이면 반드시 비어
   // 있지 않다(비었다면 업데이트 자체가 거부돼 여기까지 오지 않는다). 따라서
   // 헬퍼는 항상 프로브와 복귀 대상을 함께 받는다.
+  // 설치 뒤 재기동은 이 홈의 예약 작업이 있으면 그것으로 — 새 프로세스가 감독 안에서 태어난다.
+  const supervision = detectServiceSupervision();
   const helperArgs = [
     helperPath,
     String(process.pid),
@@ -1891,10 +2199,18 @@ async function runNpmGlobalSelfUpdate(
     trackable ? targetVersion : '',
     rollbackSpec,
     trackable ? updatePinPath(opts.stateDir) : '',
+    trackable && shared.installDir ? updatePinPath(shared.installDir) : '',
+    shared.hostDir ? hostLockPath(shared.hostDir, managerInstallLockName()) : '',
+    trackable && shared.installDir ? hostVerifyPath(shared.installDir) : '',
+    supervision ? JSON.stringify(supervision.relaunch) : '',
     nodePath,
     scriptPath,
     ...baseArgs,
   ];
+  if (trackable) {
+    // 헬퍼가 설치·검증을 끝낼 때까지 같은 설치본을 쓰는 다른 매니저는 이 빌드로 따라오지 않는다.
+    writeHostVerify(shared.installDir, { version: targetVersion, previous_version: current, phase: 'verifying' });
+  }
 
   out(`Self-update: spawning detached npm-global updater (reinstalls after pid=${process.pid} exits)`);
   try {
@@ -1909,6 +2225,18 @@ async function runNpmGlobalSelfUpdate(
       windowsHide: true,
     });
     child.unref();
+    // 매니저가 내려가는 순간부터 헬퍼가 설치를 끝낼 때까지 같은 설치본을 쓰는 프로세스(이 홈의
+    // 예약 작업이 띄우는 것 포함)가 반쯤 바뀐 빌드로 부팅하지 않도록, 잠금을 헬퍼 이름으로 지금 쥔다.
+    if (shared.hostDir && child.pid) {
+      try {
+        await acquireHostLock(hostLockPath(shared.hostDir, managerInstallLockName()), 'manager-install (updater helper)', {
+          holderPid: child.pid,
+          waitMs: 0,
+        });
+      } catch (err: any) {
+        out(`Self-update: could not pre-lock the shared install for the helper (it will lock it itself): ${err?.message ?? err}`);
+      }
+    }
   } catch (err: any) {
     const summary = `npm-global update failed: could not spawn updater helper: ${err?.message ?? err}`;
     // 위 staging 실패와 같은 이유로 여기서 센다 — 설치는 시작되지 않았다.
@@ -1979,6 +2307,54 @@ async function npmGlobalInstall(
       .filter(Boolean)
       .pop() || `exit=${installed.exitCode}`;
   return { ok: false, detail: detail.slice(0, 240) };
+}
+
+/** 다른 매니저의 설치를 기다리는 상한. npm 설치 상한(10분)에 프로브·되돌리기 여유를 더했다. */
+const SHARED_INSTALL_WAIT_MS = 15 * 60_000;
+
+/**
+ * 같은 설치본을 쓰는 다른 매니저(또는 그 업데이터 헬퍼)가 설치 잠금을 쥐고 있으면 풀릴 때까지
+ * 기다린다. 기다리기만 하고 쥐지는 않는다.
+ */
+async function waitForSharedInstallIdle(
+  hostDir: string,
+  out: (msg: string) => void,
+  maxWaitMs: number = SHARED_INSTALL_WAIT_MS,
+): Promise<{ idle: boolean; waitedMs: number; holder: HostLockHolder | null }> {
+  const started = Date.now();
+  const name = managerInstallLockName();
+  let holder = liveHostLockHolder(hostDir, name);
+  if (!holder) return { idle: true, waitedMs: 0, holder: null };
+  out(
+    `Self-update: another manager on this machine is installing the shared build ` +
+      `(pid=${holder.pid}${holder.home ? `, ${holder.home}` : ''}) — waiting for it to finish`,
+  );
+  while (holder && Date.now() - started < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, 2000));
+    holder = liveHostLockHolder(hostDir, name);
+  }
+  return { idle: !holder, waitedMs: Date.now() - started, holder };
+}
+
+/** 설치 잠금을 쥔다(공유 꺼짐이면 아무것도 안 한다). 못 쥐면 HostLockBusyError. */
+async function lockSharedInstall(hostDir: string | null, out: (msg: string) => void): Promise<() => void> {
+  if (!hostDir) return () => {};
+  try {
+    return await acquireHostLock(hostLockPath(hostDir, managerInstallLockName()), 'manager-install', {
+      waitMs: SHARED_INSTALL_WAIT_MS,
+      pollMs: 2000,
+      onWait: (h) =>
+        out(
+          `Self-update: waiting for another manager's install to finish ` +
+            `(pid=${h.pid}${h.home ? `, ${h.home}` : ''})`,
+        ),
+    });
+  } catch (err) {
+    if (err instanceof HostLockBusyError) {
+      throw new Error(`another manager on this machine is still installing (${err.message})`);
+    }
+    throw err;
+  }
 }
 
 /** 새로 설치된 전역 패키지의 진입점 경로. npm 이 안 잡히면 null. */
@@ -2209,10 +2585,20 @@ function pinRolledBackVersion(
   badVersion: string,
   reason: string,
 ): void {
-  writeUpdatePin(
-    { version, badVersion, reason: `${reason} (bad build v${badVersion})`, pinnedAtMs: Date.now() },
-    opts.stateDir,
-  );
+  const pin = { version, badVersion, reason: `${reason} (bad build v${badVersion})`, pinnedAtMs: Date.now() };
+  writeUpdatePin(pin, opts.stateDir);
+  // 같은 설치본을 쓰는 다른 매니저도 이 버전을 다시 집지 않게 — 설치본은 하나다.
+  const { installDir } = resolveSharedDirs(opts);
+  if (installDir) {
+    try {
+      writeUpdatePin(pin, installDir);
+    } catch (err: any) {
+      out(`Self-update: could not share the pin with other managers on this machine: ${err?.message ?? err}`);
+    }
+    // 이 버전을 검증 중이라는 표시는 끝났다 — 기다리던 쪽이 되돌려진 디스크를 따라 판단한다.
+    const marker = readHostVerify(installDir);
+    if (marker?.version === badVersion) clearHostVerify(installDir);
+  }
   out(
     `Self-update: v${badVersion} will be skipped automatically (${reason}) — ` +
       `newer versions are unaffected; delete ${updatePinPath(opts.stateDir)} to retry it (operator only).`,
@@ -2234,7 +2620,11 @@ async function runRollbackInstall(
   /** `restartAfter:false` 는 "이 프로세스가 이미 되돌릴 대상 버전을 돌고 있다"는
    *  뜻이다(재기동 전 프로브가 새 빌드를 거른 경우). 그때 재기동은 얻는 것 없이
    *  위험만 더한다 — 디스크는 방금 이전 버전으로 되돌렸고 메모리도 이미 그것이다. */
-  behavior: { restartAfter?: boolean } = {},
+  behavior: {
+    restartAfter?: boolean;
+    /** 호출자가 이미 공유 설치 잠금을 쥐고 있다(설치 직후 프로브 실패) — 다시 쥐지 않는다. */
+    sharedLockHeld?: boolean;
+  } = {},
 ): Promise<BootVerificationOutcome> {
   const restartAfter = behavior.restartAfter !== false;
   const ports = resolvePorts(opts, out);
@@ -2284,7 +2674,20 @@ async function runRollbackInstall(
   // 4. 설치 + 재기동. 플랫폼 분기는 정상 경로와 같은 이유로 갈린다:
   //    POSIX 는 인-프로세스 설치 후 재기동, Windows 는 종료 후 헬퍼가 설치한다.
   if (process.platform !== 'win32') {
-    const installed = await ports.install(installSpec);
+    let releaseShared: () => void = () => {};
+    if (!behavior.sharedLockHeld) {
+      try {
+        releaseShared = await lockSharedInstall(resolveSharedDirs(opts).hostDir, out);
+      } catch (err: any) {
+        return stop(`rollback to v${target} postponed: ${err?.message ?? err}`);
+      }
+    }
+    let installed: { ok: boolean; detail: string };
+    try {
+      installed = await ports.install(installSpec);
+    } finally {
+      releaseShared();
+    }
     if (!installed.ok) {
       // 매니저는 계속 돌고 있다(완료 기준 7). 핀도 그대로라 자동 경로가 불량
       // 버전으로 되돌아가지 않는다.
@@ -2336,6 +2739,13 @@ async function runRollbackInstall(
         '',
         '',
         '',
+        '',
+        resolveSharedDirs(opts).hostDir ? hostLockPath(resolveSharedDirs(opts).hostDir!, managerInstallLockName()) : '',
+        '',
+        (() => {
+          const sup = detectServiceSupervision();
+          return sup ? JSON.stringify(sup.relaunch) : '';
+        })(),
         process.execPath,
         process.argv[1] || '',
         ...baseArgs,
@@ -2411,13 +2821,62 @@ export function _scheduleRollbackRestartForTests(restart: () => void): void {
  * 해제는 사람만 한다(정책 G). 여러 번 불려도 안전하다.
  */
 export function markBootVerified(opts: SelfUpdateOpts = {}): boolean {
+  const out = opts.log ?? log;
+  clearRefutedUpdateFailures(opts);
   const record = readBootVerificationRecord(opts.stateDir);
   if (!record) return false;
   if (record.phase !== 'awaiting_boot' && record.phase !== 'installing') return false;
-  const out = opts.log ?? log;
   clearBootVerificationRecord(opts.stateDir);
   out(`Self-update: boot verification passed for v${record.targetVersion} (heartbeat succeeded)`);
   return true;
+}
+
+/**
+ * 하트비트가 성공했다 = 지금 버전은 부팅하고 서버와 이야기한다. 그 사실이 반증하는 실패 기록을
+ * 지운다:
+ *   - 지금 버전(또는 그보다 옛 버전)을 가리키는 핀 — 자기 홈과 공유 상태 양쪽. 핀은 "그 버전을
+ *     다시 설치하지 말라" 인데 그 버전이 멀쩡히 돈다(PC.VX: v1.6.338 을 돌리며 "v1.6.338
+ *     skipped" 를 보였다). 나쁜 빌드는 하트비트에 닿지 못하므로 복귀 루프를 만들지 않는다.
+ *   - 지금 버전에 대한 설치 실패/차단 기록 — 설치는 결국 반영됐다.
+ *   - 같은 설치본의 검증 대기 표시 — 이 버전이면 "검증됨" 으로. 기다리던 다른 매니저가 따라온다.
+ * 여러 번 불려도 안전하다.
+ */
+export function clearRefutedUpdateFailures(opts: SelfUpdateOpts = {}): void {
+  const out = opts.log ?? log;
+  const running = getRunningVersion();
+  if (!/^\d+\.\d+\.\d+/.test(running) || running === '0.0.0') return;
+  const { installDir } = resolveSharedDirs(opts);
+  try {
+    const refuted = (pin: UpdatePinRecord | null): boolean =>
+      Boolean(pin?.badVersion && /^\d+\.\d+\.\d+/.test(pin.badVersion) && compareSemver(pin.badVersion, running) <= 0);
+    for (const dir of [opts.stateDir ?? AGENT_MANAGER_HOME, ...(installDir ? [installDir] : [])]) {
+      const pin = readUpdatePin(dir);
+      if (!refuted(pin)) continue;
+      if (clearRefutedUpdatePin(dir, pin!.badVersion)) {
+        out(
+          `Self-update: cleared the pin against v${pin!.badVersion} (${updatePinPath(dir)}) — ` +
+            `v${running} is running and its heartbeat succeeded, so that failure no longer applies`,
+        );
+      }
+    }
+    const record = readBootVerificationRecord(opts.stateDir);
+    if (
+      record &&
+      (record.phase === 'install_failed' || record.phase === 'install_blocked') &&
+      compareSemver(record.targetVersion, running) <= 0
+    ) {
+      clearBootVerificationRecord(opts.stateDir);
+      out(`Self-update: cleared the ${record.phase} record for v${record.targetVersion} — v${running} is running`);
+    }
+    const marker = readHostVerify(installDir);
+    if (marker && marker.version === running && marker.phase === 'verifying') {
+      writeHostVerify(installDir, { version: running, previous_version: marker.previous_version, phase: 'verified' });
+      out(`Self-update: shared install v${running} verified (other managers on this machine can follow it)`);
+    }
+    clearFollowAttempts(opts.stateDir ?? AGENT_MANAGER_HOME, running);
+  } catch (err: any) {
+    out(`Self-update: could not clear refuted update failures: ${err?.message ?? err}`);
+  }
 }
 
 /**
@@ -2477,13 +2936,30 @@ function shutdownForNpmGlobalUpdate(out: (msg: string) => void): void {
   out('Self-update: shutting down so the npm-global updater can reinstall + restart');
   runPlannedRestartHook(out);
   setTimeout(() => {
-    try {
-      process.kill(process.pid, 'SIGTERM');
-    } catch {
-      process.exit(0);
-    }
+    terminateSelfGracefully();
     setTimeout(() => process.exit(0), 25_000).unref?.();
   }, 250).unref?.();
+}
+
+/**
+ * 정상 종료 경로(main.ts 의 SIGTERM 처리기)를 태워 스스로 내려간다.
+ *
+ * Windows 에서 `process.kill(self, 'SIGTERM')` 은 시그널이 아니라 TerminateProcess 다 — 처리기가
+ * 하나도 돌지 않고(세션·CLI 자식 정리, 락 해제 없음) 종료 코드 1 로 끝난다. 종료 코드 1 은 예약
+ * 작업의 RestartOnFailure 를 깨워, 업데이터가 설치하는 도중에 작업이 매니저를 다시 띄웠다. 그래서
+ * Windows 에서는 처리기를 직접 부른다(`process.emit`) — 정리를 마치고 0 으로 끝난다. 재기동은
+ * 업데이터/재기동 헬퍼가 서비스로 한다.
+ */
+function terminateSelfGracefully(): void {
+  if (process.platform === 'win32' && process.listenerCount('SIGTERM') > 0) {
+    process.emit('SIGTERM', 'SIGTERM');
+    return;
+  }
+  try {
+    process.kill(process.pid, 'SIGTERM');
+  } catch {
+    process.exit(0);
+  }
 }
 
 /**
@@ -2648,7 +3124,7 @@ export async function consumeUpdateHandoff(opts: {
   return 'ready';
 }
 
-/** 예약 작업 `awb-agent-manager` 가 등록돼 있는가(Windows). schtasks 조회 실패는 없음으로 본다. */
+/** 이 홈의 예약 작업(이름은 홈마다 다르다 — service-install.ts)이 등록돼 있는가(Windows). */
 export function windowsScheduledTaskExists(taskName: string = WINDOWS_TASK_NAME): boolean {
   if (process.platform !== 'win32') return false;
   try {
@@ -2659,16 +3135,22 @@ export function windowsScheduledTaskExists(taskName: string = WINDOWS_TASK_NAME)
   }
 }
 
-export type ReexecStrategy = 'systemd' | 'task' | 'detached';
+export type ReexecStrategy = 'systemd' | 'task' | 'launchd' | 'detached';
 
-/** 재기동 경로 판정 — 순수 함수라 매트릭스 테스트가 쉽다. */
+/**
+ * 재기동 경로 판정 — 순수 함수라 매트릭스 테스트가 쉽다. `taskExists` / `launchdJob` 은 **이 홈의**
+ * 서비스가 있는가다(service-supervision.ts 가 소유를 확인한다).
+ */
 export function resolveReexecStrategy(opts: {
   systemdManaged: boolean;
   platform?: NodeJS.Platform;
   taskExists?: boolean;
+  launchdJob?: boolean;
 }): ReexecStrategy {
+  const platform = opts.platform ?? process.platform;
   if (opts.systemdManaged) return 'systemd';
-  if ((opts.platform ?? process.platform) === 'win32' && opts.taskExists) return 'task';
+  if (platform === 'win32' && opts.taskExists) return 'task';
+  if (platform === 'darwin' && opts.launchdJob) return 'launchd';
   return 'detached';
 }
 
@@ -2726,31 +3208,29 @@ function reExecManager(out: (msg: string) => void): void {
     return;
   }
 
-  // systemd 분기는 위에서 return 했다 — 여기서는 항상 false 다.
-  if (resolveReexecStrategy({ systemdManaged: false, taskExists: windowsScheduledTaskExists() }) === 'task') {
-    // 예약 작업 경유 인계 — 새 매니저가 태스크 감시 안에서 태어난다.
-    const target = readInstalledVersion();
-    if (/^\d+\.\d+\.\d+/.test(target)) {
-      try {
-        writeUpdateHandoff(AGENT_MANAGER_HOME, { version: target, pid: process.pid, at: new Date().toISOString() });
-        const run = spawnSync('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME], { stdio: 'ignore', windowsHide: true });
-        if (run.status === 0) {
-          out(`Self-update: handoff via scheduled task (${WINDOWS_TASK_NAME} → v${target}) — exiting for takeover`);
-          setTimeout(() => {
-            try {
-              process.kill(process.pid, 'SIGTERM');
-            } catch {
-              process.exit(0);
-            }
-            setTimeout(() => process.exit(1), 30_000).unref?.();
-          }, 250).unref?.();
-          return;
-        }
-        out('Self-update: schtasks /Run failed — falling back to detached re-exec');
-      } catch (err: any) {
-        out(`Self-update: task handoff failed (${err?.message ?? err}) — falling back to detached re-exec`);
-      }
+  // 이 홈의 서비스(launchd 작업 · 예약 작업)가 있으면 새 프로세스는 그 서비스가 띄운다. 이
+  // 프로세스가 그 서비스의 인스턴스면 살아 있는 동안 다시 실행할 수 없으므로(IgnoreNew · launchd 의
+  // 단일 인스턴스), 작은 헬퍼가 이 pid 가 끝나기를 기다렸다가 서비스를 깨운다. 분리 자식으로
+  // 직접 띄우면 서비스 밖이라 서비스가 따로 띄운 프로세스가 락에 막혀 exit 2 를 반복했다.
+  // 예전에는 예약 작업 이름이 홈과 무관하게 하나라 다른 홈의 작업을 깨웠다(PC.VX 10-31: 그
+  // 때문에 이 매니저가 약 50시간 내려가 있었다).
+  const supervision = detectServiceSupervision();
+  const strategy = resolveReexecStrategy({
+    systemdManaged: false,
+    taskExists: supervision?.kind === 'task',
+    launchdJob: supervision?.kind === 'launchd',
+  });
+  if (supervision && (strategy === 'task' || strategy === 'launchd')) {
+    if (spawnServiceRelaunchHelper(out, supervision)) {
+      out(
+        `Self-update: restart via ${supervision.kind === 'task' ? 'scheduled task' : 'launchd job'} ` +
+          `${supervision.name} — exiting so it starts the new process`,
+      );
+      setTimeout(() => terminateSelfGracefully(), 250).unref?.();
+      setTimeout(() => process.exit(0), 30_000).unref?.();
+      return;
     }
+    out('Self-update: could not stage the service relaunch helper — falling back to detached re-exec');
   }
 
   const execPath = process.execPath;
@@ -2790,13 +3270,46 @@ function reExecManager(out: (msg: string) => void): void {
   // process.kill(pid, 'SIGTERM') in-process; it never reaches the
   // platform's console-control-event mechanism so we don't need
   // CTRL_BREAK_EVENT magic here.
-  setTimeout(() => {
-    try {
-      process.kill(process.pid, 'SIGTERM');
-    } catch {
-      // Last-ditch fallback: if SIGTERM somehow can't be delivered to
-      // self, still exit so the new child takes over cleanly.
-      process.exit(0);
-    }
-  }, 250).unref?.();
+  setTimeout(() => terminateSelfGracefully(), 250).unref?.();
+}
+
+/**
+ * 서비스 재기동 헬퍼를 띄운다 — 업데이터 헬퍼와 같은 스크립트를 "설치 없이 재기동만" 으로
+ * 쓴다(npmSpec 빈 값). 헬퍼는 이 pid 가 끝나기를 기다렸다가 서비스 명령을 돌리고, 그것이
+ * 실패하면 예전처럼 분리 자식(`--force`)으로 띄운다.
+ */
+function spawnServiceRelaunchHelper(out: (msg: string) => void, supervision: ServiceSupervision): boolean {
+  let helperPath: string;
+  try {
+    helperPath = writeNpmGlobalUpdater(out);
+  } catch {
+    return false;
+  }
+  const baseArgs = (process.argv.slice(2) || []).filter((a) => a !== '--force' && a !== '-f');
+  try {
+    const child = spawn(
+      process.execPath,
+      [
+        helperPath,
+        String(process.pid),
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        JSON.stringify(supervision.relaunch),
+        process.execPath,
+        process.argv[1] || '',
+        ...baseArgs,
+      ],
+      { detached: true, stdio: 'ignore', cwd: tmpdir(), env: process.env, shell: false, windowsHide: true },
+    );
+    child.unref();
+    return true;
+  } catch (err: any) {
+    out(`Self-update: could not spawn the service relaunch helper: ${err?.message ?? err}`);
+    return false;
+  }
 }

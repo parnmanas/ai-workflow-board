@@ -6,10 +6,12 @@
 // 매니저의 의존성으로 번들했다(83b519f4). 하지만 범위가 `^0.84.0` 이라 0.85 가 나와도 매니저를
 // 다시 깔아도 따라오지 않았고 — **운영자가 어댑터를 올릴 방법은 여전히 없었다.**
 //
-// 그래서 두 번째 출처를 둔다: **매니저 홈에 운영자가 설치한 어댑터**(`managed`).
-// `update_acp_adapter` 커맨드가 `npm install --prefix <home>/acp-adapters <pkg>@latest` 로
-// 여기에 설치한다. 패키지 디렉터리가 아니라 홈에 두는 이유는 **매니저 업데이트에도 살아남게**
-// 하기 위해서다(`npm i -g awb-agent-manager` 는 패키지 디렉터리를 통째로 갈아엎는다).
+// 그래서 두 번째 출처를 둔다: **운영자가 설치한 어댑터**(`managed`).
+// `update_acp_adapter` 커맨드가 `npm install --prefix <공유 디렉터리>/acp-adapters <pkg>@latest` 로
+// 여기에 설치한다(공유 디렉터리 = 같은 장비의 매니저들이 나누는 `awb-agent-manager-host/`, 공유가
+// 꺼진 홈이면 `<home>/acp-adapters`). 패키지 디렉터리가 아니라 그 밖에 두는 이유는 **매니저
+// 업데이트에도 살아남게** 하기 위해서다(`npm i -g awb-agent-manager` 는 패키지 디렉터리를 통째로
+// 갈아엎는다). 예전 홈 위치에 올려 둔 어댑터도 계속 후보다.
 //
 // 둘 다 있으면 **더 새 것**을 쓴다. 그래야
 //   - 운영자가 올린 어댑터가 매니저 재설치로 조용히 되돌아가지 않고,
@@ -30,13 +32,34 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 
 import { AGENT_MANAGER_HOME } from '../constants.js';
+import { defaultHostDir } from '../host-shared.js';
 import type { CliAcpCommand } from './cli-module.js';
 
 const require_ = createRequire(import.meta.url);
 
-/** 운영자가 올린 어댑터를 두는 곳. 테스트는 `AWB_ACP_ADAPTERS_DIR` 로 격리한다. */
+/**
+ * 운영자가 올린 어댑터를 두는 곳. 테스트는 `AWB_ACP_ADAPTERS_DIR` 로 격리한다.
+ *
+ * 같은 장비의 매니저들이 나누는 디렉터리(host-shared.ts)에 둔다 — 장비의 CLI 는 하나라 그 어댑터도
+ * 하나여야 한다. 홈마다 두던 시절에는 한 장비의 두 매니저가 서로 다른 어댑터 버전을 보고했고, 한쪽
+ * AWB 에서 올려도 다른 쪽은 그대로였다(PC.VX). 공유가 꺼진 홈은 예전처럼 홈 아래에 둔다.
+ */
 export function managedAdapterRoot(): string {
-  return process.env.AWB_ACP_ADAPTERS_DIR?.trim() || join(AGENT_MANAGER_HOME, 'acp-adapters');
+  const override = process.env.AWB_ACP_ADAPTERS_DIR?.trim();
+  if (override) return override;
+  const hostDir = defaultHostDir();
+  return hostDir ? join(hostDir, 'acp-adapters') : legacyAdapterRoot();
+}
+
+/** 예전(홈별) 설치 위치 — 이미 그곳에 올린 어댑터도 계속 후보로 본다. */
+function legacyAdapterRoot(): string {
+  return join(AGENT_MANAGER_HOME, 'acp-adapters');
+}
+
+/** 운영자가 올린 어댑터를 찾아볼 곳들(중복 제거). */
+function managedAdapterRoots(): string[] {
+  if (process.env.AWB_ACP_ADAPTERS_DIR?.trim()) return [managedAdapterRoot()];
+  return [...new Set([managedAdapterRoot(), legacyAdapterRoot()])];
 }
 
 export interface ResolvedAcpAdapter extends CliAcpCommand {
@@ -50,11 +73,18 @@ export function resolveBundledAcpCommand(pkg: string, binName?: string): CliAcpC
   return found ? { command: found.command, args: found.args } : null;
 }
 
-/** 매니저 홈에 운영자가 설치한 어댑터. 없으면 null. */
+/** 운영자가 설치한 어댑터 — 공유 위치와 예전 홈 위치 중 더 새 것. 없으면 null. */
 export function resolveManagedAcpAdapter(pkg: string, binName?: string): ResolvedAcpAdapter | null {
-  const manifestPath = join(managedAdapterRoot(), 'node_modules', ...pkg.split('/'), 'package.json');
-  if (!existsSync(manifestPath)) return null;
-  return fromManifest(manifestPath, binName, 'managed');
+  let best: ResolvedAcpAdapter | null = null;
+  for (const root of managedAdapterRoots()) {
+    const manifestPath = join(root, 'node_modules', ...pkg.split('/'), 'package.json');
+    if (!existsSync(manifestPath)) continue;
+    const found = fromManifest(manifestPath, binName, 'managed');
+    if (!found) continue;
+    const cmp = best ? compareVersions(found.version, best.version) : 1;
+    if (!best || (cmp !== null && cmp > 0)) best = found;
+  }
+  return best;
 }
 
 /**

@@ -20,16 +20,82 @@
 // sysvinit on a host that has both systemd and /etc/init.d).
 
 import { existsSync, mkdirSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
-import { dirname, resolve as pathResolve, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { dirname, resolve as pathResolve, join, posix as posixPath, win32 as win32Path } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { AGENT_MANAGER_HOME } from './constants.js';
 
-/** Windows 예약 작업 이름 — 업데이터의 task 경유 인계(schtasks /Run)가 같은 값을 쓴다. */
-export const WINDOWS_TASK_NAME = 'awb-agent-manager';
+/** npm 패키지 이름 — 서비스 이름과 다르다(서비스 이름은 인스턴스마다 갈린다). */
+const PACKAGE_NAME = 'awb-agent-manager';
+const BASE_SERVICE_NAME = 'awb-agent-manager';
+const BASE_LAUNCHD_LABEL = 'com.awb.agent-manager';
+
+/**
+ * AWB_AGENT_MANAGER_HOME 이 없을 때의 홈(constants.ts 의 configBaseDir 와 같은 규칙).
+ * 이 홈의 인스턴스만 접미사 없는 서비스 이름을 쓴다 — 예전 설치와 이름이 같아야 한다.
+ */
+export function defaultManagerHome(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const P = pathFor(platform);
+  if (platform === 'win32' && env.APPDATA) return P.join(env.APPDATA, BASE_SERVICE_NAME);
+  if (env.XDG_CONFIG_HOME) return P.join(env.XDG_CONFIG_HOME, BASE_SERVICE_NAME);
+  return P.join(homedir(), '.config', BASE_SERVICE_NAME);
+}
+
+/** 플랫폼에 맞는 경로 규칙 — 판정 함수를 다른 OS 에서도 테스트할 수 있게 한다. */
+function pathFor(platform: NodeJS.Platform): typeof posixPath {
+  return platform === 'win32' ? win32Path : posixPath;
+}
+
+function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
+  const P = pathFor(platform);
+  const na = P.resolve(a);
+  const nb = P.resolve(b);
+  return platform === 'win32' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
+/**
+ * 한 장비에 매니저가 여러 개(홈마다 하나) 돌 수 있다. 서비스 이름이 하나로 고정돼 있으면 두 번째
+ * `service install` 이 첫 번째의 예약 작업/유닛을 덮어쓰고(`schtasks /Create /F`), 업데이트의
+ * 재기동(`schtasks /Run awb-agent-manager`)이 **다른 인스턴스의** 작업을 깨운다 — 그 작업은 이미
+ * 돌고 있으니 아무 일도 일어나지 않고, 정작 이 인스턴스는 돌아오지 못한다.
+ * 그래서 기본 홈은 예전 이름 그대로, 다른 홈은 홈 이름에서 딴 접미사를 붙인다:
+ * `awb-agent-manager-parnmanas` 홈 → `awb-agent-manager-parnmanas`.
+ */
+export function serviceSuffixForHome(
+  home: string = AGENT_MANAGER_HOME,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (samePath(home, defaultManagerHome(env, platform), platform)) return null;
+  const P = pathFor(platform);
+  const abs = P.resolve(home);
+  const name = P.basename(abs);
+  const conventional = /^awb-agent-manager[-._](.+)$/i.exec(name);
+  const raw = conventional
+    ? conventional[1]
+    : `${name}-${createHash('sha256').update(abs).digest('hex').slice(0, 6)}`;
+  const safe = raw.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
+  return safe || createHash('sha256').update(abs).digest('hex').slice(0, 8);
+}
+
+/** 이 홈의 서비스 이름(systemd 유닛 · sysvinit 스크립트 · Windows 예약 작업). */
+export function serviceNameForHome(home: string = AGENT_MANAGER_HOME, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const suffix = serviceSuffixForHome(home, env, platform);
+  return suffix ? `${BASE_SERVICE_NAME}-${suffix}` : BASE_SERVICE_NAME;
+}
+
+/** 이 홈의 launchd label. */
+export function launchdLabelForHome(home: string = AGENT_MANAGER_HOME, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  const suffix = serviceSuffixForHome(home, env, platform);
+  return suffix ? `${BASE_LAUNCHD_LABEL}.${suffix}` : BASE_LAUNCHD_LABEL;
+}
+
+/** Windows 예약 작업 이름 — 업데이터의 task 경유 재기동(schtasks /Run)이 같은 값을 쓴다. */
+export const WINDOWS_TASK_NAME = serviceNameForHome();
 const SERVICE_NAME = WINDOWS_TASK_NAME;
-const LAUNCHD_LABEL = 'com.awb.agent-manager';
+export const LAUNCHD_LABEL = launchdLabelForHome();
 const SERVICE_DIR = join(AGENT_MANAGER_HOME, 'service');
 const WINDOWS_LAUNCHER_PATH = join(SERVICE_DIR, 'launch-hidden.vbs');
 const WINDOWS_TASK_XML_PATH = join(SERVICE_DIR, 'task.xml');
@@ -91,7 +157,7 @@ function detectExecPath(override?: string): string {
   const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const npmRoot = spawnSync(npmBin, ['root', '-g'], { encoding: 'utf8' });
   if (npmRoot.status === 0) {
-    const globalMain = join(npmRoot.stdout.trim(), SERVICE_NAME, 'dist', 'main.js');
+    const globalMain = join(npmRoot.stdout.trim(), PACKAGE_NAME, 'dist', 'main.js');
     if (existsSync(globalMain)) return pathResolve(globalMain);
   }
 
@@ -697,10 +763,16 @@ export function windowsElevatedTaskCreateScript(opts: {
   );
 }
 
-export function windowsHiddenLauncher(opts: { execPath: string; nodeBin: string }): string {
+export function windowsHiddenLauncher(opts: { execPath: string; nodeBin: string; home?: string | null }): string {
   const nodeBin = vbString(opts.nodeBin);
   const execPath = vbString(opts.execPath);
-  return `Option Explicit\r\nDim shell, rc, command\r\nSet shell = CreateObject("WScript.Shell")\r\ncommand = """${nodeBin}"" ""${execPath}"""\r\nrc = shell.Run(command, 0, True)\r\nWScript.Quit rc\r\n`;
+  // 기본 홈이 아닌 인스턴스는 예약 작업이 띄울 때도 그 홈을 써야 한다 — systemd 유닛 ·
+  // launchd plist · sysvinit 스크립트는 이미 AWB_AGENT_MANAGER_HOME 을 싣는데 이 launcher 만
+  // 빠져 있어, 두 번째 인스턴스의 작업이 기본 홈의 매니저를 띄웠다.
+  const homeLine = opts.home
+    ? `shell.Environment("PROCESS")("AWB_AGENT_MANAGER_HOME") = "${vbString(opts.home)}"\r\n`
+    : '';
+  return `Option Explicit\r\nDim shell, rc, command\r\nSet shell = CreateObject("WScript.Shell")\r\n${homeLine}command = """${nodeBin}"" ""${execPath}"""\r\nrc = shell.Run(command, 0, True)\r\nWScript.Quit rc\r\n`;
 }
 
 export function windowsTaskXml(opts: { launcherPath: string; user: string; isSystem: boolean; wscriptPath?: string }): string {
@@ -784,7 +856,11 @@ async function installWindows(options: ServiceInstallOptions): Promise<ServiceIn
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
   const systemWscript = systemRoot ? join(systemRoot, 'System32', 'wscript.exe') : 'wscript.exe';
   const wscriptPath = existsSync(systemWscript) ? systemWscript : 'wscript.exe';
-  const launcher = windowsHiddenLauncher({ execPath, nodeBin });
+  const launcher = windowsHiddenLauncher({
+    execPath,
+    nodeBin,
+    home: serviceSuffixForHome() ? AGENT_MANAGER_HOME : null,
+  });
   const xml = windowsTaskXml({ launcherPath: WINDOWS_LAUNCHER_PATH, user, isSystem, wscriptPath });
   const xmlPath = WINDOWS_TASK_XML_PATH;
 

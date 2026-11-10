@@ -120,9 +120,15 @@ export interface BootVerificationRecord {
  * 새 버전이 올라오면 핀과 무관하게 정상 오퍼·설치된다(ralf 2026-10-03: 채널 동결은
  * 다음 버전까지 막아 호스트를 264 에 가뒀다).
  *
- * **해제는 사람만 한다** — 이 모듈은 핀을 쓰기만 하고 어디서도 지우지 않는다.
- * 자동 해제 경로를 만들면 "복귀 → 해제 → 같은 나쁜 버전 재설치 → 복귀" 루프가
- * 그대로 되살아나기 때문이다(정책 G). 운영자의 해제 수단은 파일 삭제다.
+ * **자동 해제는 딱 하나뿐이다: 그 버전이 실제로 돌아 하트비트를 한 번 성공했을 때**
+ * (clearRefutedUpdatePin). 핀의 전제("이 빌드는 부팅하지 못한다")가 관측으로 반증된
+ * 경우다. 그 밖의 자동 해제 경로를 만들면 "복귀 → 해제 → 같은 나쁜 버전 재설치 → 복귀"
+ * 루프가 되살아난다(정책 G) — 반증 해제는 나쁜 빌드에서 일어날 수 없으므로 이 루프를 만들지
+ * 않는다(나쁜 빌드는 하트비트에 닿지 못한다). 그 외 해제는 운영자의 파일 삭제다.
+ *
+ * 이 해제가 필요했던 이유(PC.VX 2026-11-09): 같은 설치본을 쓰는 두 매니저 중 한쪽이 거짓
+ * 부팅 실패로 v1.6.338 을 핀했고, 다른 쪽이 그 버전을 설치하자 핀한 쪽도 재시작으로 그 버전을
+ * 멀쩡히 돌게 됐다. 그런데 핀은 남아 화면이 "(up to date) ⚠ (v1.6.338 skipped)" 로 모순됐다.
  */
 export interface UpdatePinRecord {
   /** 복귀해서 지금 돌고 있는 버전. */
@@ -341,11 +347,45 @@ export function readUpdatePin(dir: string = AGENT_MANAGER_HOME): UpdatePinRecord
 }
 
 /**
- * 복귀 핀을 기록한다. 이 모듈에 핀을 *지우는* 함수는 일부러 없다 — 정책 G 의
- * "핀 해제는 사람만 한다"를 코드 구조로 지킨다.
+ * 복귀 핀을 기록한다. 핀을 지우는 함수는 clearRefutedUpdatePin 하나뿐이고, 그것도 핀이
+ * 가리키는 그 버전이 지금 멀쩡히 돈다는 관측이 있을 때만 지운다(위 UpdatePinRecord 주석).
  */
 export function writeUpdatePin(pin: UpdatePinRecord, dir: string = AGENT_MANAGER_HOME): void {
   writeJsonFile(updatePinPath(dir), pin);
+}
+
+/**
+ * 반증된 핀을 지운다 — 핀의 badVersion 이 **지금 돌며 하트비트를 성공한 버전**과 같을 때만.
+ * 호출자는 그 관측(하트비트 1회 성공)을 한 뒤에만 부른다. 지웠으면 그 핀을 돌려준다.
+ */
+export function clearRefutedUpdatePin(
+  dir: string,
+  healthyRunningVersion: string,
+): UpdatePinRecord | null {
+  const pin = readUpdatePin(dir);
+  if (!pin?.badVersion || pin.badVersion !== healthyRunningVersion) return null;
+  try {
+    unlinkSync(updatePinPath(dir));
+  } catch {
+    return null;
+  }
+  return pin;
+}
+
+/**
+ * 이 매니저에 걸린 핀 — 자기 홈의 핀과 같은 설치본을 쓰는 인스턴스들이 나누는 핀
+ * (host-shared.ts) 중 **더 최근 것**. 한 설치본의 실패는 그 설치본을 쓰는 모두의 것이다:
+ * 한쪽이 되돌린 버전을 다른 쪽이 다시 설치하면 되돌린 쪽까지 같은 디스크를 쓴다.
+ */
+export function readEffectiveUpdatePin(
+  homeDir: string = AGENT_MANAGER_HOME,
+  sharedDir: string | null = null,
+): UpdatePinRecord | null {
+  const own = readUpdatePin(homeDir);
+  const shared = sharedDir ? readUpdatePin(sharedDir) : null;
+  if (!own) return shared;
+  if (!shared) return own;
+  return shared.pinnedAtMs > own.pinnedAtMs ? shared : own;
 }
 
 /**

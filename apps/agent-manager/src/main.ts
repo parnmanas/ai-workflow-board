@@ -68,6 +68,16 @@ import { runWithSudo } from './lib/sudo-runner.js';
 import { describeInstallMethod, detectInstallMethod, type InstallMethod } from './lib/cli-install-method.js';
 import { readSnapChannelLatest } from './lib/snap-channel.js';
 import { canonicalPathKey } from './lib/cli-resolver.js';
+import {
+  HostStampWatcher,
+  bumpHostStamp,
+  defaultHostDir,
+  describeHostSharing,
+  liveHostLockHolder,
+  managerInstallLockName,
+  withHostLock,
+} from './lib/host-shared.js';
+import { runServiceHandbackIfStray } from './lib/service-handback.js';
 import type { CliInstallEntry } from './lib/instance-heartbeat.js';
 import {
   checkAuxiliaryCli,
@@ -453,6 +463,22 @@ async function runRuntime(
     );
   }
   let lock: LockHandle;
+  log(describeHostSharing());
+  // 같은 설치본을 쓰는 다른 매니저(또는 그 업데이터 헬퍼)가 지금 설치 중이면 부팅하지 않는다 —
+  // 디스크의 빌드가 반쯤 바뀌어 있다. 이 프로세스를 띄운 서비스(예약 작업 · launchd · systemd)가
+  // 곧 다시 띄우고, 설치를 끝낸 쪽이 서비스로 새 빌드를 띄운다. PC.VX 11-05: 이 틈에 예약 작업이
+  // 띄운 프로세스가 부팅 검증을 시작했다가 업데이터의 재기동에 밀려 "부팅 2회" 로 세어졌다.
+  {
+    const installer = liveHostLockHolder(defaultHostDir(), managerInstallLockName());
+    if (installer && installer.pid !== process.pid) {
+      const msg =
+        `agent-manager: the shared install is being updated by pid=${installer.pid}` +
+        `${installer.home ? ` (${installer.home})` : ''} — not starting v${version} now; the service retries shortly`;
+      log(msg);
+      process.stderr.write(`${msg}\n`);
+      process.exit(75);
+    }
+  }
   // 업데이터의 예약 작업 인계 — 구 매니저가 죽어 락이 풀릴 때까지 기다렸다가 정상
   // 회수한다(강제 인수 없음). 기다려도 안 죽으면 표식을 버리고 정상 획득으로 가서,
   // 살아 있는 owner 면 빨리 실패하고 예약 작업이 1분 뒤 다시 띄운다.
@@ -927,6 +953,10 @@ async function runRuntime(
     const cut = Math.max(binPath.lastIndexOf('/'), binPath.lastIndexOf('\\'));
     return canonicalPathKey(cut > 0 ? binPath.slice(0, cut) : binPath);
   };
+  // 같은 장비의 다른 매니저도 같은 설치본(전역 prefix · 어댑터 디렉터리)을 올린다 — 프로세스 안의
+  // 직렬화만으로는 두 매니저의 동시 설치를 막지 못한다. 그래서 장비 공유 잠금도 함께 쥔다
+  // (host-shared.ts). 공유가 꺼진 홈이면 프로세스 안 직렬화만 남는다.
+  const sharedHostDir = defaultHostDir();
   const withCliUpdateLock = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
     const prev = cliUpdateLocks.get(key);
     let release!: () => void;
@@ -935,7 +965,12 @@ async function runRuntime(
     cliUpdateLocks.set(key, composed);
     if (prev) await prev.catch(() => {});
     try {
-      return await fn();
+      return await withHostLock(sharedHostDir, `cli-update:${key}`, 'cli-update', fn, {
+        waitMs: 15 * 60_000,
+        pollMs: 2000,
+        onWait: (h) =>
+          log(`update: waiting for another manager on this machine to finish updating ${key} (pid=${h.pid}${h.home ? `, ${h.home}` : ''})`),
+      });
     } finally {
       release();
       // 체인이 다 빠진 뒤에만 지운다 — 뒤에 줄 선 쪽이 이미 값을 교체했다면 그쪽 것이다.
@@ -992,6 +1027,8 @@ async function runRuntime(
 
   /** 업데이트 뒤 캐시를 되짚고 하트비트 1회를 보낸다. 여러 설치본을 올렸어도 한 번만. */
   const afterCliUpdate = async (anyOk: boolean): Promise<boolean> => {
+    // 같은 장비의 다른 매니저가 다음 하트비트에 이 설치본들을 다시 읽게 한다.
+    if (anyOk) bumpHostStamp(sharedHostDir, 'cli-installs');
     if (anyOk) {
       try {
         availableModels = await gatherAvailableModels();
@@ -1023,6 +1060,7 @@ async function runRuntime(
       out.push(await withCliUpdateLock(`acp-adapters:${managedAdapterRoot()}`, () =>
         updateManagedAcpAdapter(spec.pkg, spec.bin, { log })));
     }
+    if (out.some((r) => r.ok)) bumpHostStamp(sharedHostDir, 'acp-adapters');
     // 재시작 없이 화면이 바로 따라오게 — 버전·출처를 다시 읽고 최신 버전도 다시 조회한다.
     acpAdapters = await collectAcpAdapters(findOnPath);
     await refreshAcpAdapterLatestVersions();
@@ -1395,6 +1433,8 @@ async function runRuntime(
   let uploadTimer: NodeJS.Timeout | null = null;
   let cliLatestTimer: NodeJS.Timeout | null = null;
   let modelsRefreshTimer: NodeJS.Timeout | null = null;
+  let hostStampTimer: NodeJS.Timeout | null = null;
+  let serviceHandbackTimer: NodeJS.Timeout | null = null;
 
   // Outbox backstop — a POST can fail transiently while the SSE stream itself
   // stays up (single dropped request, brief LB hiccup), in which case no
@@ -1868,6 +1908,8 @@ async function runRuntime(
     instanceHeartbeat._real?.stop();
     if (cliLatestTimer) clearInterval(cliLatestTimer);
     if (modelsRefreshTimer) clearInterval(modelsRefreshTimer);
+    if (hostStampTimer) clearInterval(hostStampTimer);
+    if (serviceHandbackTimer) clearTimeout(serviceHandbackTimer);
     updateChecker.stop();
     if (uploadTimer) {
       clearInterval(uploadTimer);
@@ -1990,6 +2032,44 @@ async function runRuntime(
         (disruptive ? ' — server/apiKey changes need a manager restart to take effect' : ''),
     );
   });
+
+  // 같은 장비의 다른 매니저가 CLI 나 ACP 어댑터를 올렸으면 다시 읽는다 — 그러지 않으면 이 매니저는
+  // CLI 설치본 재열거 주기(3시간)까지 옛 버전과 "Update" 를 보여 줬다.
+  const hostStamps = new HostStampWatcher(sharedHostDir);
+  hostStamps.changed('cli-installs');
+  hostStamps.changed('acp-adapters');
+  hostStampTimer = setInterval(() => {
+    void (async () => {
+      let changed = false;
+      if (hostStamps.changed('cli-installs')) {
+        log('update: another manager on this machine updated a CLI — re-reading CLI installs');
+        await refreshCliInstalls();
+        try {
+          availableModels = await gatherAvailableModels();
+          availableModelsAt = new Date().toISOString();
+        } catch (err: any) {
+          log(`update: model re-enumeration failed: ${err?.message ?? err}`);
+        }
+        changed = true;
+      }
+      if (hostStamps.changed('acp-adapters')) {
+        log('update: another manager on this machine updated an ACP adapter — re-reading adapters');
+        acpAdapters = await collectAcpAdapters(findOnPath);
+        changed = true;
+      }
+      if (changed) await instanceHeartbeat._real?.postNow();
+    })().catch((err: any) => log(`update: host change check failed: ${err?.message ?? err}`));
+  }, 30_000);
+  hostStampTimer.unref?.();
+
+  // 서비스 밖에서 돌고 있으면(예전 빌드의 업데이트가 분리 자식으로 띄운 경우) 서비스로 넘긴다.
+  // 부팅 직후는 피한다 — 이 프로세스가 막 서비스에 의해 떴을 수도 있고, 연결·재개가 먼저다.
+  serviceHandbackTimer = setTimeout(() => {
+    void runServiceHandbackIfStray({ log, restart: () => restartManager({ log }) }).catch((err: any) =>
+      log(`Service: hand-back check failed: ${err?.message ?? err}`),
+    );
+  }, 2 * 60_000);
+  serviceHandbackTimer.unref?.();
 
   log('agent-manager ready');
 }

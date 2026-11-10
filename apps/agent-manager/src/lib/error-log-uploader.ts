@@ -39,6 +39,8 @@ export function classify(
 
   if (/^Uncaught error:|^Unhandled rejection:/.test(msg))
     return { level: 'fatal', category: 'crash' };
+  // 75 = 같은 설치본을 다른 매니저가 설치하는 중이라 부팅을 미뤘다(main.ts) — 충돌이 아니다.
+  if (/^EXIT code=75$/.test(msg)) return { level: 'warn', category: 'lifecycle' };
   if (/^EXIT code=[1-9]/.test(msg)) return { level: 'fatal', category: 'crash' };
   if (/^SSE error:/.test(msg)) return { level: 'error', category: 'sse' };
   if (/^Presence ping failed:/.test(msg)) return { level: 'error', category: 'presence' };
