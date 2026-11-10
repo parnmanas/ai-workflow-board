@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   HostStampWatcher,
@@ -67,11 +67,12 @@ test('hostDirForHome: 관례 이름의 홈끼리 같은 공유 디렉터리를 �
   const env = {};
   const a = hostDirForHome('/u/.config/awb-agent-manager', env);
   const b = hostDirForHome('/u/.config/awb-agent-manager-parnmanas', env);
-  assert.equal(a, '/u/.config/awb-agent-manager-host');
+  // 경로는 플랫폼 규칙으로 푼다 — Windows 에서 '/u/...' 는 'D:\u\...' 가 된다.
+  assert.equal(a, resolve('/u/.config/awb-agent-manager-host'));
   assert.equal(a, b);
   assert.equal(hostDirForHome('/tmp/awb-boot-rollback-x1', env), null, '테스트 임시 홈끼리 핀을 나누면 안 된다');
   assert.equal(hostDirForHome('/u/.config/awb-agent-manager-host', env), null);
-  assert.equal(hostDirForHome('/srv/kakao', { AWB_AGENT_MANAGER_HOST_DIR: '/srv/shared' }), '/srv/shared');
+  assert.equal(hostDirForHome('/srv/kakao', { AWB_AGENT_MANAGER_HOST_DIR: '/srv/shared' }), resolve('/srv/shared'));
 });
 
 test('installStateDir: 같은 패키지 디렉터리끼리만 같은 설치본 상태를 본다', () => {
