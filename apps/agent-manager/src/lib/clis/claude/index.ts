@@ -16,6 +16,7 @@ import { claudeMemory } from './memory.js';
 import { claudeLogin } from './login.js';
 import { claudeSessionStore } from './sessions.js';
 import { resolveAcpAdapter } from '../bundled-acp.js';
+import { decideSessionClaude, sessionClaudeEnv } from './session-executable.js';
 
 /** claude 계열(claude/deepseek)이 공유하는 런타임 capability. */
 export const CLAUDE_FAMILY_CAPABILITIES: RuntimeCapabilities = {
@@ -114,9 +115,18 @@ export const claudeModule = defineCliModule({
       // PATH 의 수동 설치본은 번들이 없는 구버전 설치 호환용으로 남긴다.
       // managed(운영자가 올린 것) / bundled 중 더 새 것 — bundled-acp.ts.
       const adapter = resolveAcpAdapter('@agentclientprotocol/claude-agent-acp', 'claude-agent-acp');
-      if (adapter) return { command: adapter.command, args: adapter.args };
-      const found = await findOnPath('claude-agent-acp');
-      return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
+      const command = adapter
+        ? { command: adapter.command, args: adapter.args }
+        : await (async () => {
+            const found = await findOnPath('claude-agent-acp');
+            return found ? { command: found, args: [] } : { command: 'npx', args: ['--yes', '@agentclientprotocol/claude-agent-acp'] };
+          })();
+      // 어댑터는 `CLAUDE_CODE_EXECUTABLE` 이 없으면 **자기 SDK 가 번들한 claude** 를 띄운다 — 장비의
+      // claude 와 다른 파일 · 다른 버전이라 세션 모델 목록이 호스트마다 갈렸다. 장비의 claude 가
+      // 번들보다 같거나 새로우면 그것을 쓴다(session-executable.ts). env 는 결정이지 명령이 아니다.
+      const entry = adapter ? (adapter.args[0] ?? null) : null;
+      const env = sessionClaudeEnv(await decideSessionClaude(entry));
+      return Object.keys(env).length ? { ...command, env } : command;
     },
     operatorHome: resolveClaudeHome,
     storeSubdir: 'projects',

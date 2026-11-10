@@ -91,6 +91,11 @@ credential 폼, 로그인 화면, effort 편집기가 그 CLI 를 그린다.
 커맨드 ack 를 기다린 뒤 새 목록을 돌려준다). 오케스트레이션 로스터의 refresh 도 이 서비스를
 거친다. ACP 보고가 있으면 그 목록을 우선하며 하트비트 목록과 합치지 않는다.
 
+claude 는 두 출처가 **같은 바이너리**를 본다: 하트비트 스캔도, 세션(ACP 어댑터)도 장비의 `claude` 다 —
+어댑터가 SDK 와 함께 번들한 claude 가 아니라(`clis/claude/session-executable.ts`, 장비의 것이 번들보다
+오래됐을 때만 번들). 예전에는 세션이 번들 CLI 를 띄워서 어댑터 버전에 따라 호스트마다 세션 모델 목록이
+달랐다(2026-11-10, Fable 5.2 vs 5.1). 상세: `docs/agent-sessions.md` → 매니저 `agent-session-runner.ts` 항목.
+
 클라이언트는 `src/cli/hostModels.ts` 의 `useHostModels(managerAgentId, cli)` 하나를 쓴다 —
 Agent 템플릿/RuntimeSpec 선택기, 팀 슬롯 편집기, 세션 CLI 설정, 새 세션 모달, Runtime Hosts 화면 전부.
 훅은 열릴 때 목록이 비었거나(host×cli 당 한 번) 재열거 시각이 10분보다 오래됐으면 조용히

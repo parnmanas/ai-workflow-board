@@ -1695,3 +1695,37 @@ test('info RPC reads one session\'s recorded settings without loading history or
   await runner.handle(request('info', { request_id: 'info-missing', session_id: 'aaaaaaaa-0000-4000-8000-00000000ffff' }));
   assert.equal(server.rpc('info-missing').code, 'not_found');
 });
+
+// ─── 명령이 정한 env(CliAcpCommand.env) ───────────────────────────────────────
+// claude 모듈이 세션이 띄울 claude 실행 파일을 `CLAUDE_CODE_EXECUTABLE` 로 넘긴다
+// (clis/claude/session-executable.ts). 러너는 그것을 어댑터 env 에 **깔되** 운영자가 매니저 env 에
+// 둔 같은 키는 덮지 않는다.
+test('command env reaches the adapter process, below the operator env', async (t) => {
+  const captureDir = await mkdtemp(join(tmpdir(), 'awb-command-env-'));
+  t.after(() => rm(captureDir, { recursive: true, force: true }));
+  const captureFile = join(captureDir, 'env.json');
+  const { cwd, server, runner } = await harness(
+    t,
+    { commandResolver: async () => ({ command: process.execPath, args: [fixture], env: { CLAUDE_CODE_EXECUTABLE: '/host/bin/claude' } }) },
+    { FAKE_ACP_CAPTURE_FILE: captureFile, CLAUDE_CODE_EXECUTABLE: undefined },
+  );
+  await runner.handle(request('open', { request_id: 'cmd-env-open', session_id: null, cwd }));
+  assert.equal(server.rpc('cmd-env-open').ok, true, JSON.stringify(server.rpc('cmd-env-open')));
+  const cap = JSON.parse(await readFile(captureFile, 'utf8'));
+  assert.equal(cap.CLAUDE_CODE_EXECUTABLE, '/host/bin/claude', 'the executable the command chose reaches the adapter');
+});
+
+test('operator CLAUDE_CODE_EXECUTABLE in the manager env wins over the command env', async (t) => {
+  const captureDir = await mkdtemp(join(tmpdir(), 'awb-command-env-op-'));
+  t.after(() => rm(captureDir, { recursive: true, force: true }));
+  const captureFile = join(captureDir, 'env.json');
+  const { cwd, server, runner } = await harness(
+    t,
+    { commandResolver: async () => ({ command: process.execPath, args: [fixture], env: { CLAUDE_CODE_EXECUTABLE: '/host/bin/claude' } }) },
+    { FAKE_ACP_CAPTURE_FILE: captureFile, CLAUDE_CODE_EXECUTABLE: '/operator/pinned/claude' },
+  );
+  await runner.handle(request('open', { request_id: 'cmd-env-op-open', session_id: null, cwd }));
+  assert.equal(server.rpc('cmd-env-op-open').ok, true);
+  const cap = JSON.parse(await readFile(captureFile, 'utf8'));
+  assert.equal(cap.CLAUDE_CODE_EXECUTABLE, '/operator/pinned/claude', 'an operator pin is never overridden');
+});

@@ -108,6 +108,13 @@ export interface CliLoginSpec {
 export interface CliAcpCommand {
   readonly command: string;
   readonly args: readonly string[];
+  /**
+   * 어댑터 프로세스에 더할 env. **이미 있는 키는 덮지 않는다**(운영자가 매니저 env 에 둔 값이
+   * 이긴다). claude 가 세션이 띄울 실행 파일(`CLAUDE_CODE_EXECUTABLE`)을 여기로 넘긴다 —
+   * 명령과 같은 자리에서 정하는 이유는 "어느 어댑터가, 어느 CLI 바이너리를" 이 한 결정이기 때문이다
+   * (`claude/session-executable.ts`).
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /** 세션 기록 스캐너가 쓰는 공용 타입 — `agent-session-history.ts` 의 것과 구조가

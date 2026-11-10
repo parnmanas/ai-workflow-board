@@ -126,6 +126,8 @@ export interface AgentSessionRequest {
 export interface ResolvedAcpCommand {
   command: string;
   args: string[];
+  /** 어댑터 프로세스에 더할 env — 이미 있는 키는 덮지 않는다(`CliAcpCommand.env`). */
+  env?: Record<string, string>;
 }
 
 export interface AgentSessionRunnerOptions {
@@ -511,7 +513,7 @@ export async function resolveAcpCommandForCli(cli: string): Promise<ResolvedAcpC
   const sessions = cliSessions(cli);
   if (!sessions) throw new Error(`No ACP adapter is known for CLI "${cli}".`);
   const resolved = await sessions.resolveAcpCommand(findOnPath);
-  return { command: resolved.command, args: [...resolved.args] };
+  return { command: resolved.command, args: [...resolved.args], ...(resolved.env ? { env: { ...resolved.env } } : {}) };
 }
 
 /** 이 장비에서 세션을 열 수 있는 CLI — 하트비트 `acp_session_clis`. PATH 만 본다(spawn 없음).
@@ -954,7 +956,7 @@ export class AgentSessionRunner {
       throw new Error(`Working directory does not exist on this Runtime Host: ${cwd}`);
     }
     const resolver = this.#options.commandResolver ?? resolveAcpCommandForCli;
-    const { command, args } = await resolver(cli);
+    const { command, args, env: commandEnv } = await resolver(cli);
     const auth = await this.#prepareAuth(cli, cwd, request);
     log(`${tag} spawning ACP adapter cmd=${command} ${args.join(' ')} cwd=${cwd} auth=${auth.label}`);
     const agentEnv = await agentCredentialEnvFor(this.#config, request.account_id, this.#authEnvKeys(cli), tag);
@@ -964,6 +966,10 @@ export class AgentSessionRunner {
     // run before the awaiting continuation creates live. Keep the latest identity.
     let pendingAuthStatus: AcpAuthStatus | null = null;
     const env = this.#buildEnv(cli, requestedSessionId || 'new', auth, agentEnv, request.config_defaults);
+    // 명령이 정한 env(claude 의 `CLAUDE_CODE_EXECUTABLE`)는 운영자 env 아래에 깐다 — 이미 있는 키는 그대로.
+    for (const [key, value] of Object.entries(commandEnv ?? {})) {
+      if (env[key] === undefined) env[key] = value;
+    }
     const client = await AcpClient.spawn({
       command,
       args,

@@ -242,8 +242,21 @@ credential을 참조하는 기존 세션에는 오류 배너의 `Reconnect using
     "가끔 된다" 처럼 보였다. 작은 출력·테스트 seam 은 기존 pipe(`exec`) 그대로다.
 - **매니저 `agent-session-runner.ts`** — 세션당 ACP 어댑터 프로세스. 명령 우선순위(`clis/bundled-acp.ts`):
   env `AWB_ACP_COMMAND_<CLI>` → **managed / bundled 중 더 새 것** → PATH 의 `claude-agent-acp` / `codex-acp` /
-  `hermes-acp` → `npx --yes <pkg>`. 어댑터는 모델 id 를 **자기 번들에 하드코딩**하므로 어댑터 버전이 세션의
-  모델 목록·capability 를 정한다(0.79.0 이 세 호스트에서 조용히 5버전 썩어 Opus 5.5 가 세션에 안 뜬 적이 있다).
+  `hermes-acp` → `npx --yes <pkg>`. 어댑터 버전이 세션의 ACP capability 를 정한다(0.79.0 이 세 호스트에서 조용히
+  5버전 썩어 Opus 5.5 가 세션에 안 뜬 적이 있다).
+  - **claude 세션이 띄우는 claude 는 장비의 것이다** (`clis/claude/session-executable.ts`, 2026-11-10). claude-agent-acp 는
+    `@anthropic-ai/claude-agent-sdk` 를 쓰고 그 SDK 는 **자기 버전의 claude 네이티브 바이너리를 같이 깐다**
+    (`claude-agent-sdk-<platform>-<arch>/claude`); `CLAUDE_CODE_EXECUTABLE` 이 없으면 그것을 띄운다. 그래서 세션의 모델
+    목록이 장비의 `claude`(하트비트 모델 스캔 · 티켓 디스패치가 쓰는 파일)가 아니라 **어댑터가 번들한 CLI 버전**을 따라갔고,
+    같은 계정 · 같은 credential 인데 호스트마다 Fable 5.2 / 5.1 로 갈렸다(rolf/ralf 어댑터 0.102.0 = CLI 2.1.321, ragnar
+    0.101.0 = CLI 2.1.318). 이제 claude 모듈의 `resolveAcpCommand` 가 명령과 함께 env(`CliAcpCommand.env`)로
+    `CLAUDE_CODE_EXECUTABLE` 을 낸다: 장비의 claude(`resolveCliBin` + Windows shim 을 따라간 실제 파일)가 번들 CLI 보다
+    **같거나 새로우면 장비의 claude**, 더 오래됐으면 번들 CLI(SDK 가 모르는 플래그로 세션이 못 뜰 수 있다 — 로그에
+    `claude update` 를 권한다), claude 가 없는 장비는 번들 CLI. 버전은 `--version` 으로 재고 파일 mtime 이 바뀌면 다시 잰다.
+    결정은 매니저 로그 `[claude] sessions use <경로> — <사유>` 로 남는다(바뀔 때만). 운영자가 매니저 env 에
+    `CLAUDE_CODE_EXECUTABLE` 을 두면 그것이 이긴다(러너는 이미 있는 키를 덮지 않는다). 그러니 **새 모델이 세션에 안 보이면
+    어댑터가 아니라 그 장비의 `claude` 를 올린다**(화면의 CLI Update) — 어댑터 업데이트는 ACP 기능을 위한 것이다.
+    모델 목록은 그래도 세션을 한 번 열어야 다시 영속된다(아래 "모델 목록").
   - **bundled** — `awb-agent-manager` 의존성(`^0.84.0` / `^1.12.0`). 매니저와 함께 깔리지만 범위에 묶여, 새 어댑터가
     나와도 매니저를 다시 깔아서는 따라오지 않는다.
   - **managed** — 운영자가 Runtime Hosts 의 어댑터 줄 **Update**(`update_acp_adapter`, "전부 업데이트" 에도 포함)로

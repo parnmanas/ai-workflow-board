@@ -97,6 +97,8 @@ if (process.env.FAKE_ACP_CAPTURE_FILE) {
     HERMES_PROFILE: process.env.HERMES_PROFILE ?? null,
     // Agent Session credential 적용 검증용(agent-session-runner.test.mjs) — 다른 테스트는 읽지 않는다.
     CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null,
+    // 세션이 띄울 claude 실행 파일(clis/claude/session-executable.ts) — 명령이 정한 env 가 어댑터까지 닿는지.
+    CLAUDE_CODE_EXECUTABLE: process.env.CLAUDE_CODE_EXECUTABLE ?? null,
     CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
     CODEX_HOME: process.env.CODEX_HOME ?? null,
