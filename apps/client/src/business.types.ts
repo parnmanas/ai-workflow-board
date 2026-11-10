@@ -26,6 +26,8 @@ export interface BusinessTaskJournal {
   task: BusinessTask; company_revision: number; entries: BusinessTaskEntry[]; next_before: number | null;
   runs?: BusinessTaskRun[];
   execution_messages?: Array<{ id: string; content: string; type: string; created_at: string }>;
+  /** 이 업무가 이어 쓰는 Agent Session. 없으면 null(아직 실행 전이거나 예전 실행 대화로 돈 업무). */
+  session?: { manager_id: string; cli: string; session_id: string } | null;
   result: BusinessTaskEntry | null; decision: BusinessTaskEntry | null; open_requests: BusinessTaskEntry[];
 }
 export interface BusinessTaskEntryInput {

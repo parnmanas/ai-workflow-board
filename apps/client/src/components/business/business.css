@@ -537,7 +537,17 @@
 .business-task-back, .business-inline-link { background: none; border: 0; color: #c4b5fd; cursor: pointer; text-align: left; padding: 8px 0; font: inherit; }
 .business-task-back { margin: -12px 0 16px; min-height: 44px; }
 .business-inline-link { margin-inline: 8px; text-decoration: underline; }
-.business-task-workspace > .business-panel { margin-bottom: 20px; }
+.business-task-flow > .business-panel { margin-bottom: 20px; }
+.business-task-flow { min-width: 0; }
+/* 업무가 Agent Session 을 이어 쓰면: 왼쪽에 세션(스크롤해도 따라온다), 오른쪽에 정리된 결과 · 결정 · 요청 · 내역. */
+.business-task-workspace.with-session { max-width: 1800px; }
+.business-task-split { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(340px, 1fr); gap: 20px; align-items: start; }
+.business-task-session { position: sticky; top: 12px; display: flex; flex-direction: column; height: calc(100dvh - 250px); min-height: 480px; min-width: 0; overflow: hidden; border: 1px solid #334155a6; border-radius: 12px; background: #0f172a; }
+.business-task-split .business-task-summary { grid-template-columns: 1fr; }
+@container business (max-width: 1100px) {
+  .business-task-split { grid-template-columns: 1fr; }
+  .business-task-session { position: static; height: 72dvh; }
+}
 .business-task-workspace h2 { font-size: 15px; margin: 0 0 14px; }
 .business-task-workspace .business-work-title { font-size: 18px; line-height: 1.6; overflow-wrap: anywhere; }
 .business-task-context-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: #94a3b8; }

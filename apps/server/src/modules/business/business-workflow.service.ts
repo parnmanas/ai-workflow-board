@@ -21,6 +21,8 @@ import { formatAgentDisplayName } from '../../utils/agent-name';
 import { flushSqljs } from '../../db';
 import { RoomMessagingService } from '../chat-rooms/room-messaging.service';
 import { InstanceRegistryService } from '../agent-manager/instance-registry.service';
+import { AgentSessionsService } from '../agent-sessions/agent-sessions.service';
+import { agentSessionAcceptsPrompt } from '../../common/types/agent-sessions';
 import { BusinessService } from './business.service';
 import type { TicketActor } from '../tickets/ticket.service';
 
@@ -47,7 +49,9 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private ticking = false;
   constructor(@InjectDataSource() private readonly ds: DataSource, private readonly business: BusinessService,
-    private readonly messaging: RoomMessagingService, @Optional() private readonly registry?: InstanceRegistryService) {}
+    private readonly messaging: RoomMessagingService, @Optional() private readonly registry?: InstanceRegistryService,
+    // 업무 실행은 Agent Session 에서 돈다(아래 dispatch). 세션을 못 여는 Host·CLI 만 예전 실행 대화로 간다.
+    @Optional() private readonly sessions?: AgentSessionsService) {}
   onModuleInit() { this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 3000); this.timer.unref(); }
   onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
 
@@ -75,7 +79,17 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
     return spec;
   }
 
-  async assertIndependentCaller(accountId: string, caller: { agentId?: string; runtimeKey?: string; subagentTriggerId?: string; subagentSessionId?: string }) {
+  /** MCP 연결이 가리키는 네이티브 세션 id — 새로 만든 세션의 연결은 id 대신 참조값을 보낸다. */
+  private callerSession(caller: { agentId?: string; runtimeKey?: string; agentSessionId?: string }): string | null {
+    if (caller.runtimeKey || !caller.agentId || !caller.agentSessionId) return null;
+    return this.sessions?.resolveMcpSessionRef(caller.agentId, caller.agentSessionId) ?? caller.agentSessionId;
+  }
+
+  async assertIndependentCaller(accountId: string, caller: { agentId?: string; runtimeKey?: string; subagentTriggerId?: string; subagentSessionId?: string; agentSessionId?: string }) {
+    const session = this.callerSession(caller);
+    if (session && await this.ds.getRepository(BusinessTaskRun).existsBy({ account_id: accountId, session_manager_id: caller.agentId, session_id: session, status: 'running' })) {
+      throw new ForbiddenException('Business 담당 에이전트는 현재 업무를 직접 수행하고 결과를 제출하세요. 스스로 새 실행을 요청할 수 없습니다.');
+    }
     if (!caller.runtimeKey) return;
     const rows = await this.ds.getRepository(BusinessTaskRun).findBy({ account_id: accountId });
     if (rows.some(row => runtimeIdentityKey(row.agent_runtime) === caller.runtimeKey && row.agent_runtime.manager_agent_id === caller.agentId
@@ -122,19 +136,22 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
     return run;
   }
 
-  async complete(accountId: string, runId: string, body: unknown, caller: { agentId?: string; runtimeKey?: string; subagentTriggerId?: string }) {
+  async complete(accountId: string, runId: string, body: unknown, caller: { agentId?: string; runtimeKey?: string; subagentTriggerId?: string; agentSessionId?: string }) {
     const input = parse(businessRunResult, body);
     const row = await this.ds.getRepository(BusinessTaskRun).findOneBy({ id: runId, account_id: accountId });
     if (!row) throw new NotFoundException('업무 실행을 찾을 수 없습니다.');
     await this.owner(accountId);
     await this.runtime(row.agent_runtime, accountId);
-    if (!caller.runtimeKey || caller.runtimeKey !== runtimeIdentityKey(row.agent_runtime) || caller.agentId !== row.agent_runtime.manager_agent_id
-      || (caller.subagentTriggerId && caller.subagentTriggerId !== row.room_id)) throw new ForbiddenException('이 업무에 지정된 담당 에이전트만 실행 결과를 제출할 수 있습니다.');
+    // 세션으로 돈 요청은 **그 세션의 MCP 연결**만, 실행 대화로 돈 요청은 지정된 runtime 만 제출한다.
+    const viaSession = !!row.session_id && caller.agentId === row.session_manager_id && this.callerSession(caller) === row.session_id;
+    const viaRuntime = !row.session_id && !!caller.runtimeKey && caller.runtimeKey === runtimeIdentityKey(row.agent_runtime)
+      && caller.agentId === row.agent_runtime.manager_agent_id && (!caller.subagentTriggerId || caller.subagentTriggerId === row.room_id);
+    if (!viaSession && !viaRuntime) throw new ForbiddenException('이 업무에 지정된 담당 에이전트만 실행 결과를 제출할 수 있습니다.');
     const outputDigest = digest(input);
     if (row.output_digest === outputDigest && ['completed', 'needs_input'].includes(row.status)) return row;
     if (row.status !== 'running') throw new ConflictException('진행 중인 실행이 아닙니다. 현재 업무 상태를 다시 확인하세요.');
     const host = await this.ds.getRepository(RuntimeHost).findOneByOrFail({ id: row.agent_runtime.manager_agent_id });
-    const actor: TicketActor = { id: caller.runtimeKey, name: formatAgentDisplayName({ name: row.agent_runtime.label, manager_name: host.name }), type: 'agent' };
+    const actor: TicketActor = { id: caller.runtimeKey || `session:${row.session_id}`, name: formatAgentDisplayName({ name: row.agent_runtime.label, manager_name: host.name }), type: 'agent' };
     return this.ds.transaction(async manager => {
       const company = await this.business.company(row.company_id, accountId, manager);
       await this.business.claim(manager, company.id, accountId, company.revision);
@@ -189,6 +206,24 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
     if (!live.some(instance => instance.cli_adapters?.includes(spec.cli))) throw new BadRequestException('담당 Host에 선택한 CLI가 없습니다. 담당 에이전트 설정을 확인하세요.');
     const key = runtimeIdentityKey(spec);
+    // 세션으로 돌 수 있는가 — Host 가 그 CLI 의 세션을 열 수 있고 소유자가 세션 권한을 가졌을 때.
+    // 아니면 예전 실행 대화로 간다(그 화면에는 세션 대신 작업 대화가 나온다).
+    const useSession = !!this.sessions && hasPermission(owner.role, JSON.parse(owner.permissions || '[]'), PERMISSIONS.USE_AGENT_SESSIONS)
+      && (await this.sessions.listHosts(row.account_id)).some(host => host.manager_id === spec.manager_agent_id && host.clis.includes(spec.cli));
+    // 이 업무가 이어 쓰는 세션 — 같은 Host·CLI 로 돈 가장 최근 요청의 것.
+    const priorSession = useSession ? await this.ds.getRepository(BusinessTaskRun).findOne({
+      where: { task_id: row.task_id, account_id: row.account_id, session_manager_id: spec.manager_agent_id, session_cli: spec.cli, status: In(['completed', 'needs_input', 'failed']) },
+      order: { sequence: 'DESC' },
+    }).then(found => found?.session_id || '') : '';
+    if (priorSession) {
+      // 사용자가 그 세션에서 대화 중이면 끼어들지 않는다 — 턴이 끝나면 다음 tick 이 보낸다.
+      const state = this.sessions!.liveSnapshot(spec.manager_agent_id, spec.cli, priorSession);
+      if (state && !agentSessionAcceptsPrompt(state.status)) {
+        const message = '세션이 다른 대화를 처리하고 있습니다. 끝나면 이 요청을 이어서 보냅니다.';
+        if (row.last_error !== message) await this.ds.getRepository(BusinessTaskRun).update({ id: row.id, status: 'queued' }, { last_error: message });
+        return;
+      }
+    }
     const claimed = await this.ds.transaction(async manager => {
       const company = await this.business.company(row.company_id, row.account_id, manager);
       await this.business.claim(manager, company.id, row.account_id, company.revision);
@@ -197,9 +232,9 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
       const first = await repo.findOne({ where: { task_id: row.task_id, account_id: row.account_id, status: 'queued' }, order: { sequence: 'ASC' } });
       if (first?.id !== row.id) return null;
       const prior = await repo.findOne({ where: { task_id: row.task_id, account_id: row.account_id, status: In(['completed', 'needs_input']) }, order: { sequence: 'DESC' } });
-      let room = prior?.room_id && digest(prior.agent_runtime) === digest(spec)
+      let room = !useSession && prior?.room_id && digest(prior.agent_runtime) === digest(spec)
         ? await manager.getRepository(ChatRoom).findOneBy({ id: prior.room_id, account_id: row.account_id, run_kind: 'business' }) : null;
-      if (!room) {
+      if (!room && !useSession) {
         const task = await manager.getRepository(BusinessTask).findOneByOrFail({ id: row.task_id, company_id: company.id, account_id: row.account_id });
         room = await manager.getRepository(ChatRoom).save({ account_id: row.account_id, type: 'group', run_kind: 'business', name: `${company.name} · ${task.title}`.slice(0, 200), last_message_at: null });
         await manager.getRepository(ChatRoomParticipant).save([
@@ -208,7 +243,8 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
           { room_id: room.id, participant_type: 'user', participant_id: 'system', last_read_at: new Date(), left_at: null },
         ]);
       }
-      const won = await repo.update({ id: row.id, status: 'queued' }, { status: 'running', room_id: room.id, started_at: new Date(), last_error: '' });
+      const won = await repo.update({ id: row.id, status: 'queued' }, { status: 'running', room_id: room?.id || '', started_at: new Date(), last_error: '',
+        ...(useSession ? { session_manager_id: spec.manager_agent_id, session_cli: spec.cli, session_id: priorSession } : {}) });
       if (!won.affected) return null;
       const tasks = await manager.getRepository(BusinessTask).findBy({ company_id: company.id, account_id: row.account_id });
       const task = tasks.find(item => item.id === row.task_id)!;
@@ -233,9 +269,31 @@ export class BusinessWorkflowService implements OnModuleInit, OnModuleDestroy {
       '중간 진행·결정·문서 링크는 add_business_task_entry로 이 업무에 기록하세요. 기존 결과의 수정도 새 기록으로 남기세요.',
       '턴을 마치기 전에 반드시 complete_business_task_run을 호출하세요. run_id는 위 실행 ID입니다. summary에 실제 수행한 결과와 근거·문서 링크를 넣으세요. 사용자 정보·승인·외부 처리를 기다리면 status=needs_input, question에 필요한 다음 행동과 이유를 명확히 적으세요. 전체 맡은 업무가 실제 끝났을 때만 completed입니다. 조사만 끝난 것을 회사 설립 완료라고 보고하지 마세요.',
       '후속 질문의 답변은 같은 업무에서 새 요청으로 전달됩니다. 지금 가능한 업무는 끝까지 진행한 뒤 필요한 결정만 기다리세요.',
+      ...(useSession ? ['이 세션은 Business 업무 화면에 그대로 보이며, 사용자가 여기서 직접 질문하거나 추가로 요청할 수 있습니다. 그런 대화에는 바로 답하고, 그 결과로 업무의 결과·결정이 달라지면 add_business_task_entry(kind=result 또는 decision)로 정리해 남기세요 — 화면 오른쪽에는 그 정리된 기록만 표시됩니다.'] : []),
     ].join('\n\n');
-    const sent = await this.messaging.sendMessage(claimed.room.id, row.account_id, 'user', 'system', 'Business', prompt);
-    await this.ds.getRepository(BusinessTaskRun).update({ id: row.id, status: 'running' }, { dispatch_message_id: sent?.id || '' });
+    if (!useSession) {
+      const sent = await this.messaging.sendMessage(claimed.room!.id, row.account_id, 'user', 'system', 'Business', prompt);
+      await this.ds.getRepository(BusinessTaskRun).update({ id: row.id, status: 'running' }, { dispatch_message_id: sent?.id || '' });
+      return;
+    }
+    // 세션 실행: 이 업무의 세션이 없으면 담당 설정의 작업 폴더에서 새로 열고, 있으면 그 세션에 이어 보낸다
+    // (prompt 가 닫힌 세션을 다시 연다). 실패는 요청을 보존한 채 확인 필요로 남긴다 — 자동 재실행 없음.
+    try {
+      let sessionId = priorSession;
+      if (!sessionId) {
+        const opened = await this.sessions!.openSession(row.account_id, owner.id, spec.manager_agent_id, spec.cli, {
+          cwd: spec.working_dir, title: `${claimed.company.name} · ${claimed.task.title}`.slice(0, 120),
+        });
+        sessionId = opened.session_id;
+        await this.ds.getRepository(BusinessTaskRun).update({ id: row.id, status: 'running' }, { session_id: sessionId });
+      }
+      const { turn_id } = await this.sessions!.promptOnBehalf(row.account_id, owner.id, spec.manager_agent_id, spec.cli, sessionId, prompt);
+      await this.ds.getRepository(BusinessTaskRun).update({ id: row.id, status: 'running' }, { dispatch_message_id: turn_id });
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? ` (${error.message.slice(0, 300)})` : '';
+      await this.fail(await this.ds.getRepository(BusinessTaskRun).findOneByOrFail({ id: row.id }),
+        `세션에 요청을 보내지 못했습니다${detail}. 업무 화면의 세션에서 상태를 확인한 뒤 이어서 요청하세요.`);
+    }
   }
 
   async tick() {

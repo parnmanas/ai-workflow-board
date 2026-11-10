@@ -412,7 +412,11 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
 
 // ─── 세션 뷰 ────────────────────────────────────────────────────────────────
 
-function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
+/**
+ * 세션 하나의 화면(헤더 · 전사 · 작성란). 높이가 정해진 세로 flex 부모 안에 둔다 — Sessions 페이지와
+ * Business 업무 상세(업무가 이어 쓰는 세션)가 같은 것을 쓴다. 세션 화면을 표면마다 따로 만들지 말 것.
+ */
+export function SessionView({ accountId, managerId, cli, sessionId, host, onNew }: {
   accountId: string; managerId: string; cli: string; sessionId: string; host: AgentSessionHost | null; onNew: () => void;
 }) {
   useLocale();

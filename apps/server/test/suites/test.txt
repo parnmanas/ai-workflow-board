@@ -55,6 +55,7 @@ test/business-mail.test.mjs
 test/business-mcp-connectors.test.mjs
 test/business-mcp.test.mjs
 test/business-self-service.test.mjs
+test/business-session-run.test.mjs
 test/business-trademark-integrations.test.mjs
 test/business-trademark.test.mjs
 test/business-workflow.test.mjs

@@ -12,6 +12,7 @@ import Markdown from '../common/Markdown';
 import { BusinessExecutionStatus, BusinessWorkStartForm } from './BusinessWorkExecution';
 import { BusinessPageHeader } from './BusinessPageHeader';
 import { BusinessFoldPanel } from './BusinessFoldPanel';
+import { BusinessTaskSession } from './BusinessTaskSession';
 import { TaskForm } from './BusinessForms';
 import { dateTime, STAGES, TASK_STATUS } from './business.logic';
 
@@ -168,9 +169,12 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
     return String(value);
   };
   const openRequests = journal?.open_requests || [];
+  // 업무가 이어 쓰는 Agent Session — 왼쪽에 세션을 그대로 띄우고 오른쪽에는 정리된 기록만 둔다.
+  // 세션이 죽어도 여기서 상태를 보고 다시 열어 이어 간다. 세션 권한이 없으면 예전 한 줄 배치다.
+  const session = hasPermission('agent_sessions.use') ? journal?.session || null : null;
   const latestReply = comments.find(comment => comment.author_type === 'agent' && comment.type !== 'system');
 
-  return <div className="business-page business-task-workspace">
+  return <div className={`business-page business-task-workspace${session ? ' with-session' : ''}`}>
     <BusinessPageHeader title={task?.title || t('업무 상세')} context={<span className="business-task-company" title={company.name}>{company.name}</span>}
       actions={<Button onClick={() => journal?.runs?.length ? compose('request') : setStartForm(true)} disabled={busy || !journal}>{journal?.runs?.length ? t('추가·수정 요청') : t('에이전트에게 맡기기')}</Button>}
       moreActions={close => <>
@@ -182,7 +186,9 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
     <button className="business-task-back" onClick={onBack}>← {t('업무 목록으로')}</button>
     {error && <ErrorState message={error} onRetry={() => void refresh()} />}
     {!journal && !error && <p role="status">{t('업무 기록을 불러오는 중…')}</p>}
-    {task && <>
+    {task && <div className={session ? 'business-task-split' : undefined}>
+      {session && <BusinessTaskSession accountId={company.account_id} session={session} />}
+      <div className="business-task-flow">
       <section className="business-panel business-task-context" aria-label={t('업무 개요')}>
         <h2 className="business-work-title">{task.title}</h2>
         <div className="business-task-context-meta"><span className={`business-pill ${task.status}`}>{TASK_STATUS[task.status]}</span><span>{STAGES.find(s => s.id === task.stage)?.label}</span>{task.owner && <span>{task.owner}</span>}{task.due_on && <span>{t('기한')} · {task.due_on}</span>}
@@ -236,7 +242,8 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
       {!task.ticket_id && task.status !== 'done' && hasPermission('tickets.create') && <details className="business-panel"><summary>{t('티켓이 필요한 경우')}</summary><p className="business-muted">{t('필요할 때 이 업무의 실행 티켓을 만들 수 있습니다.')}</p><Button disabled={busy || !!task.blocked_by.length || !journal} onClick={async () => {
         setBusy(true); try { await api.createBusinessTaskTicket(company.id, taskId, journal!.company_revision); await load(); await onChanged(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
       }}>{t('티켓 만들기')}</Button></details>}
-    </>}
+      </div>
+    </div>}
     {startForm && <BusinessWorkStartForm company={company} taskId={taskId} initialContent={content.trim() || undefined} onClose={() => setStartForm(false)} onStarted={async () => { setContent(''); await load(); await onChanged(); setStartForm(false); }} />}
     {editing && journal && <TaskForm company={{ ...company, revision: journal.company_revision }} task={journal.task} tasks={detail.tasks} stage={journal.task.stage} onClose={() => setEditing(false)} onSaved={async deleted => { setEditing(false); if (deleted) { await onChanged(); onBack(); } else { await load(); await onChanged(); } }} />}
   </div>;

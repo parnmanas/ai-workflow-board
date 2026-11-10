@@ -350,3 +350,37 @@ test(`first-time Business agent setup uses the shared folder browser at ${size.w
   expect(f.errors).toEqual([]);
 });
 }
+
+test('a work item that runs in an Agent Session shows the session beside the curated results, stacked on phones', async ({ page }) => {
+  activeLocale = 'ko';
+  const f = await fixture(page, ['business.manage', 'agent_sessions.use']);
+  f.journal.session = { manager_id: runtime.manager_agent_id, cli: 'codex', session_id: '11111111-2222-4333-8444-555555555555' };
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto('/business/operations?company=company-header&stage=formation&task=task-header');
+  const session = page.locator('.business-task-session');
+  const results = page.locator('.business-task-flow');
+  await expect(session).toBeVisible();
+  await expect(session.locator('.awb-session-header')).toBeVisible();
+  await expect(page.getByRole('region', { name: ui('최신 결과'), exact: true })).toContainText('Initial formation plan');
+  const wide = await page.evaluate(() => {
+    const s = document.querySelector('.business-task-session').getBoundingClientRect();
+    const r = document.querySelector('.business-task-flow').getBoundingClientRect();
+    return { sideBySide: s.right <= r.x + 1 && Math.abs(s.y - r.y) < 4, sessionHeight: s.height, sessionBottom: s.bottom, viewport: innerHeight, sessionWidth: s.width, resultsWidth: r.width,
+      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 };
+  });
+  expect(wide.sideBySide).toBe(true);
+  expect(wide.sessionHeight).toBeGreaterThan(480);
+  // 작성란이 화면 밖으로 잘리지 않는다 — 세션 전체가 첫 화면에 들어온다.
+  expect(wide.sessionBottom).toBeLessThanOrEqual(wide.viewport);
+  expect(wide.sessionWidth).toBeGreaterThan(wide.resultsWidth);
+  expect(wide.overflow).toBe(false);
+  if (process.env.BUSINESS_SESSION_SHOT) await page.screenshot({ path: process.env.BUSINESS_SESSION_SHOT });
+  // 좁은 화면: 세션이 위, 정리된 기록이 아래 — 가로 넘침 없이.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => {
+    const s = document.querySelector('.business-task-session').getBoundingClientRect();
+    const r = document.querySelector('.business-task-flow').getBoundingClientRect();
+    return s.bottom <= r.y + 1 && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1;
+  })).toBe(true);
+  expect(f.errors).toEqual([]);
+});

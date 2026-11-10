@@ -416,6 +416,26 @@ localStorage(`awb_business_fold`, `businessFold.logic.ts`)에 남아 다른 업�
 결과는 "최신 결과" 에 따로 있어서다. 접혀도 제목 옆 수(열린 요청 · 메시지 · 기록 수)는 보인다.
 섹션은 여전히 `aria-label` 이 있는 region 이라 e2e 의 `getByRole('region')` 선택은 그대로 쓴다.
 
+#### 업무는 Agent Session 에서 돈다
+
+업무 실행은 예전의 `run_kind=business` 실행 대화가 아니라 **Agent Session** 으로 보낸다
+(`BusinessWorkflowService.dispatch`). 실행 대화는 죽으면 무슨 일이 있었는지 볼 수도, 이어 갈 수도 없었다.
+
+- 업무 하나가 세션 하나를 이어 쓴다. 첫 요청이 담당 설정의 Host · CLI · 작업 폴더에서 세션을 열고
+  (`AgentSessionsService.openSession`, 소유자가 driver), 이후 요청은 같은 세션에 이어 보낸다
+  (`promptOnBehalf` — 닫힌 세션은 prompt 가 다시 연다). `BusinessTaskRun.session_manager_id/_cli/_id` 에 남는다.
+  인증 · 모델 · 권한 모드는 그 Host × CLI 의 세션 설정(Sessions → CLI 설정)을 따른다.
+- 사용자가 그 세션에서 대화 중이면(턴 진행 중) 요청은 `queued` 로 기다렸다가 턴이 끝나면 나간다.
+- 결과 제출(`complete_business_task_run`)은 **그 세션의 MCP 연결만** 받는다(`agentSessionId` → 세션 id).
+  실행 중인 그 세션은 `start_business_work` 로 스스로 새 실행을 만들 수 없다.
+- 세션을 못 여는 경우(그 Host 가 그 CLI 의 ACP 세션을 지원하지 않거나 소유자에게 `agent_sessions.use` 가 없음)만
+  예전 실행 대화로 간다 — 그 업무에는 세션 대신 "에이전트 작업 대화" 가 나온다.
+- 화면(`BusinessTaskSession`): 저널의 `session` 이 있으면 업무 상세가 둘로 나뉜다. **왼쪽은 그 세션**
+  (Sessions 페이지의 `SessionView` 그대로 — 전사 · 승인/질문 · 설정 · 프로세스 다시 띄우기), **오른쪽은 정리된
+  기록**(최신 결과 · 결정 · 남은 요청 · 내역). 궁금한 것은 세션에 바로 묻고, 그 대화로 결과가 달라지면
+  에이전트가 `add_business_task_entry` 로 정리해 오른쪽에 남긴다(dispatch 지시문). 좁은 화면은 세션이 위.
+- 회귀: `apps/server/test/business-session-run.test.mjs`, `apps/client/test/business-header.e2e.mjs`.
+
 ### 업무와 연결 상태
 
 - 업무 상태: `todo`, `in_progress`, `waiting`, `done`. `waiting`은 외부 심사·응답 등을 기다린다는

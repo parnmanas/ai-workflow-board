@@ -260,7 +260,9 @@ export class BusinessService {
     const referencedRequests = requestIds.length ? await repo.find({ where: { ...where, id: In(requestIds), kind: 'request' }, select: ['id', 'content', 'author', 'created_at'] }) : [];
     return { task: { ...task, blocked_by: task.depends_on.filter(dep => tasks.find(t => t.id === dep)?.status !== 'done'), ticket },
       company_revision: company.revision, entries: entries.slice(0, 50).map(entry => ({ ...entry, request: referencedRequests.find(request => request.id === entry.resolves_entry_id) || null })), next_before: entries.length > 50 ? entries[49].revision : null,
-      result, decision, open_requests: requests, runs, execution_messages: executionMessages };
+      result, decision, open_requests: requests, runs, execution_messages: executionMessages,
+      // 이 업무가 이어 쓰는 Agent Session — 화면이 업무 상세에 그대로 띄운다. 없으면 null(아직 실행 전 · 예전 실행 대화).
+      session: (found => found ? { manager_id: found.session_manager_id, cli: found.session_cli, session_id: found.session_id } : null)(runs.find(run => !!run.session_id)) };
   }
 
   async addTaskEntry(id: string, accountId: string, taskId: string, body: unknown, actor: TicketActor, transaction?: EntityManager) {

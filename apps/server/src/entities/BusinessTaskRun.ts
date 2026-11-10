@@ -18,6 +18,14 @@ export class BusinessTaskRun {
   @Column({ type: 'varchar', default: 'queued' }) status: 'queued' | 'running' | 'needs_input' | 'completed' | 'failed';
   @Column({ type: 'varchar', default: '' }) room_id: string;
   @Column({ type: 'varchar', default: '' }) dispatch_message_id: string;
+  /**
+   * 이 요청을 실행한 Agent Session(Host · CLI · 네이티브 세션 id). 비어 있으면 예전 방식(`room_id` 의
+   * 실행 대화)으로 돈 요청이다. 세션은 업무 하나가 이어 쓰므로 같은 업무의 다음 요청이 같은 값을 갖는다 —
+   * 화면은 이것으로 업무 상세에 세션을 띄우고, 결과 제출은 이 세션의 MCP 연결만 받아 준다.
+   */
+  @Column({ type: 'varchar', default: '' }) session_manager_id: string;
+  @Column({ type: 'varchar', default: '' }) session_cli: string;
+  @Column({ type: 'varchar', default: '' }) session_id: string;
   @Column({ type: 'varchar', default: '' }) output_digest: string;
   @Column({ type: 'text', default: '' }) summary: string;
   @Column({ type: 'text', default: '' }) question: string;

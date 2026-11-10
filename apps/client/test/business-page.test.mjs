@@ -527,3 +527,27 @@ test('work sections fold and unfold; the agent conversation starts folded and fo
   assert.equal(panel('에이전트에게 요청').querySelector('textarea'), null);
   assert.ok(button(container, '에이전트에게 맡기기'));
 });
+
+test('a work item that runs in an Agent Session shows that session beside the curated results — only with session permission', async t => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/components/business/BusinessTaskWorkspace.tsx', import.meta.url), 'utf8');
+  // 세션 화면은 Sessions 페이지의 것을 그대로 쓴다(표면마다 따로 만들지 않는다) — 권한과 저널의 session 으로만 켜진다.
+  const embed = await readFile(new URL('../src/components/business/BusinessTaskSession.tsx', import.meta.url), 'utf8');
+  assert.match(embed, /import \{ SessionView \} from '\.\.\/sessions\/SessionsPage'/);
+  assert.match(embed, /className="business-task-session"[\s\S]{0,200}<SessionView key=\{`\$\{session\.manager_id\}\/\$\{session\.cli\}\/\$\{session\.session_id\}`\} accountId=\{accountId\}/);
+  assert.match(source, /const session = hasPermission\('agent_sessions\.use'\) \? journal\?\.session \|\| null : null;/);
+  assert.match(source, /\{session && <BusinessTaskSession accountId=\{company\.account_id\} session=\{session\} \/>\}/);
+
+  // 세션 권한이 없는 사용자: 세션을 띄우지 않고(호스트 조회도 없다) 정리된 기록만 본다.
+  const session = { manager_id: 'host-1', cli: 'claude', session_id: '11111111-2222-4333-8444-555555555555' };
+  const { container, calls } = await render(t, { entry: '/business/operations', stubs: {
+    getBusinessTask: async () => ({ task: task(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [], session }),
+    getTicketComments: async () => [],
+  } });
+  click(button(container, '설립 계획 정하기')); await flush(); await flush();
+  assert.ok(container.querySelector('.business-task-workspace'));
+  assert.equal(container.querySelector('.business-task-session'), null);
+  assert.equal(container.querySelector('.business-task-split'), null);
+  assert.ok(container.querySelector('.business-task-flow > .business-panel'), 'panels keep their spacing wrapper');
+  assert.equal(calls.some(([name]) => /AgentSession/i.test(name)), false);
+});
