@@ -16,7 +16,7 @@ import { dateTime } from './business.logic';
 export const FORMATION_GOAL = '회사 설립을 진행해 주세요. 현재 회사 정보를 바탕으로 설립 방식과 비용을 조사·비교하고, 신청서와 필요한 문서를 준비해 주세요. 제가 결정하거나 입력해야 할 사항은 추천안과 이유를 모아 질문해 주세요. 신청 제출·비용 승인·본인 서명이 필요한 단계에서 확인을 요청하고, 진행 과정과 결과를 이 업무에 계속 남겨 주세요.';
 const states = { queued: '실행 대기', running: '에이전트 작업 중', needs_input: '내 확인이 필요합니다', completed: '작업 완료', failed: '실행 확인 필요' };
 
-export function BusinessExecutionStatus({ runs, onReply, onConfigure }: { runs: BusinessTaskRun[]; onReply(): void; onConfigure(): void }) {
+export function BusinessExecutionStatus({ runs, onReply, onConfigure, onAbandon }: { runs: BusinessTaskRun[]; onReply(): void; onConfigure(): void; onAbandon?(run: BusinessTaskRun): void }) {
   useLocale();
   const names = useHostNames();
   const run = runs.find(item => item.status === 'running') || runs[0];
@@ -32,6 +32,7 @@ export function BusinessExecutionStatus({ runs, onReply, onConfigure }: { runs: 
     <div className="business-card-actions">
       {(run.status === 'needs_input' || run.status === 'failed') && <Button onClick={onReply}>{run.status === 'needs_input' ? t('답변하고 이어서 진행') : t('이어서 요청하기')}</Button>}
       <Button variant="ghost" onClick={onConfigure}>{t('담당 에이전트 설정')}</Button>
+      {run.status === 'running' && onAbandon && <Button variant="ghost" onClick={() => { if (window.confirm(t('이 실행을 중단으로 표시할까요? 요청 내용은 보존되고 자동으로 다시 실행하지 않습니다.'))) onAbandon(run); }}>{t('응답 없음 · 중단으로 표시')}</Button>}
     </div>
   </section>;
 }

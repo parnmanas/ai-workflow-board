@@ -436,8 +436,11 @@ localStorage(`awb_business_fold`, `businessFold.logic.ts`)에 남아 다른 업�
   에이전트가 `add_business_task_entry` 로 정리해 오른쪽에 남긴다(dispatch 지시문). 좁은 화면은 세션이 위.
 - **기존 업무도 들어가면 세션이 뜬다**: 맡긴 적은 있는데 세션이 없는 업무(예전 실행 대화로 돈 업무)는 업무 상세가
   열릴 때 `POST companies/:id/tasks/:taskId/session`(`ensureSession`)으로 세션을 만든다. 새 세션에는 예전 대화가
-  없으므로 업무 기록을 읽고 현황만 요약하게 한다(새 작업은 시작하지 않는다). 맡긴 적 없는 업무 · 예전 대화에서
-  실행 중인 업무 · 세션을 못 여는 Host 는 만들지 않는다. 같은 업무의 동시 호출은 한 번만 연다.
+  없으므로 업무 기록을 읽고 현황만 요약하게 한다(새 작업은 시작하지 않는다). 예전 대화에 "실행 중" 으로 남은 요청이
+  있어도 연다 — 그 실행이 죽었는지 확인하고 이어 가는 자리가 세션이다. 맡긴 적 없는 업무 · 세션을 못 여는 Host 는
+  만들지 않는다. 같은 업무의 동시 호출은 한 번만 연다.
+- 응답 없는 실행은 사용자가 **중단으로 표시**한다(`POST companies/:id/runs/:runId/abandon`, 실행 상태 패널의 버튼).
+  예전에는 죽은 실행이 6시간 동안 "실행 중" 으로 남아 뒤의 요청을 막았다. 요청은 보존되고 자동 재실행은 없다.
 - 회귀: `apps/server/test/business-session-run.test.mjs`, `apps/client/test/business-header.e2e.mjs`.
 
 ### 업무와 연결 상태

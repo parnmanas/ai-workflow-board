@@ -130,8 +130,7 @@ test('Business work runs in one Agent Session per work item', { timeout: 120000 
     assert.equal((await business.taskDetail(other.id, account.id, row.task_id)).session, null);
 
     // 그 업무가 끝난 뒤 업무 상세에 들어오면: 실행 중에는 만들지 않고, 끝났으면 세션을 열어 현황 요약만 시킨다.
-    assert.equal(await workflow.ensureSession(other.id, account.id, row.task_id), null, 'still running in the conversation');
-    await roomOnly.complete(account.id, legacy.id, result, { agentId: hostId, runtimeKey: runtimeIdentityKey(spec), subagentTriggerId: row.room_id });
+    // 그 실행이 아직 "실행 중" 으로 남아 있어도(죽었는지 알 수 없다) 업무 상세에 들어오면 세션을 연다.
     const opens = calls.open.length; const prompts = calls.prompt.length;
     const [first, second] = await Promise.all([workflow.ensureSession(other.id, account.id, row.task_id), workflow.ensureSession(other.id, account.id, row.task_id)]);
     assert.deepEqual(first, { manager_id: hostId, cli: spec.cli, session_id: sessionId });
@@ -139,6 +138,17 @@ test('Business work runs in one Agent Session per work item', { timeout: 120000 
     assert.equal(calls.open.length, opens + 1, 'concurrent entries open one session');
     assert.equal(calls.prompt.length, prompts + 1);
     assert.match(calls.prompt.at(-1).text, /지금 새 작업을 시작하지 마세요/);
+    assert.match(calls.prompt.at(-1).text, /아직 "실행 중"으로 표시된 요청/);
+    // 응답 없는 실행은 사용자가 중단으로 표시한다 — 요청은 남고, 끝난 실행은 다시 중단할 수 없다.
+    await assert.rejects(workflow.abandon(company.id, account.id, legacy.id), /찾을 수 없/);
+    const stopped = await workflow.abandon(other.id, account.id, legacy.id);
+    assert.equal(stopped.status, 'failed'); assert.match(stopped.last_error, /중단으로 표시/);
+    await assert.rejects(workflow.abandon(other.id, account.id, legacy.id), /진행 중인 실행이 아닙니다/);
+    // 이어서 요청하면 그 세션으로 간다.
+    const resumed = await workflow.start(other.id, account.id, row.task_id, { request_id: randomUUID(), content: '이어서 진행' }, actor);
+    await workflow.tick();
+    assert.equal((await repo.findOneByOrFail({ id: resumed.id })).session_id, sessionId);
+    await workflow.complete(account.id, resumed.id, result, viaSession);
     assert.deepEqual((await business.taskDetail(other.id, account.id, row.task_id)).session, first);
     await workflow.ensureSession(other.id, account.id, row.task_id);
     assert.equal(calls.open.length, opens + 1, 'an existing session is returned, not reopened');

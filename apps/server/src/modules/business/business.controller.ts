@@ -49,6 +49,9 @@ export class BusinessController {
   @Post('companies/:id/tasks/:taskId/session') async taskSession(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any) {
     return { session: await this.workflow.ensureSession(id, req.currentAccountId, taskId) };
   }
+  @Post('companies/:id/runs/:runId/abandon') abandonRun(@Param('id') id: string, @Param('runId') runId: string, @Req() req: any) {
+    return this.workflow.abandon(id, req.currentAccountId, runId);
+  }
   @Post('companies/:id/stages/trademark') initializeTrademark(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.initializeTrademark(id, req.currentAccountId, body?.revision, req.currentUser.id);
   }
