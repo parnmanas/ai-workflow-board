@@ -535,7 +535,7 @@ test('a work item that runs in an Agent Session shows that session beside the cu
   const embed = await readFile(new URL('../src/components/business/BusinessTaskSession.tsx', import.meta.url), 'utf8');
   assert.match(embed, /import \{ SessionView \} from '\.\.\/sessions\/SessionsPage'/);
   assert.match(embed, /className="business-task-session"[\s\S]{0,200}<SessionView key=\{`\$\{session\.manager_id\}\/\$\{session\.cli\}\/\$\{session\.session_id\}`\} accountId=\{accountId\}/);
-  assert.match(source, /const session = hasPermission\('agent_sessions\.use'\) \? journal\?\.session \|\| null : null;/);
+  assert.match(source, /const session = canUseSessions \? journal\?\.session \|\| null : null;/);
   assert.match(source, /\{session && <BusinessTaskSession accountId=\{company\.account_id\} session=\{session\} \/>\}/);
 
   // 세션 권한이 없는 사용자: 세션을 띄우지 않고(호스트 조회도 없다) 정리된 기록만 본다.
@@ -550,4 +550,19 @@ test('a work item that runs in an Agent Session shows that session beside the cu
   assert.equal(container.querySelector('.business-task-split'), null);
   assert.ok(container.querySelector('.business-task-flow > .business-panel'), 'panels keep their spacing wrapper');
   assert.equal(calls.some(([name]) => /AgentSession/i.test(name)), false);
+});
+
+test('entering a previously delegated work item without a session asks the server to open one, once', async t => {
+  const run = { id: 'run-1', task_id: 'task-1', status: 'needs_input', agent_runtime: { manager_agent_id: 'host-1', cli: 'claude', label: '', working_dir: '/w' }, question: 'q', summary: '', last_error: '', created_at: '2026-11-10T00:00:00.000Z', started_at: null };
+  const { container, calls } = await render(t, { entry: '/business/operations', permissions: ['business.manage', 'agent_sessions.use'], stubs: {
+    getBusinessTask: async () => ({ task: task(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [], runs: [run], session: null }),
+    getTicketComments: async () => [],
+    // 서버가 세션을 만들지 못한 경우(Host 가 세션을 못 여는 등) — 화면은 예전 배치 그대로 남는다.
+    ensureBusinessTaskSession: async () => ({ session: null }),
+  } });
+  click(button(container, '설립 계획 정하기')); await flush(); await flush(); await flush();
+  const ensures = calls.filter(([name]) => name === 'ensureBusinessTaskSession');
+  assert.deepEqual(ensures.map(call => call.slice(1)), [['company-1', 'task-1']]);
+  assert.equal(container.querySelector('.business-task-session'), null);
+  assert.ok(container.querySelector('.business-task-workspace'));
 });

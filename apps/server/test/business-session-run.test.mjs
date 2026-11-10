@@ -128,5 +128,22 @@ test('Business work runs in one Agent Session per work item', { timeout: 120000 
     const row = await repo.findOneByOrFail({ id: legacy.id });
     assert.equal(row.status, 'running'); assert.ok(row.room_id); assert.equal(row.session_id, '');
     assert.equal((await business.taskDetail(other.id, account.id, row.task_id)).session, null);
+
+    // 그 업무가 끝난 뒤 업무 상세에 들어오면: 실행 중에는 만들지 않고, 끝났으면 세션을 열어 현황 요약만 시킨다.
+    assert.equal(await workflow.ensureSession(other.id, account.id, row.task_id), null, 'still running in the conversation');
+    await roomOnly.complete(account.id, legacy.id, result, { agentId: hostId, runtimeKey: runtimeIdentityKey(spec), subagentTriggerId: row.room_id });
+    const opens = calls.open.length; const prompts = calls.prompt.length;
+    const [first, second] = await Promise.all([workflow.ensureSession(other.id, account.id, row.task_id), workflow.ensureSession(other.id, account.id, row.task_id)]);
+    assert.deepEqual(first, { manager_id: hostId, cli: spec.cli, session_id: sessionId });
+    assert.deepEqual(second, first);
+    assert.equal(calls.open.length, opens + 1, 'concurrent entries open one session');
+    assert.equal(calls.prompt.length, prompts + 1);
+    assert.match(calls.prompt.at(-1).text, /지금 새 작업을 시작하지 마세요/);
+    assert.deepEqual((await business.taskDetail(other.id, account.id, row.task_id)).session, first);
+    await workflow.ensureSession(other.id, account.id, row.task_id);
+    assert.equal(calls.open.length, opens + 1, 'an existing session is returned, not reopened');
+    // 맡긴 적 없는 업무에는 만들지 않는다.
+    const untouched = (await business.detail(other.id, account.id)).tasks.find(item => item.id !== row.task_id);
+    assert.equal(await workflow.ensureSession(other.id, account.id, untouched.id), null);
   });
 });

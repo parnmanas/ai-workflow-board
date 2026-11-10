@@ -7165,5 +7165,7 @@
   "Copy image": "画像をコピー",
   "Update the Android app to use this.": "Android アプリを更新すると使えます。",
   "Allow storage access, then try again.": "ストレージへのアクセスを許可してから、もう一度お試しください。",
-  "This browser cannot copy images.": "このブラウザーは画像をコピーできません。"
+  "This browser cannot copy images.": "このブラウザーは画像をコピーできません。",
+  "이 업무의 세션을 여는 중…": "この業務のセッションを開いています…",
+  "세션을 열지 못했습니다.": "セッションを開けませんでした。"
 }

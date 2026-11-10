@@ -7165,5 +7165,7 @@
   "Copy image": "复制图片",
   "Update the Android app to use this.": "更新 Android 应用后即可使用。",
   "Allow storage access, then try again.": "请允许存储访问后重试。",
-  "This browser cannot copy images.": "此浏览器无法复制图片。"
+  "This browser cannot copy images.": "此浏览器无法复制图片。",
+  "이 업무의 세션을 여는 중…": "正在打开此业务的会话…",
+  "세션을 열지 못했습니다.": "无法打开会话。"
 }

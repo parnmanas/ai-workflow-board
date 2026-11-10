@@ -7165,5 +7165,7 @@
   "Copy image": "이미지 복사",
   "Update the Android app to use this.": "Android 앱을 업데이트하면 쓸 수 있습니다.",
   "Allow storage access, then try again.": "저장 공간 접근을 허용한 뒤 다시 시도해 주세요.",
-  "This browser cannot copy images.": "이 브라우저는 이미지를 복사할 수 없습니다."
+  "This browser cannot copy images.": "이 브라우저는 이미지를 복사할 수 없습니다.",
+  "이 업무의 세션을 여는 중…": "이 업무의 세션을 여는 중…",
+  "세션을 열지 못했습니다.": "세션을 열지 못했습니다."
 }

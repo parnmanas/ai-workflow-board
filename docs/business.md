@@ -434,6 +434,10 @@ localStorage(`awb_business_fold`, `businessFold.logic.ts`)에 남아 다른 업�
   (Sessions 페이지의 `SessionView` 그대로 — 전사 · 승인/질문 · 설정 · 프로세스 다시 띄우기), **오른쪽은 정리된
   기록**(최신 결과 · 결정 · 남은 요청 · 내역). 궁금한 것은 세션에 바로 묻고, 그 대화로 결과가 달라지면
   에이전트가 `add_business_task_entry` 로 정리해 오른쪽에 남긴다(dispatch 지시문). 좁은 화면은 세션이 위.
+- **기존 업무도 들어가면 세션이 뜬다**: 맡긴 적은 있는데 세션이 없는 업무(예전 실행 대화로 돈 업무)는 업무 상세가
+  열릴 때 `POST companies/:id/tasks/:taskId/session`(`ensureSession`)으로 세션을 만든다. 새 세션에는 예전 대화가
+  없으므로 업무 기록을 읽고 현황만 요약하게 한다(새 작업은 시작하지 않는다). 맡긴 적 없는 업무 · 예전 대화에서
+  실행 중인 업무 · 세션을 못 여는 Host 는 만들지 않는다. 같은 업무의 동시 호출은 한 번만 연다.
 - 회귀: `apps/server/test/business-session-run.test.mjs`, `apps/client/test/business-header.e2e.mjs`.
 
 ### 업무와 연결 상태

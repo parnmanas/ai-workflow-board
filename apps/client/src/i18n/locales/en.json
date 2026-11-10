@@ -7165,5 +7165,7 @@
   "Copy image": "Copy image",
   "Update the Android app to use this.": "Update the Android app to use this.",
   "Allow storage access, then try again.": "Allow storage access, then try again.",
-  "This browser cannot copy images.": "This browser cannot copy images."
+  "This browser cannot copy images.": "This browser cannot copy images.",
+  "이 업무의 세션을 여는 중…": "Opening the session for this work item…",
+  "세션을 열지 못했습니다.": "Could not open the session."
 }

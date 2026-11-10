@@ -78,6 +78,19 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
     }
   }, [company.id, taskId]);
   useEffect(() => { void load(); return () => { generation.current++; }; }, [load, company.revision]);
+  // 맡긴 적 있는 업무인데 세션이 없으면(예전 실행 대화로 돈 업무) 들어온 즉시 세션을 연다 — 업무당 한 번만 시도한다.
+  const [sessionNote, setSessionNote] = useState('');
+  const sessionTried = useRef<string | null>(null);
+  const canUseSessions = hasPermission('agent_sessions.use');
+  const needsSession = !!journal && journal.task.id === taskId && !journal.session && !!journal.runs?.length && canUseSessions;
+  useEffect(() => {
+    if (!needsSession || sessionTried.current === taskId) return;
+    sessionTried.current = taskId;
+    setSessionNote(t('이 업무의 세션을 여는 중…'));
+    api.ensureBusinessTaskSession(company.id, taskId)
+      .then(async ({ session: opened }) => { setSessionNote(''); if (opened) await load(true); })
+      .catch(e => setSessionNote(`${t('세션을 열지 못했습니다.')} ${(e as Error).message}`));
+  }, [needsSession, taskId, company.id, load]);
 
   const loadComments = useCallback(async (preserveHistory = false) => {
     const version = ++commentGeneration.current;
@@ -171,7 +184,7 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
   const openRequests = journal?.open_requests || [];
   // 업무가 이어 쓰는 Agent Session — 왼쪽에 세션을 그대로 띄우고 오른쪽에는 정리된 기록만 둔다.
   // 세션이 죽어도 여기서 상태를 보고 다시 열어 이어 간다. 세션 권한이 없으면 예전 한 줄 배치다.
-  const session = hasPermission('agent_sessions.use') ? journal?.session || null : null;
+  const session = canUseSessions ? journal?.session || null : null;
   const latestReply = comments.find(comment => comment.author_type === 'agent' && comment.type !== 'system');
 
   return <div className={`business-page business-task-workspace${session ? ' with-session' : ''}`}>
@@ -186,6 +199,7 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
     <button className="business-task-back" onClick={onBack}>← {t('업무 목록으로')}</button>
     {error && <ErrorState message={error} onRetry={() => void refresh()} />}
     {!journal && !error && <p role="status">{t('업무 기록을 불러오는 중…')}</p>}
+    {sessionNote && !session && <p role="status" className="business-guide-note">{sessionNote}</p>}
     {task && <div className={session ? 'business-task-split' : undefined}>
       {session && <BusinessTaskSession accountId={company.account_id} session={session} />}
       <div className="business-task-flow">

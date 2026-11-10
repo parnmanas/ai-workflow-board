@@ -45,6 +45,10 @@ export class BusinessController {
   @Post('companies/:id/tasks/:taskId/run') startTask(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any, @Body() body: any) {
     return this.workflow.start(id, req.currentAccountId, taskId, body, { id: req.currentUser.id, name: req.currentUser.name, type: 'user' });
   }
+  /** 업무 상세에 들어올 때 — 맡긴 적 있는 업무에 세션이 없으면 만들어 돌려준다(없어도 되는 경우는 null). */
+  @Post('companies/:id/tasks/:taskId/session') async taskSession(@Param('id') id: string, @Param('taskId') taskId: string, @Req() req: any) {
+    return { session: await this.workflow.ensureSession(id, req.currentAccountId, taskId) };
+  }
   @Post('companies/:id/stages/trademark') initializeTrademark(@Param('id') id: string, @Req() req: any, @Body() body: any) {
     return this.business.initializeTrademark(id, req.currentAccountId, body?.revision, req.currentUser.id);
   }
