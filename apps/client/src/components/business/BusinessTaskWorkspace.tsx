@@ -11,6 +11,7 @@ import { Button, ErrorState, Textarea } from '../common';
 import Markdown from '../common/Markdown';
 import { BusinessExecutionStatus, BusinessWorkStartForm } from './BusinessWorkExecution';
 import { BusinessPageHeader } from './BusinessPageHeader';
+import { BusinessFoldPanel } from './BusinessFoldPanel';
 import { TaskForm } from './BusinessForms';
 import { dateTime, STAGES, TASK_STATUS } from './business.logic';
 
@@ -192,16 +193,14 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
       <BusinessExecutionStatus runs={journal?.runs || []} onReply={() => compose('request')} onConfigure={() => setStartForm(true)} />
       {!journal?.runs?.length && <section className="business-panel"><h2>{t('이 업무를 에이전트에게 맡기세요')}</h2><p>{t('조사와 준비, 결과 정리를 에이전트가 수행합니다. 추가 요청도 이 업무에서 이어집니다.')}</p><Button onClick={() => setStartForm(true)} disabled={!journal || busy}>{t('담당 에이전트 설정 · 실행')}</Button></section>}
       <div className="business-task-summary">
-        <section className="business-panel" aria-label={t('최신 결과')}><h2>{t('최신 결과')}</h2>{journal?.result ? <><RecordBody content={journal.result.content} expanded /><small>{journal.result.author} · {dateTime(journal.result.created_at)}</small></> : <><p className="business-muted">{t('에이전트가 작업을 진행하면 결과와 문서 링크가 여기에 표시됩니다.')}</p>{latestReply && <div className="business-latest-reply"><strong>{t('연결 티켓의 최근 답변')}</strong><RecordBody content={latestReply.content} /><small>{latestReply.author} · {dateTime(latestReply.created_at)}</small></div>}</>}<details><summary>{t('직접 기록')}</summary><Button variant="ghost" disabled={busy} onClick={() => compose('result', journal?.result?.content || latestReply?.content || '')}>{journal?.result ? t('수정 결과 남기기') : t('결과 남기기')}</Button></details></section>
-        <section className="business-panel" aria-label={t('최근 결정')}><h2>{t('최근 결정')}</h2>{journal?.decision ? <><RecordBody content={journal.decision.content} expanded /><small>{journal.decision.author} · {dateTime(journal.decision.created_at)}</small></> : <p className="business-muted">{t('업무를 진행하며 선택한 방향과 근거를 모아 보여줍니다.')}</p>}<details><summary>{t('직접 기록')}</summary><Button variant="ghost" disabled={busy} onClick={() => compose('decision')}>{t('결정과 근거 남기기')}</Button></details></section>
+        <BusinessFoldPanel id="result" title={t('최신 결과')}>{journal?.result ? <><RecordBody content={journal.result.content} expanded /><small>{journal.result.author} · {dateTime(journal.result.created_at)}</small></> : <><p className="business-muted">{t('에이전트가 작업을 진행하면 결과와 문서 링크가 여기에 표시됩니다.')}</p>{latestReply && <div className="business-latest-reply"><strong>{t('연결 티켓의 최근 답변')}</strong><RecordBody content={latestReply.content} /><small>{latestReply.author} · {dateTime(latestReply.created_at)}</small></div>}</>}<details><summary>{t('직접 기록')}</summary><Button variant="ghost" disabled={busy} onClick={() => compose('result', journal?.result?.content || latestReply?.content || '')}>{journal?.result ? t('수정 결과 남기기') : t('결과 남기기')}</Button></details></BusinessFoldPanel>
+        <BusinessFoldPanel id="decision" title={t('최근 결정')}>{journal?.decision ? <><RecordBody content={journal.decision.content} expanded /><small>{journal.decision.author} · {dateTime(journal.decision.created_at)}</small></> : <p className="business-muted">{t('업무를 진행하며 선택한 방향과 근거를 모아 보여줍니다.')}</p>}<details><summary>{t('직접 기록')}</summary><Button variant="ghost" disabled={busy} onClick={() => compose('decision')}>{t('결정과 근거 남기기')}</Button></details></BusinessFoldPanel>
       </div>
       {task.notes && <details className="business-panel business-task-notes"><summary>{t('진행 메모 · 확인 근거')}</summary><RecordBody content={task.notes} expanded /></details>}
-      <section className="business-panel" aria-label={t('남은 추가·수정 요청')}>
-        <div className="business-section-heading"><h2>{t('남은 추가·수정 요청')} <span className="business-count">{openRequests.length}</span></h2></div>
+      <BusinessFoldPanel id="requests" title={t('남은 추가·수정 요청')} badge={openRequests.length}>
         {openRequests.length ? openRequests.map(request => <div key={request.id} className="business-open-request"><div><RecordBody content={request.content} /><small>{request.author} · {dateTime(request.created_at)}</small></div><details><summary>{t('직접 처리한 경우')}</summary><Button variant="secondary" disabled={busy} onClick={() => compose('resolution', '', request)}>{t('처리 결과 남기기')}</Button></details></div>) : <p className="business-muted">{t('처리를 기다리는 업무 요청이 없습니다.')}</p>}
-      </section>
-      <section className="business-panel business-task-compose" aria-label={t('에이전트에게 요청')}>
-        <h2>{t('에이전트에게 요청')}</h2>
+      </BusinessFoldPanel>
+      <BusinessFoldPanel id="compose" className="business-task-compose" title={t('에이전트에게 요청')}>
         <form ref={composer} onSubmit={event => { event.preventDefault(); void write(); }}>
           <details className="business-task-compose-options"><summary>{t('직접 기록 · 기존 티켓')}</summary>
             <label><input type="checkbox" checked={recordOnly} disabled={busy} onChange={event => { setRecordOnly(event.target.checked); if (!event.target.checked) { setResolving(null); setKind('request'); } }} />{t('실행 없이 기록만 남기기')}</label>
@@ -216,10 +215,10 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
           <Button type="submit" loading={busy} disabled={!content.trim() || !journal}>{!recordOnly ? t('에이전트에게 보내기') : destination === 'ticket' ? t('티켓에 댓글 보내기') : t('기록 남기기')}</Button>
           {notice && <p role="status" className="business-guide-note">{notice}</p>}
         </form>
-      </section>
-      {!!journal?.execution_messages?.length && <section className="business-panel" aria-label={t('에이전트 작업 대화')}><h2>{t('에이전트 작업 대화')}</h2><p className="business-muted">{t('최근 실행 대화와 도구 진행 상황입니다. 정리된 결과는 위에 계속 보관됩니다.')}</p>{journal.execution_messages.map(message => <details key={message.id} className="business-work-entry"><summary>{message.type === 'progress' ? t('진행 중') : t('에이전트 답변')} · {dateTime(message.created_at)}</summary><RecordBody content={message.content} expanded /></details>)}</section>}
-      <section className="business-panel" aria-label={t('진행 과정과 변경 내역')}>
-        <div className="business-section-heading"><h2>{t('진행 과정과 변경 내역')}</h2><select className="business-filter" aria-label={t('기록 필터')} value={filter} onChange={event => setFilter(event.target.value)}><option value="all">{t('전체 기록')}</option>{Object.entries(entryLabels).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}{ticketId && <option value="ticket">{t('연결 티켓 댓글')}</option>}</select></div>
+      </BusinessFoldPanel>
+      {!!journal?.execution_messages?.length && <BusinessFoldPanel id="conversation" title={t('에이전트 작업 대화')} badge={journal.execution_messages.length}><p className="business-muted">{t('최근 실행 대화와 도구 진행 상황입니다. 정리된 결과는 위에 계속 보관됩니다.')}</p>{journal.execution_messages.map(message => <details key={message.id} className="business-work-entry"><summary>{message.type === 'progress' ? t('진행 중') : t('에이전트 답변')} · {dateTime(message.created_at)}</summary><RecordBody content={message.content} expanded /></details>)}</BusinessFoldPanel>}
+      <BusinessFoldPanel id="history" title={t('진행 과정과 변경 내역')} badge={history.length}
+        controls={<select className="business-filter" aria-label={t('기록 필터')} value={filter} onChange={event => setFilter(event.target.value)}><option value="all">{t('전체 기록')}</option>{Object.entries(entryLabels).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}{ticketId && <option value="ticket">{t('연결 티켓 댓글')}</option>}</select>}>
         <p className="business-muted">{t('최신 기록부터 표시합니다. 이전 결과와 결정은 수정 후에도 남습니다.')}</p>
         {ticketError && <ErrorState message={`${t('연결 티켓 댓글')}: ${ticketError}`} onRetry={() => void loadComments()} />}
         <ol className="business-work-history">{history.map(({ id, entry, comment }) => <li key={id} id={`business-entry-${id}`} className={`business-work-entry ${entry?.kind || 'ticket'}`}>
@@ -233,7 +232,7 @@ export function BusinessTaskWorkspace({ detail, taskId, onBack, onChanged, onOpe
         </li>)}</ol>
         {!history.length && <p className="business-muted">{t('아직 표시할 진행 기록이 없습니다.')}</p>}
         {(before !== null || moreComments) && <Button variant="secondary" loading={busy} onClick={() => void loadOlder()}>{t('이전 기록 더 보기')}</Button>}
-      </section>
+      </BusinessFoldPanel>
       {!task.ticket_id && task.status !== 'done' && hasPermission('tickets.create') && <details className="business-panel"><summary>{t('티켓이 필요한 경우')}</summary><p className="business-muted">{t('필요할 때 이 업무의 실행 티켓을 만들 수 있습니다.')}</p><Button disabled={busy || !!task.blocked_by.length || !journal} onClick={async () => {
         setBusy(true); try { await api.createBusinessTaskTicket(company.id, taskId, journal!.company_revision); await load(); await onChanged(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
       }}>{t('티켓 만들기')}</Button></details>}

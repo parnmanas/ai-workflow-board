@@ -549,6 +549,15 @@
 .business-record-body summary span { color: #c4b5fd; }
 .business-record-body .awb-markdown { font-size: inherit; }
 .business-task-workspace details > summary { cursor: pointer; min-height: 30px; line-height: 1.6; }
+/* 접을 수 있는 섹션(BusinessFoldPanel) — 제목 전체가 토글이고, 접히면 heading 만 남는다. */
+.business-fold-heading { margin-bottom: 14px; }
+.business-fold.folded .business-fold-heading { margin-bottom: 0; }
+.business-fold-heading h2 { margin: 0; min-width: 0; }
+.business-fold-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-align: left; min-width: 0; }
+.business-fold-toggle:focus-visible { outline: 2px solid #a78bfa; outline-offset: 4px; border-radius: 4px; }
+.business-fold-chevron { width: 12px; color: #94a3b8; font-size: 12px; flex: none; }
+.business-fold-state { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.business-fold-body { min-width: 0; }
 .business-open-request { display: flex; align-items: flex-start; gap: 16px; padding: 16px 0; border-top: 1px solid #334155; }
 .business-open-request > div { flex: 1; min-width: 0; }
 .business-open-request > button { flex-shrink: 0; }

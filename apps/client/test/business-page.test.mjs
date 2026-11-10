@@ -483,3 +483,47 @@ test('the default composer dispatches revisions with the company runtime and pre
   assert.match(container.textContent, uiPattern('실행 대기'));
   assert.equal(calls.some(([name]) => ['addBusinessTaskEntry', 'createBusinessTaskTicket', 'addComment'].includes(name)), false);
 });
+
+test('work sections fold and unfold; the agent conversation starts folded and folds persist across reopen', async t => {
+  const { parseBusinessFold, withBusinessFold, DEFAULT_FOLDED, BUSINESS_FOLD_STORAGE_KEY } = await import('../src/components/business/businessFold.logic.ts');
+  // 순수 로직: 깨진 저장본은 빈 스냅샷, 기본값으로 되돌리면 키가 사라진다.
+  assert.deepEqual(parseBusinessFold('nope'), {});
+  assert.deepEqual(parseBusinessFold(JSON.stringify({ history: true, bogus: true, result: 'yes' })), { history: true });
+  assert.deepEqual(withBusinessFold({ history: true }, 'history', DEFAULT_FOLDED.history), {});
+  assert.equal(DEFAULT_FOLDED.conversation, true, 'the longest section starts folded');
+
+  const messages = [{ id: 'm1', content: 'Tool progress line', type: 'progress', created_at: '2026-11-10T01:00:00.000Z' }, { id: 'm2', content: 'Agent final answer text', type: 'reply', created_at: '2026-11-10T01:05:00.000Z' }];
+  const journal = () => ({ task: task(), company_revision: 0, entries: [], next_before: null, result: null, decision: null, open_requests: [], execution_messages: messages });
+  const { container } = await render(t, { entry: '/business/operations', stubs: { getBusinessTask: async () => journal(), getTicketComments: async () => [] } });
+  click(button(container, '설립 계획 정하기')); await flush(); await flush();
+  // 속성 선택자는 "&" 가 든 번역(Progress & change history)에서 jsdom 이 못 찾는다 — 직접 비교한다.
+  const panel = label => [...container.querySelectorAll('.business-fold')].find(e => e.getAttribute('aria-label') === ui(label)) || null;
+  const toggle = label => panel(label).querySelector('.business-fold-toggle');
+
+  // 에이전트 작업 대화: 접힌 채 시작 — 메시지는 없고 수만 보인다.
+  assert.ok(panel('에이전트 작업 대화'), 'conversation panel rendered');
+  assert.equal(toggle('에이전트 작업 대화').getAttribute('aria-expanded'), 'false');
+  assert.doesNotMatch(container.textContent, /Agent final answer text/);
+  assert.match(panel('에이전트 작업 대화').textContent, /2/);
+  click(toggle('에이전트 작업 대화')); await flush();
+  assert.equal(toggle('에이전트 작업 대화').getAttribute('aria-expanded'), 'true');
+  assert.match(container.textContent, /Agent final answer text/);
+  assert.deepEqual(JSON.parse(localStorage.getItem(BUSINESS_FOLD_STORAGE_KEY)), { conversation: false }, 'unfolding the default-folded section is what gets stored');
+
+  // 진행 과정: 펼친 채 시작, 접으면 필터와 본문이 사라지고 저장된다.
+  assert.ok(panel('진행 과정과 변경 내역').querySelector('select'), 'filter visible while open');
+  click(toggle('진행 과정과 변경 내역')); await flush();
+  assert.equal(panel('진행 과정과 변경 내역').querySelector('select'), null, 'filter hidden while folded');
+  assert.equal(panel('진행 과정과 변경 내역').querySelector('.business-fold-body'), null);
+  assert.deepEqual(JSON.parse(localStorage.getItem(BUSINESS_FOLD_STORAGE_KEY)), { conversation: false, history: true });
+
+  // 다른 업무를 열어도(다시 마운트) 같은 접힘이 복원된다.
+  click(button(container, '업무 목록으로')); await flush(); await flush();
+  click(button(container, '설립 계획 정하기')); await flush(); await flush();
+  assert.equal(toggle('에이전트 작업 대화').getAttribute('aria-expanded'), 'true');
+  assert.equal(toggle('진행 과정과 변경 내역').getAttribute('aria-expanded'), 'false');
+  // 작성란도 접힌다 — 접혀도 페이지 헤더의 주요 작업 버튼은 그대로라 에이전트에게 맡기는 경로가 막히지 않는다.
+  click(toggle('에이전트에게 요청')); await flush();
+  assert.equal(panel('에이전트에게 요청').querySelector('textarea'), null);
+  assert.ok(button(container, '에이전트에게 맡기기'));
+});
