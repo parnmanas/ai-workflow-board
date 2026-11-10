@@ -173,6 +173,19 @@ authorize/token/registration 주소를 알리면 로그인을 중단한다. 토�
 
 회사 설립 업무의 실행 지시문이 에이전트에게 이 경로를 안내한다. 공급자 응답은 비신뢰 자료이며, 결제·본인 서명·접수 완료 확인은 소유자가 한다.
 
+### 로그인이 유지되는 조건 (2026-11-10)
+
+공급자 로그인(access · refresh token)은 `business_mcp_connections.encrypted_data` 에 암호화해 저장한다 — 서버
+재시작으로 사라지지 않는다. 그런데도 Northwest 로그인이 30분쯤 뒤 풀렸다: Keycloak 은 `offline_access` 없이 받은
+refresh token 을 **브라우저 SSO 세션에 묶는다** — 그 세션이 idle 로 끝나면 저장해 둔 refresh token 도 죽고 다음
+갱신이 `invalid_grant` 로 거절된다. 그래서 Northwest 는 `openid profile email offline_access` 를 요청한다
+(공개 client `mcp-connector` 가 받아 주는 것을 authorize 엔드포인트로 확인). 기존 연결은 한 번 다시 로그인해야
+새 scope 의 토큰을 받는다.
+
+갱신 경로(`accessToken`)는 교체된 refresh token 을 잃지 않게 한다: 받은 쌍의 저장이 다른 요청의 변경과 겹치면
+최신 행을 다시 읽어 토큰만 얹어 쓰고, 거절된 것이 이미 교체된 옛 토큰이면(저장본이 달라져 있으면) 저장본을 쓴다.
+로그인이 끝난 사유와 갱신 실패는 서버 로그 `[BusinessMcp]` 에 남는다.
+
 ### doola · Northwest 서비스와 가격 (확인 2026-10-29)
 
 | 항목 | doola | Northwest Registered Agent |

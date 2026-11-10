@@ -99,7 +99,8 @@ test('Business MCP connectors: owner sign-in, pinned origins, confirm gate and o
     const authorize = new URL(started.body.url);
     assert.equal(authorize.origin, 'https://id.northwestregisteredagent.com');
     assert.equal(authorize.searchParams.get('client_id'), 'mcp-connector');
-    assert.equal(authorize.searchParams.get('scope'), 'openid profile email');
+    // offline_access 가 없으면 Keycloak 의 refresh token 이 브라우저 SSO 세션과 함께 죽는다 — 로그인이 30분쯤 뒤 풀렸다.
+    assert.equal(authorize.searchParams.get('scope'), 'openid profile email offline_access');
     assert.equal(fake.state.registrations.filter(r => r.provider === 'northwest').length, 0, 'Keycloak refuses anonymous registration; the public client is used');
     const pasted = `${NORTHWEST_LOOPBACK}?state=${authorize.searchParams.get('state')}&session_state=x&code=northwest-code`;
     assert.equal((await call(`${base}/northwest/complete`, { callback_url: pasted.replace('/oauth/callback', '/other') })).status, 400);

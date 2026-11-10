@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException, UnauthorizedException, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { createHash, randomBytes } from 'node:crypto';
@@ -61,6 +61,7 @@ const statusOf = (error: unknown) => {
 export class BusinessMcpService {
   private readonly discovery = new Map<string, Discovery>();
   private readonly locks = new Map<string, Promise<unknown>>();
+  private readonly log = new Logger('BusinessMcp');
   constructor(@InjectDataSource() private readonly ds: DataSource, private readonly business: BusinessService) {}
 
   /** Token refresh rotates refresh tokens; one writer per connection keeps the stored pair valid. */
@@ -246,17 +247,47 @@ export class BusinessMcpService {
     }
     const spec = mcpConnector(row.provider).mcp; const found = await this.discover(row.provider, spec);
     const clientInformation = await this.clientFor(row.provider, spec, found, data, data.client?.redirect_uri || loopbackRedirect(spec));
+    let next: Awaited<ReturnType<typeof refreshAuthorization>>;
     try {
-      const next = await refreshAuthorization(found.url, { metadata: found.metadata, clientInformation, refreshToken: tokens.refresh_token, ...(found.resource ? { resource: found.resource } : {}), fetchFn: pinnedFetch(spec, 15_000) });
-      data.tokens = { access_token: next.access_token, refresh_token: next.refresh_token || tokens.refresh_token, ...(next.expires_in ? { expires_at: Date.now() + next.expires_in * 1000 } : {}) };
-      await this.store(row, data, { status: 'connected', last_error: '' });
-      return data.tokens.access_token;
+      next = await refreshAuthorization(found.url, { metadata: found.metadata, clientInformation, refreshToken: tokens.refresh_token, ...(found.resource ? { resource: found.resource } : {}), fetchFn: pinnedFetch(spec, 15_000) });
     } catch (error) {
       // Only a rejected grant ends the sign-in; a network failure keeps the tokens for the next attempt.
-      if (!(error instanceof InvalidGrantError)) throw new BadGatewayException('공급자 로그인 갱신 요청이 실패했습니다. 잠시 후 다시 시도하세요.');
+      if (!(error instanceof InvalidGrantError)) {
+        this.log.warn(`${row.provider} token refresh failed (tokens kept): ${(error as Error)?.message ?? error}`);
+        throw new BadGatewayException('공급자 로그인 갱신 요청이 실패했습니다. 잠시 후 다시 시도하세요.');
+      }
+      // 거절된 것이 **이미 교체된 옛 토큰**일 수 있다(다른 요청이 먼저 갱신해 저장했다). 저장본이 달라졌으면 그것을 쓴다 —
+      // 그걸 확인하지 않고 지우면 멀쩡한 로그인이 사라진다.
+      const fresh = await this.ds.getRepository(BusinessMcpConnection).findOneBy({ id: row.id });
+      const current = fresh ? read(fresh).tokens : undefined;
+      if (fresh && current?.refresh_token && current.refresh_token !== tokens.refresh_token) {
+        Object.assign(row, { revision: fresh.revision }); data.tokens = current;
+        return current.access_token;
+      }
+      this.log.warn(`${row.provider} sign-in ended: the provider rejected the stored refresh token (${(error as Error)?.message ?? 'invalid_grant'})`);
       delete data.tokens;
       await this.store(row, data, { status: 'error', last_error: '로그인이 만료되었습니다. 다시 로그인하세요.' });
       throw new ConflictException('공급자 로그인이 만료되었습니다. 소유자가 연결 화면에서 다시 로그인해야 합니다.');
+    }
+    // 공급자는 갱신할 때 refresh token 을 **교체**한다 — 방금 받은 쌍을 저장하지 못하면 저장본의 옛 토큰은 이미 죽은
+    // 것이라 다음 갱신이 거절되고 로그인이 사라진다. 그래서 저장은 다른 요청의 변경과 겹쳐도 포기하지 않는다:
+    // 최신 행을 다시 읽어 그 위에 토큰만 얹어 쓴다.
+    data.tokens = { access_token: next.access_token, refresh_token: next.refresh_token || tokens.refresh_token, ...(next.expires_in ? { expires_at: Date.now() + next.expires_in * 1000 } : {}) };
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.store(row, data, { status: 'connected', last_error: '' });
+        return data.tokens.access_token;
+      } catch (error) {
+        const latest = attempt < 4 ? await this.ds.getRepository(BusinessMcpConnection).findOneBy({ id: row.id }).catch(() => null) : null;
+        if (!latest) {
+          this.log.error(`${row.provider} refreshed tokens could not be stored — the next refresh will be rejected: ${(error as Error)?.message ?? error}`);
+          throw error;
+        }
+        const merged = read(latest); merged.tokens = data.tokens;
+        Object.assign(row, { revision: latest.revision });
+        for (const key of Object.keys(data) as (keyof McpData)[]) delete data[key];
+        Object.assign(data, merged);
+      }
     }
   }
   /** One MCP session per operation; a 401 refreshes once (the request was rejected, so nothing ran). */

@@ -47,7 +47,7 @@ export const MCP_CONNECTORS = [
     summary: '설립 · 등록 대리인 · 연차 보고 · 우편 스캔', capabilities: ['Northwest 계정 로그인', '회사 · 신고 · 청구서 조회 (MCP)', '장바구니 준비 (MCP)'],
     setup_note: 'Northwest 고객 계정으로 로그인하면 에이전트가 Northwest MCP로 회사·신고·서류·청구서를 조회하고 신청 장바구니를 준비합니다. 결제(체크아웃)는 Northwest 화면에서 소유자가 직접 진행합니다.',
     docs_url: 'https://www.northwestregisteredagent.com/ai/mcp', portal_url: 'https://www.northwestregisteredagent.com/login',
-    mcp: { url: 'https://mcp.northwestregisteredagent.com/', auth_origins: ['https://mcp.northwestregisteredagent.com', 'https://id.northwestregisteredagent.com'], scope: 'openid profile email',
+    mcp: { url: 'https://mcp.northwestregisteredagent.com/', auth_origins: ['https://mcp.northwestregisteredagent.com', 'https://id.northwestregisteredagent.com'], scope: 'openid profile email offline_access',
       client: { kind: 'public', client_id: 'mcp-connector', loopback_only: true, registered_env: 'NORTHWEST_MCP', registered_setting: 'business.mcp.northwest',
         // 2026-10-30: the only loopback address mcp-connector still accepts (MCP Inspector's). It stays on
         // the owner's machine; the owner pastes it back. The login pre-check reports it if this changes again.
