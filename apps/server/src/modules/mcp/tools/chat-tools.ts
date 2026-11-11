@@ -586,6 +586,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           });
           for (const u of users) userNames.set(u.id, u.name || u.id.slice(0, 8));
         }
+        const agentNames = await roomMembershipService.resolveRoomAgentNames(room_id);
         const participants = rows.map((r) => {
           if (r.participant_type === 'user') {
             const name = userNames.get(r.participant_id) || r.participant_id.slice(0, 8);
@@ -604,7 +605,8 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
             return {
               participant_type: r.participant_type,
               participant_id: r.participant_id,
-              name: label,
+              name: agentNames.get(r.participant_id) || label,
+              nickname: label,
               mention_token: `@[agent:${r.participant_id}|${label}]`,
               has_runtime_snapshot: !!(spec && typeof spec === 'object'),
               joined_at: r.joined_at,
@@ -613,7 +615,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           return {
             participant_type: r.participant_type,
             participant_id: r.participant_id,
-            name: label,
+            name: agentNames.get(r.participant_id) || label,
             mention_token: `@[agent:${r.participant_id}|${label}]`,
             has_runtime_snapshot: false,
             note: 'Best-effort only: wakes this participant only when their manager hosts this identity. ' +

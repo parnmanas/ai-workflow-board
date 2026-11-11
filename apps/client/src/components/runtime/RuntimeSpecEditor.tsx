@@ -38,6 +38,7 @@ interface RuntimeSpecEditorProps {
    */
   folderOptionalHint?: string | null;
   disabled?: boolean;
+  labelTitle?: string;
 }
 
 /** Shared execution editor for Business, tickets, chat and automation declarations. */
@@ -52,6 +53,7 @@ export default function RuntimeSpecEditor({
   showProjectFolderHelper = true,
   folderOptionalHint = null,
   disabled = false,
+  labelTitle,
 }: RuntimeSpecEditorProps) {
   useLocale();
   const set = (patch: Partial<RuntimeSpecDraft>) => onChange({ ...value, ...patch });
@@ -108,8 +110,9 @@ export default function RuntimeSpecEditor({
 
       <div style={{ marginTop: 12 }}>
         <Input
-          label={translate('Label (표시명, 선택)')}
+          label={labelTitle || translate('Label (표시명, 선택)')}
           value={value.label}
+          maxLength={80}
           disabled={disabled}
           placeholder={translate('비워두면 폴더/CLI 로 자동 표시')}
           onChange={(e) => set({ label: (e.target as HTMLInputElement).value })}

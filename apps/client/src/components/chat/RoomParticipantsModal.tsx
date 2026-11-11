@@ -7,7 +7,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import { tokens } from '../../tokens';
-import { Button, Modal } from '../common';
+import { Button, Input, Modal } from '../common';
 
 /** Mounted for one room at a time; all names come from the room's resolved roster. */
 export default function RoomParticipantsModal({ roomId, currentUserId, onClose, onChanged }: {
@@ -21,6 +21,8 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
   const { showToast } = useToast();
   const [detail, setDetail] = useState<ChatRoomDetail | null>(null);
   const [selected, setSelected] = useState<ChatRoomParticipantInfo | null>(null);
+  const [editing, setEditing] = useState<ChatRoomParticipantInfo | null>(null);
+  const [nickname, setNickname] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -39,16 +41,31 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
 
   useBoardStreamEvent('chat_room_update', event => {
     const payload = event?.payload ?? event;
-    if (payload?.room_id === roomId && ['participant_added', 'participant_left'].includes(payload.update_type)) {
+    if (payload?.room_id === roomId && ['participant_added', 'participant_left', 'participant_updated'].includes(payload.update_type)) {
       setRevision(value => value + 1);
     }
   });
 
   const canRemove = !!detail?.can_remove_participants && hasPermission('chat.send');
+  const canEdit = !!detail?.can_edit_agent_nicknames && hasPermission('chat.send');
   const close = () => {
     if (busy) return;
-    if (selected) { setSelected(null); setError(''); }
+    if (selected || editing) { setSelected(null); setEditing(null); setError(''); }
     else onClose();
+  };
+  const saveNickname = async () => {
+    if (!editing || !detail || !canEdit || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.setChatAgentNickname(roomId, detail.account_id, editing.participant_id, nickname.trim());
+      setEditing(null);
+      setRevision(value => value + 1);
+      onChanged(roomId);
+      showToast(translate('Nickname saved'), 'success');
+    } catch (err: any) {
+      setError(err?.message || translate('Failed to save nickname'));
+    } finally { setBusy(false); }
   };
   const remove = async () => {
     if (!selected || !detail || !canRemove || busy) return;
@@ -70,16 +87,26 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
   };
 
   return (
-    <Modal isOpen onClose={close} title={translate(selected ? 'Remove participant?' : 'Participants')} maxWidth={520}
-      footer={selected ? <>
+    <Modal isOpen onClose={close} title={translate(editing ? 'Edit nickname' : selected ? 'Remove participant?' : 'Participants')} maxWidth={520}
+      footer={editing ? <>
+        <Button variant="secondary" onClick={close} disabled={busy}>{translate('Cancel')}</Button>
+        <Button onClick={() => void saveNickname()} loading={busy} disabled={!canEdit}>{translate('Save')}</Button>
+      </> : selected ? <>
         <Button variant="secondary" onClick={close} disabled={busy}>{translate('Cancel')}</Button>
         <Button variant="danger" onClick={() => void remove()} loading={busy} disabled={!canRemove}>{translate('Remove participant')}</Button>
       </> : <Button variant="secondary" onClick={onClose}>{translate('Close')}</Button>}>
       {error && <div role="alert" style={{ color: tokens.colors.dangerLight, marginBottom: 12, overflowWrap: 'anywhere' }}>
         {error}
-        {!selected && <Button variant="ghost" size="sm" onClick={() => setRevision(value => value + 1)}>{translate('Retry')}</Button>}
+        {!selected && !editing && <Button variant="ghost" size="sm" onClick={() => setRevision(value => value + 1)}>{translate('Retry')}</Button>}
       </div>}
-      {selected ? <div style={{ fontSize: 13, lineHeight: 1.6, overflowWrap: 'anywhere', color: tokens.colors.textPrimary }}>
+      {editing ? <>
+        <p style={{ overflowWrap: 'anywhere', fontSize: 13 }}>{editing.name}</p>
+        <Input label={translate('Nickname (optional)')} value={nickname} maxLength={80} disabled={busy}
+          onChange={(e) => setNickname(e.target.value)} />
+        <p style={{ color: tokens.colors.textSecondary, fontSize: 12 }}>
+          {translate('Use @ to mention this agent by nickname. Leave blank to restore its default name.')}
+        </p>
+      </> : selected ? <div style={{ fontSize: 13, lineHeight: 1.6, overflowWrap: 'anywhere', color: tokens.colors.textPrimary }}>
         {translate('Remove {0} from this room? Existing messages will be kept.', { 0: selected.name })}
         {detail?.open_join && selected.participant_type === 'user' && <p style={{ color: tokens.colors.textSecondary }}>
           {translate('This room is open, so they can join again.')}
@@ -97,6 +124,9 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
                 <strong style={{ color: tokens.colors.textPrimary }}>{p.name}</strong>
                 <div style={{ color: tokens.colors.textSecondary, fontSize: 11 }}>{self ? translate('나') : translate(p.participant_type === 'agent' ? 'Agent' : 'User')}</div>
               </div>
+              {canEdit && p.participant_type === 'agent' && p.nickname != null && <Button variant="secondary" size="sm"
+                aria-label={translate('Edit nickname for {0}', { 0: p.name })}
+                onClick={() => { setError(''); setEditing(p); setNickname(p.nickname || ''); }}>{translate('Edit nickname')}</Button>}
               {canRemove && !self && <Button variant="danger" size="sm" aria-label={translate('Remove {0} from this room', { 0: p.name })}
                 onClick={() => { setError(''); setSelected(p); }}>{translate('Remove participant')}</Button>}
             </li>;

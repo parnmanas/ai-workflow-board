@@ -534,6 +534,21 @@ test('projectParticipants / countUserParticipants: wire → 로스터 투영과 
   assert.deepEqual(projectParticipants({ id: 'A' }), [], 'participants 누락 방어');
 });
 
+test('nickname changes refresh the active roster and retain stable mention addresses', async () => {
+  const roster = projectParticipants({ participants: [{ participant_id: 'rt-stable', participant_type: 'agent', name: 'Host/검토자', nickname: '검토자' }] });
+  assert.deepEqual(roster, [{ id: 'rt-stable', type: 'agent', name: '검토자', sublabel: 'Host/검토자' }]);
+  let refreshed;
+  let listCalls = 0;
+  dispatchChatRoomUpdate({
+    currentUserId: 'me', getActiveRoomId: () => 'room',
+    listChatRooms: async () => { listCalls++; return []; }, setRooms: () => {},
+    refreshActiveRoomParticipants: id => { refreshed = id; },
+  }, { payload: { room_id: 'room', update_type: 'participant_updated', participant_id: 'rt-stable' } });
+  await flush();
+  assert.equal(refreshed, 'room');
+  assert.equal(listCalls, 1);
+});
+
 test('dispatchChatRoomUpdate: open_join_changed 는 같은 계정면 방 목록을 재조회한다 (ticket 995a9519)', async () => {
   // 리뷰 라운드1 P1-2. 이 이벤트의 핵심 수신자는 **아직 참여하지 않은 사용자**이고,
   // 그들에게 필요한 것은 플래그 갱신이 아니라 방이 목록에 새로 나타나거나(ON) 사라지는

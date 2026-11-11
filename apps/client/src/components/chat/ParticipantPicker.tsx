@@ -400,6 +400,7 @@ export default function NewChatModal({ open, onClose, onCreated, addToRoomId, ex
                   {translate('연결된 Runtime Host 가 없습니다. Hosts 에서 Agent Manager 를 먼저 연결하세요.')}</p>
               )}
               <RuntimeSpecEditor
+                labelTitle={translate('Nickname (optional)')}
                 value={draft}
                 onChange={(next) => { setDraft(next); setDraftError(null); }}
                 hosts={hosts} hostsLoading={hostsLoading} hostsError={hostError}

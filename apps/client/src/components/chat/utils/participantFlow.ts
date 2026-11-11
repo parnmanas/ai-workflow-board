@@ -19,6 +19,7 @@ export interface RoomDetailParticipantWire {
   participant_id: string;
   participant_type: 'user' | 'agent';
   name: string;
+  nickname?: string | null;
 }
 export interface RoomDetailLike {
   participants?: RoomDetailParticipantWire[];
@@ -40,8 +41,9 @@ export function projectParticipants(detail: RoomDetailLike | null | undefined): 
   if (!detail?.participants) return [];
   return detail.participants.map((p) => ({
     id: p.participant_id,
-    name: p.name,
+    name: p.nickname || p.name,
     type: p.participant_type,
+    ...(p.nickname ? { sublabel: p.name } : {}),
   }));
 }
 
@@ -300,7 +302,8 @@ export function dispatchChatRoomUpdate(
     );
   } else if (
     payload.update_type === 'participant_added' ||
-    payload.update_type === 'participant_left'
+    payload.update_type === 'participant_left' ||
+    payload.update_type === 'participant_updated'
   ) {
     if (payload.update_type === 'participant_left' && payload.participant_type === 'user' && payload.participant_id === deps.currentUserId) {
       deps.setRooms(prev => prev.filter(room => room.id !== payload.room_id));

@@ -409,7 +409,7 @@ function RuntimeChip({ runtime }: { runtime: OrchestrationSlotRuntime | null }) 
 function sameSlot(a: OrchestrationSlotRuntime | null, b: OrchestrationSlotRuntime | null): boolean {
   if (!a || !b) return false;
   const key = (r: OrchestrationSlotRuntime) => JSON.stringify([
-    r.manager_agent_id, r.cli, r.model ?? '', r.credential_id ?? '', r.cli_runtime_profile ?? '', r.runtime_config ?? null,
+    r.manager_agent_id, r.cli, r.model ?? '', r.credential_id ?? '', r.cli_runtime_profile ?? '', r.runtime_config ?? null, r.label || '',
   ]);
   return key(a) === key(b);
 }

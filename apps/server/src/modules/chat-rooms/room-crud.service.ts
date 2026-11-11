@@ -13,6 +13,7 @@ import { resolveAgentDisplayNamesByIds, resolveRuntimeDisplayNames } from '../..
 import { resolveCallerIdentityRow } from '../mcp/shared/authz';
 import { agentIsVisibleInAccount } from '../../common/agent-account-scope';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { normalizeAgentNickname } from '../../common/agent-nickname';
 
 const PARTICIPANT_CAP = 50;
 
@@ -349,6 +350,7 @@ export class RoomCrudService {
         return p;
       }
       try {
+        normalizeAgentNickname(raw?.label);
         const spec = normalizeRuntimeSpec(raw, 'participant.runtime');
         return { ...p, participant_id: runtimeIdentityKey(spec), runtime: { ...spec } };
       } catch (e: any) {
@@ -378,6 +380,7 @@ export class RoomCrudService {
       const raw = (p as any).runtime;
       if (p.participant_type !== 'agent' || raw === undefined || raw === null) continue;
       try {
+        normalizeAgentNickname(raw?.label);
         directSpecs.set(p.participant_id, { ...normalizeRuntimeSpec(raw, 'participant.runtime') });
       } catch (e: any) {
         throw makeError(400, e?.message || 'invalid participant.runtime');
@@ -477,6 +480,7 @@ export class RoomCrudService {
         participant_type: p.participant_type,
         participant_id: p.participant_id,
         name: await this.membership.resolveParticipantName(p.participant_type, p.participant_id, undefined, p.runtime_spec),
+        nickname: p.participant_type === 'agent' && p.runtime_spec ? String(p.runtime_spec.label || '') : null,
         last_read_at: p.last_read_at,
         joined_at: p.joined_at,
       })),
@@ -514,6 +518,7 @@ export class RoomCrudService {
       can_remove_participants: !isSystemManagedRoom(room) && participants.some(
         p => p.participant_type === 'user' && p.participant_id === userId,
       ),
+      can_edit_agent_nicknames: participants.some(p => p.participant_type === 'user' && p.participant_id === userId),
       created_at: room.created_at,
       updated_at: room.updated_at,
       participants: resolvedParticipants,

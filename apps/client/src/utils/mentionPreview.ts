@@ -15,7 +15,7 @@
 
 import { t } from '../i18n/core';
 
-const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
+const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|slot|ticket):([\w-]+)(?:\|([^\]]*))?\]/g;
 
 // Fallback label per token type, used when the token carries no display name
 // (older rows, or a programmatic mention). Showing the bare id would just be
@@ -23,6 +23,7 @@ const STRUCTURED_TOKEN_RE = /@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?
 const FALLBACK_LABEL: Record<string, string> = {
   get user() { return t('User'); },
   get agent() { return t('Agent'); },
+  get slot() { return t('Team member'); },
   get role() { return t('Role'); },
   get ticket() { return t('Ticket'); },
 };

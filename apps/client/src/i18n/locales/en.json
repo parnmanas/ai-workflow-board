@@ -7172,5 +7172,14 @@
   "이 업무의 세션을 여는 중…": "Opening the session for this work item…",
   "세션을 열지 못했습니다.": "Could not open the session.",
   "응답 없음 · 중단으로 표시": "No response · mark as stopped",
-  "이 실행을 중단으로 표시할까요? 요청 내용은 보존되고 자동으로 다시 실행하지 않습니다.": "Mark this run as stopped? The request is kept and nothing is re-run automatically."
+  "이 실행을 중단으로 표시할까요? 요청 내용은 보존되고 자동으로 다시 실행하지 않습니다.": "Mark this run as stopped? The request is kept and nothing is re-run automatically.",
+  "Nickname (optional)": "Nickname (optional)",
+  "e.g. Researcher, Reviewer": "e.g. Researcher, Reviewer",
+  "Edit nickname": "Edit nickname",
+  "Nickname saved": "Nickname saved",
+  "Failed to save nickname": "Failed to save nickname",
+  "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "Use @ to mention this agent by nickname. Leave blank to restore its default name.",
+  "Edit nickname for {0}": "Edit nickname for {0}",
+  "@team-member mentions are sent to the orchestrator for assignment.": "@team-member mentions are sent to the orchestrator for assignment.",
+  "Team member": "Team member"
 }

@@ -3570,7 +3570,7 @@ export class OrchestrationRunnerService {
       members.push({
         slot_id: m.id,
         kind: 'member',
-        name: slotDisplayName(names.get(spec.manager_agent_id), m.role_label, spec.cli),
+        name: slotDisplayName(names.get(spec.manager_agent_id), spec.label || m.role_label, spec.cli),
         role_label: m.role_label,
         capabilities: m.capabilities,
         max_concurrent: m.max_concurrent,
@@ -3583,7 +3583,7 @@ export class OrchestrationRunnerService {
       members.push({
         slot_id: e.slot_id,
         kind: 'extra',
-        name: slotDisplayName(names.get(spec.manager_agent_id), e.role_label, spec.cli),
+        name: slotDisplayName(names.get(spec.manager_agent_id), spec.label || e.role_label, spec.cli),
         role_label: e.role_label || '',
         capabilities: e.capabilities || '',
         max_concurrent: Number.isFinite(e.max_concurrent) && e.max_concurrent >= 1 ? Math.floor(e.max_concurrent) : 1,
@@ -3594,7 +3594,7 @@ export class OrchestrationRunnerService {
       ? {
           slot_id: ORCHESTRATOR_SLOT_ID,
           kind: 'orchestrator',
-          name: slotDisplayName(names.get(orchestratorSpec.manager_agent_id), '', orchestratorSpec.cli),
+          name: slotDisplayName(names.get(orchestratorSpec.manager_agent_id), orchestratorSpec.label || '', orchestratorSpec.cli),
           role_label: '',
           capabilities: '',
           max_concurrent: 1,

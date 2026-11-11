@@ -349,6 +349,7 @@ export default function MissionDetailPage() {
                 accountId={accountId}
                 roomId={mission.room_id}
                 events={mission.events}
+                roster={mission.roster}
                 live={isLive}
                 userChatMode={mission.user_chat_mode}
                 onReopen={reopen}

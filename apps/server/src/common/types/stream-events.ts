@@ -494,7 +494,7 @@ export interface ChatRoomMessagePayload {
 
 export interface ChatRoomUpdatePayload {
   room_id: string;
-  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'read' | 'open_join_changed';
+  update_type: 'renamed' | 'participant_added' | 'participant_left' | 'participant_updated' | 'read' | 'open_join_changed';
   new_name?: string;
   participant_id?: string;
   participant_ids?: string[];

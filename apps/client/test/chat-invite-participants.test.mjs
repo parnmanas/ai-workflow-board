@@ -19,15 +19,46 @@ import { ui, uiPattern } from './helpers/i18n.mjs';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, mount, click, React, act } from './helpers/jsdom.mjs';
+import { setupDom, mount, click, React, act, typeInto } from './helpers/jsdom.mjs';
+import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api, getActiveAccountId, setActiveAccountId } from '../src/api.ts';
 import { RoomHeaderActions } from '../src/components/chat/RoomDetailPanel.tsx';
 import ParticipantPicker from '../src/components/chat/ParticipantPicker.tsx';
+import RoomParticipantsModal from '../src/components/chat/RoomParticipantsModal.tsx';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { canInviteToRoom } from '../src/components/chat/utils/participantFlow.ts';
 import { chatFolderSlug, defaultChatWorkdir, isChatWorkdir } from '../src/components/chat/utils/chatAgents.ts';
 
 const flush = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+test('an existing chat agent can be renamed from Participants with its room account and stable ID', async () => {
+  const dom = setupDom();
+  const { uninstall } = installFakeEventSource();
+  globalThis.localStorage = dom.window.localStorage;
+  localStorage.setItem('auth_token', 'test');
+  const originals = { getMe: api.getMe, getChatRoom: api.getChatRoom, setChatAgentNickname: api.setChatAgentNickname };
+  let nickname = 'Builder';
+  const calls = [];
+  api.getMe = async () => ({ id: 'me', resolved_permissions: ['chat.send'] });
+  api.getChatRoom = async () => ({ id: 'room', account_id: 'room-owner', can_edit_agent_nicknames: true, participants: [
+    { participant_id: 'rt-stable', participant_type: 'agent', nickname, name: `Host/${nickname}` },
+  ] });
+  api.setChatAgentNickname = async (...args) => { calls.push(args); nickname = args[3]; };
+  const view = mountWithBoardStream(React.createElement(RoomParticipantsModal, { roomId: 'room', currentUserId: 'me', onClose() {}, onChanged() {} }));
+  try {
+    await flush(); await flush();
+    const edit = [...document.querySelectorAll('button')].find(b => b.textContent === ui('Edit nickname'));
+    assert.ok(edit);
+    click(edit);
+    typeInto(document.querySelector('[role="dialog"] input'), 'Reviewer');
+    click([...document.querySelectorAll('button')].find(b => b.textContent === ui('Save')));
+    await flush(); await flush();
+    assert.deepEqual(calls, [['room', 'room-owner', 'rt-stable', 'Reviewer']]);
+    assert.ok(document.body.textContent.includes('Host/Reviewer'));
+  } finally {
+    view.unmount(); Object.assign(api, originals); uninstall(); dom.cleanup();
+  }
+});
 
 /** RoomHeaderActions 가 요구하는 콜백들 — 이 테스트는 노출 여부만 보므로 전부 noop. */
 const noopHeaderProps = {

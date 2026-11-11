@@ -2252,6 +2252,11 @@ export const api = {
   leaveChatRoom: (roomId: string) =>
     request<void>(`/chat-rooms/${roomId}/participants/me`, { method: 'DELETE' }),
 
+  setChatAgentNickname: (roomId: string, accountId: string, participantId: string, nickname: string) =>
+    request<{ ok: boolean }>(`/chat-rooms/${encodeURIComponent(roomId)}/participants/agent/${encodeURIComponent(participantId)}/nickname`, {
+      method: 'PATCH', headers: { ...getAuthHeaders(), 'X-Account-Id': accountId }, body: JSON.stringify({ nickname }),
+    }),
+
   removeChatRoomParticipant: (roomId: string, accountId: string, participantType: 'user' | 'agent', participantId: string) =>
     request<void>(`/chat-rooms/${encodeURIComponent(roomId)}/participants/${participantType}/${encodeURIComponent(participantId)}`, {
       method: 'DELETE',

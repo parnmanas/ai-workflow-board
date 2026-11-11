@@ -140,6 +140,19 @@ test('team view: orchestrator_name and member agent_name are <Host>/<leaf>', asy
 });
 
 // ─── 3. Mission timeline + step assignee ─────────────────────────────────────
+test('team nicknames distinguish identical runtimes and can be renamed independently', async () => {
+  const team = await teams.createTeam({ account_id: ws.id, name: 'nickname-team', orchestrator: SLOT_SPEC(mgrA.id, { label: '리드' }) });
+  await teams.addMember(team.id, ws.id, { runtime: SLOT_SPEC(mgrA.id, { label: '검토자' }), role_label: 'review' });
+  let view = (await teams.listTeams(ws.id)).find(t => t.id === team.id);
+  assert.equal(view.orchestrator_name, `${mgrA.name}/리드`);
+  assert.equal(view.members[0].agent_name, `${mgrA.name}/검토자`);
+  assert.equal(view.members[0].runtime.label, '검토자');
+  await teams.updateMember(team.id, ws.id, view.members[0].id, { runtime: { label: '리뷰어' } });
+  view = (await teams.listTeams(ws.id)).find(t => t.id === team.id);
+  assert.equal(view.orchestrator_name, `${mgrA.name}/리드`);
+  assert.equal(view.members[0].agent_name, `${mgrA.name}/리뷰어`);
+});
+
 test('mission: recordEvent resolves an agent actor_name to the Host display, assignee covered', async () => {
   const teamList = await teams.listTeams(ws.id);
   const team = teamList.find((t) => t.name === 'fullname-team');

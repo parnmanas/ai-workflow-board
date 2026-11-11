@@ -6,7 +6,7 @@ import { tokens } from '../../tokens';
 import { useMobileInput } from '../../hooks/useMobileInput';
 
 export interface MentionCandidate {
-  type: 'user' | 'agent' | 'role';
+  type: 'user' | 'agent' | 'role' | 'slot';
   id: string;       // uuid for user/agent, role keyword ('assignee' etc) for role
   name: string;     // display name
   sublabel?: string; // secondary line (e.g. "Assignee (Alice)")
@@ -17,7 +17,7 @@ export interface MentionCandidate {
 // display-form string (the raw tokens replaced by a human-readable `@name`).
 // Order matters for the reverse mapping — each mention is found by its
 // first unconsumed `@name` occurrence after the previous one in the string.
-const RAW_TOKEN_RE = /@\[(user|agent|role):([\w-]+)(?:\|([^\]]*))?\]/g;
+const RAW_TOKEN_RE = /@\[(user|agent|role|slot):([\w-]+)(?:\|([^\]]*))?\]/g;
 function parseRawToDisplay(raw: string): { display: string; log: MentionCandidate[] } {
   const log: MentionCandidate[] = [];
   if (!raw) return { display: '', log };

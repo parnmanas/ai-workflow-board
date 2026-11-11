@@ -92,6 +92,22 @@ test('slot spec — 부분 patch 와 CLI 변경 시 runtime_config 이월, 동�
   assert.ok(!sameTeamSlotSpec(base, patched));
 });
 
+test('slot nicknames persist through patches and execution without changing the runtime identity', () => {
+  const base = slotSpec('rolf');
+  const named = mergeTeamSlotSpec(base, { label: '  검토 담당  ' }, 'slot');
+  assert.equal(named.label, '검토 담당');
+  assert.equal(parseTeamSlotSpec(JSON.stringify(named)).label, '검토 담당');
+  assert.equal(mergeTeamSlotSpec(named, { model: 'opus' }, 'slot').label, '검토 담당');
+  const execution = slotExecutionSpec(named, '/srv/app', 'shared');
+  assert.equal(execution.label, '검토 담당');
+  assert.equal(runtimeIdentityKey(execution), runtimeIdentityKey(slotExecutionSpec(base, '/srv/app', 'shared')));
+  assert.equal(sameTeamSlotSpec(base, named), false, 'independently named slots remain independently editable');
+  assert.equal(mergeTeamSlotSpec(named, { label: '' }, 'slot').label, undefined);
+  for (const label of ['bad|token', 'bad]token', '@name', 'line\nbreak', 'x'.repeat(81), 123]) {
+    assert.throws(() => slotSpec('rolf', { label }), /Nickname/);
+  }
+});
+
 test('roster — slot 마다 Host 에 폴더가 있는 project 수만큼 runtime 이 생긴다', () => {
   const roster = resolve([slot('builder', 'rolf'), slot('windows', 'ralf')]);
   assert.deepEqual(

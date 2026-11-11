@@ -7172,5 +7172,14 @@
   "이 업무의 세션을 여는 중…": "正在打开此业务的会话…",
   "세션을 열지 못했습니다.": "无法打开会话。",
   "응답 없음 · 중단으로 표시": "无响应 · 标记为已中断",
-  "이 실행을 중단으로 표시할까요? 요청 내용은 보존되고 자동으로 다시 실행하지 않습니다.": "将此次执行标记为已中断？请求内容会保留，不会自动重新执行。"
+  "이 실행을 중단으로 표시할까요? 요청 내용은 보존되고 자동으로 다시 실행하지 않습니다.": "将此次执行标记为已中断？请求内容会保留，不会自动重新执行。",
+  "Nickname (optional)": "昵称（可选）",
+  "e.g. Researcher, Reviewer": "例如：研究员、审阅者",
+  "Edit nickname": "编辑昵称",
+  "Nickname saved": "昵称已保存",
+  "Failed to save nickname": "昵称保存失败",
+  "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "输入 @ 可通过昵称提及此智能体。留空可恢复默认名称。",
+  "Edit nickname for {0}": "编辑 {0} 的昵称",
+  "@team-member mentions are sent to the orchestrator for assignment.": "@团队成员的提及会作为指派该成员的请求发送给协调者。",
+  "Team member": "团队成员"
 }

@@ -240,6 +240,9 @@ export function renderMissionPrompt(args: {
   }
 
   lines.push(section('Your team', renderRoster(roster, args.folderScope)));
+  lines.push('User mentions of `@[slot:<slot_id>|nickname]` designate a team member for you to assign or discuss. ' +
+    'Resolve the slot id against this mission\'s roster; the nickname is a display label. These mentions are requests to you, ' +
+    'not direct messages to a member session. Use the normal step planning and dispatch flow.');
 
   // 실행 승인(docs/orchestration.md "실행 승인") — 신뢰된 오케스트레이터만 멤버의 요청을 받는다.
   if (orchestratorMayApprove(mission)) {

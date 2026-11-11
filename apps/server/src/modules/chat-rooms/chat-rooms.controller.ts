@@ -438,6 +438,21 @@ export class ChatRoomsController {
     }
   }
 
+  @Patch(':roomId/participants/agent/:participantId/nickname')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async setAgentNickname(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string,
+    @Param('participantId') participantId: string, @Body() body: any) {
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
+    if (typeof body?.nickname !== 'string') return res.status(400).json({ error: 'nickname must be text' });
+    try {
+      await this.membership.setAgentNickname(roomId, accountId, (req as any).currentUser.id, participantId, body.nickname);
+      return res.json({ ok: true });
+    } catch (err: any) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+
   @Delete(':roomId/participants/me')
   @RequirePermission(PERMISSIONS.CHAT_VIEW)
   async leaveRoom(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string) {

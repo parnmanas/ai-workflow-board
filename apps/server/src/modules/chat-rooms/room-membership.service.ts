@@ -7,6 +7,7 @@ import { User } from '../../entities/User';
 import { OrchestrationMission } from '../../entities/OrchestrationMission';
 import { activityEvents } from '../../services/activity.service';
 import { normalizeRuntimeSpec, runtimeIdentityKey } from '../../common/runtime-spec';
+import { normalizeAgentNickname } from '../../common/agent-nickname';
 import { isUuidShapedId } from '../../utils/agent-name';
 import {
   resolveAgentDisplayName,
@@ -227,6 +228,7 @@ export class RoomMembershipService {
         return p;
       }
       try {
+        normalizeAgentNickname((p.runtime as Record<string, unknown>)?.label);
         const spec = normalizeRuntimeSpec(p.runtime, 'participant.runtime');
         return { ...p, participant_id: runtimeIdentityKey(spec), runtime: { ...spec } };
       } catch (e: any) {
@@ -242,6 +244,7 @@ export class RoomMembershipService {
     for (const p of requested) {
       if (p.participant_type !== 'agent' || p.runtime === undefined || p.runtime === null) continue;
       try {
+        normalizeAgentNickname((p.runtime as Record<string, unknown>)?.label);
         directSpecs.set(p.participant_id, { ...normalizeRuntimeSpec(p.runtime, 'participant.runtime') });
       } catch (e: any) {
         throw makeError(400, e?.message || 'invalid participant.runtime');
@@ -562,6 +565,37 @@ export class RoomMembershipService {
       participant_id: userId,
       member_ids: memberIds,
       agent_member_ids: agentMemberIds,
+    });
+  }
+
+  /** Rename a room's agent without changing its runtime address or execution settings. */
+  async setAgentNickname(roomId: string, accountId: string, userId: string, participantId: string, value: unknown): Promise<void> {
+    let nickname: string;
+    try { nickname = normalizeAgentNickname(value); } catch (e) { throw makeError(400, (e as Error).message); }
+    await this.dataSource.transaction(async (em) => {
+      if (this.dataSource.options.type === 'postgres') {
+        await em.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`chat_room_participants:${roomId}`]);
+      }
+      const room = await em.findOne(ChatRoom, { where: { id: roomId, account_id: accountId } });
+      if (!room) throw makeError(404, 'Room not found');
+      const caller = await em.findOne(ChatRoomParticipant, {
+        where: { room_id: roomId, participant_type: 'user', participant_id: userId, left_at: IsNull() },
+      });
+      if (!caller) throw makeError(403, 'Not an active participant in this room');
+      const participants = await em.find(ChatRoomParticipant, {
+        where: { room_id: roomId, participant_type: 'agent', participant_id: participantId, left_at: IsNull() },
+      });
+      if (!participants.length) throw makeError(404, 'Participant is no longer in this room');
+      for (const participant of participants) {
+        if (!participant.runtime_spec) throw makeError(400, 'This participant has no runtime declaration to rename');
+        const spec = normalizeRuntimeSpec({ ...participant.runtime_spec, label: nickname }, 'participant.runtime');
+        participant.runtime_spec = { ...participant.runtime_spec, label: spec.label };
+      }
+      await em.save(ChatRoomParticipant, participants);
+    });
+    activityEvents.emit('chat_room_update', {
+      room_id: roomId, update_type: 'participant_updated', participant_type: 'agent', participant_id: participantId,
+      member_ids: await this.getRoomMemberIds(roomId), agent_member_ids: await this.getRoomAgentMemberIds(roomId),
     });
   }
 

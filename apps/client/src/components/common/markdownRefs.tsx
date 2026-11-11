@@ -7,12 +7,13 @@ import { ARTIFACT_TOKEN_RE, type ArtifactRefType } from '../../utils/artifactRef
 
 const ROLE_SHORTCUTS = new Set(['reviewer', 'assignee', 'reporter']);
 const ARTIFACT_REF = new RegExp(`^${ARTIFACT_TOKEN_RE.source}$`);
-const STRUCTURED_REF = /^@\[(user|agent|role|ticket):([\w-]+)(?:\|([^\]]*))?\]$/;
+const STRUCTURED_REF = /^@\[(user|agent|role|slot|ticket):([\w-]+)(?:\|([^\]]*))?\]$/;
 
 export interface MentionParticipant {
   id: string;
   name: string;
   type: string;
+  sublabel?: string;
 }
 
 function renderMentionPill(
@@ -81,7 +82,7 @@ export function renderMarkdownRef(raw: string, participants?: MentionParticipant
   if (structured) {
     const [, type, id, display] = structured;
     if (type === 'ticket') return <TicketRefCard id={id} title={display || id} />;
-    return renderMentionPill(`@${display || id}`, type as 'agent' | 'user' | 'role', 0, raw);
+    return renderMentionPill(`@${display || id}`, type === 'slot' ? 'agent' : type as 'agent' | 'user' | 'role', 0, raw);
   }
   const name = raw.slice(1).toLowerCase();
   const participant = participants?.find(p => p.name.toLowerCase() === name);

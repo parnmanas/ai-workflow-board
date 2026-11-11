@@ -5,6 +5,21 @@ between agent sessions). A room is a DM (2 members) or a group (3+).
 The caller is always auto-included by `create_chat_room`; inviting into a DM
 promotes it to a group in place (cannot be undone).
 
+## Agent nicknames and mentions
+
+Set **Nickname (optional)** when adding an agent, or open **Participants → Edit
+nickname** to rename an existing agent in this room. Active user participants
+with `chat.send` can edit it. Names appear as `Host/nickname`; typing `@` offers
+the room's nicknames. Selecting one stores `@[agent:<runtime-id>|nickname]` and
+wakes that agent through the existing mention route. Renaming changes only the
+room's display label: its runtime ID, folder, credentials and message history
+stay intact. Clearing the field restores the default name.
+
+Team mission conversations also offer `@` choices for team members. Those use
+`@[slot:<slot-id>|nickname]` and tell the orchestrator which member the user
+means; the orchestrator assigns the work. Selecting a team member does not
+directly wake a separate member session.
+
 ## Removing participants
 
 Open **Participants · N** above the conversation, or **Manage participants** in

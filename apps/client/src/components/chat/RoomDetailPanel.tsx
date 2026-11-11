@@ -522,7 +522,7 @@ export default function ChatRoomView({
                   whiteSpace: 'nowrap',
                 }}
               >
-                {p.name}
+                {p.sublabel || p.name}
                 {p.type === 'agent' && (
                   <span style={{ color: tokens.colors.textSecondary, marginLeft: 4, fontSize: 10 }}>{translate('agent')}</span>
                 )}
@@ -530,7 +530,7 @@ export default function ChatRoomView({
             ))}
             {participants.length > MAX_VISIBLE_PARTICIPANT_CHIPS && (
               <button type="button" onClick={() => setParticipantsRoomId(room.id)}
-                title={participants.map((p) => p.name).join(', ')}
+                title={participants.map((p) => p.sublabel || p.name).join(', ')}
                 style={{ fontSize: tokens.typography.fontSizeXs, color: tokens.colors.textSecondary, padding: '2px 4px', whiteSpace: 'nowrap', border: 'none', background: 'transparent', cursor: 'pointer' }}
               >
                 +{participants.length - MAX_VISIBLE_PARTICIPANT_CHIPS} {translate('more')}</button>

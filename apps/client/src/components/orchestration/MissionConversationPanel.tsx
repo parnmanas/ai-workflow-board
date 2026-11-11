@@ -1,9 +1,9 @@
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { tokens } from '../../tokens';
-import type { ChatRoomMessageItem, OrchestrationTimelineEvent, OrchestrationUserChatMode } from '../../types';
+import type { ChatRoomMessageItem, OrchestrationMissionRoster, OrchestrationTimelineEvent, OrchestrationUserChatMode } from '../../types';
 import { useConversationScroll } from '../../hooks/useConversationScroll';
 import { useBoardStreamEvent } from '../../contexts/BoardStreamContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -11,6 +11,7 @@ import MessageList from '../chat/MessageList';
 import ChatMessageInput from '../chat/ChatMessageInput';
 import { projectParticipants, countUserParticipants } from '../chat/utils/participantFlow';
 import type { MentionParticipant } from '../common/Markdown';
+import type { MentionCandidate } from '../common/MentionTextarea';
 import { eventColor } from './status';
 import { relativeTime } from '../../utils/time';
 
@@ -98,6 +99,13 @@ export function buildConversationTracks(
   return tracks;
 }
 
+export function missionMentionCandidates(participants: MentionParticipant[], roster?: OrchestrationMissionRoster | null): MentionCandidate[] {
+  return [
+    ...participants.filter((p): p is MentionCandidate => p.type === 'user' || p.type === 'agent'),
+    ...(roster?.members ?? []).map(m => ({ type: 'slot' as const, id: m.slot_id, name: m.nickname || m.name, sublabel: m.name })),
+  ];
+}
+
 interface MissionConversationPanelProps {
   missionId: string;
   /** 이벤트 커서 조회에 필요한 account 스코프. */
@@ -106,6 +114,7 @@ interface MissionConversationPanelProps {
   roomId: string | null;
   /** 실행 trace — 대화와 시간순으로 엮어 보여준다. */
   events: OrchestrationTimelineEvent[];
+  roster?: OrchestrationMissionRoster | null;
   /** 종료된 미션에서는 입력을 막는다(보낼 orchestrator 세션이 없다). */
   live: boolean;
   /**
@@ -123,6 +132,7 @@ export default function MissionConversationPanel({
   accountId,
   roomId,
   events,
+  roster,
   live,
   onReopen,
   userChatMode = 'open',
@@ -154,6 +164,7 @@ export default function MissionConversationPanel({
    * 로스터 없이는 성립하지 않는다.
    */
   const [participants, setParticipants] = useState<MentionParticipant[]>([]);
+  const mentionCandidates = useMemo(() => missionMentionCandidates(participants, roster), [participants, roster]);
   const [participantCount, setParticipantCount] = useState(0);
   /** 커서로 추가로 가져온 과거 실행 이벤트(오래된 것부터). */
   const [olderEvents, setOlderEvents] = useState<OrchestrationTimelineEvent[]>([]);
@@ -382,6 +393,18 @@ export default function MissionConversationPanel({
       [roomId, observer],
     ),
   );
+
+  useBoardStreamEvent('chat_room_update', useCallback((event: any) => {
+    const payload = event?.payload ?? event;
+    if (payload?.room_id !== roomId || !['participant_added', 'participant_left', 'participant_updated'].includes(payload.update_type)) return;
+    const issuedFor = missionKey;
+    api.getChatRoom(roomId!, observer).then(detail => {
+      if (activeMissionKeyRef.current !== issuedFor) return;
+      const next = projectParticipants(detail);
+      setParticipants(next);
+      setParticipantCount(countUserParticipants(next));
+    }).catch(() => {});
+  }, [roomId, observer, missionKey]));
 
   // SSE 가 끊겼다 붙으면 그 사이 프레임을 놓쳤을 수 있으므로 전체를 다시 읽는다.
   useBoardStreamEvent(
@@ -650,7 +673,10 @@ export default function MissionConversationPanel({
               )}
             </div>
           )}
-          <ChatMessageInput roomId={roomId} onSent={handleSent} isMobile={false} />
+          {!!roster?.members.length && <div style={{ padding: '4px 12px', fontSize: 12, color: tokens.colors.textSecondary }}>
+            {translate('@team-member mentions are sent to the orchestrator for assignment.')}
+          </div>}
+          <ChatMessageInput roomId={roomId} participants={mentionCandidates} onSent={handleSent} isMobile={false} />
         </div>
       )}
     </div>

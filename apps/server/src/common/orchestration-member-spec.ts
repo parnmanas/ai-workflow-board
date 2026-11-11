@@ -32,6 +32,7 @@
  */
 
 import { CLI_TYPES } from './types/cli-types';
+import { normalizeAgentNickname } from './agent-nickname';
 import { cliDescriptor, type CliCollaboration } from './cli-catalog';
 import {
   AgentRuntimeConfig,
@@ -90,6 +91,8 @@ export const TEAM_SLOT_CLIS: readonly string[] = CLI_TYPES.filter((cli) => isExe
 
 /** A team roster slot — who runs, never where. See the file header. */
 export interface TeamSlotSpec {
+  /** Optional nickname. Display only; runtimeIdentityKey never includes it. */
+  label?: string;
   /** Runtime Host that will run this slot. */
   manager_agent_id: string;
   /** CLI to run — one of TEAM_SLOT_CLIS. */
@@ -149,6 +152,7 @@ function normalizeSlotCore(raw: Record<string, unknown>, label: string): TeamSlo
 
   return {
     manager_agent_id,
+    ...(str(raw.label) ? { label: str(raw.label) } : {}),
     cli,
     model: str(raw.model) || null,
     credential_id: str(raw.credential_id) || null,
@@ -173,7 +177,9 @@ function requireObject(input: unknown, label: string, expected: string): Record<
  * honoured a folder after this change.
  */
 export function normalizeTeamSlotSpec(input: unknown, label: string): TeamSlotSpec {
-  const spec = normalizeSlotCore(requireObject(input, label, 'manager_agent_id, cli'), label);
+  const raw = requireObject(input, label, 'manager_agent_id, cli');
+  try { normalizeAgentNickname(raw.label); } catch (e) { fail(label, (e as Error).message); }
+  const spec = normalizeSlotCore(raw, label);
   const approval = missionApprovalProblem(spec);
   if (approval) fail(label, approval);
   return spec;
@@ -221,7 +227,7 @@ export function mergeTeamSlotSpec(current: TeamSlotSpec | null, patch: unknown, 
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return current;
   const raw = patch as Record<string, unknown>;
   const merged: Record<string, unknown> = { ...slotFields(current) };
-  for (const key of Object.keys(merged)) {
+  for (const key of [...Object.keys(merged), 'label']) {
     if (raw[key] !== undefined) merged[key] = raw[key];
   }
   carryRuntimeConfigAcrossCliChange(current, raw, merged);
@@ -250,13 +256,13 @@ export function slotOf(spec: TeamSlotSpec): TeamSlotSpec {
   return slotFields(spec);
 }
 
-/** Same slot — every field that changes how the CLI is launched is equal. */
+/** Same declared slot, including its nickname; distinct names may share a runtime identity. */
 export function sameTeamSlotSpec(a: TeamSlotSpec | null, b: TeamSlotSpec | null): boolean {
   if (!a || !b) return false;
   return slotSignature(a) === slotSignature(b);
 }
 
-/** Every field of a slot as one comparable string: host, cli, model, credential, backend profile, runtime_config. */
+/** Every declared field, including the display nickname. */
 export function slotSignature(spec: TeamSlotSpec | null): string {
   return [
     spec?.manager_agent_id ?? '',
@@ -265,6 +271,7 @@ export function slotSignature(spec: TeamSlotSpec | null): string {
     spec?.credential_id ?? '',
     spec?.cli_runtime_profile ?? '',
     JSON.stringify(spec?.runtime_config ?? null),
+    spec?.label ?? '',
   ].join('\u0000');
 }
 
@@ -350,6 +357,7 @@ export function workingDirLeaf(workingDir: string): string {
 
 function slotFields(spec: TeamSlotSpec): TeamSlotSpec {
   return {
+    ...(spec.label ? { label: spec.label } : {}),
     manager_agent_id: spec.manager_agent_id,
     cli: spec.cli,
     model: spec.model,

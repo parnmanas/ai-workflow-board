@@ -197,6 +197,42 @@ describe('DM 초대 → group 승격 (티켓 70e62a9d)', () => {
 
   // ── 승격 ────────────────────────────────────────────────────────────────
 
+  it('agent nickname edits stay in one room, preserve the runtime address and notify participants', async () => {
+    const spec = { manager_agent_id: BOT, cli: 'claude', working_dir: '/srv/app', label: 'Builder', role_prompt: 'Build things', runtime_config: { strategy: 'single', permission_mode: 'strict' } };
+    const { runtimeIdentityKey } = await import('../dist/common/runtime-spec.js');
+    const key = runtimeIdentityKey(spec);
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: key }]);
+    const other = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: key }]);
+    const repo = dataSource.getRepository(ChatRoomParticipant);
+    await repo.update({ participant_type: 'agent', participant_id: key }, { runtime_spec: spec });
+    const events = captureRoomUpdates();
+    try {
+      await membership.setAgentNickname(room.id, WS, ALICE, key, '  구현 담당  ');
+      const [renamed] = await activeRows(room.id, key);
+      assert.equal(renamed.participant_id, key);
+      assert.deepEqual(renamed.runtime_spec, { ...spec, label: '구현 담당' });
+      assert.equal((await activeRows(other.id, key))[0].runtime_spec.label, 'Builder');
+      assert.equal((await membership.resolveRoomAgentNames(room.id)).get(key), 'Bot/구현 담당');
+      assert.equal(events.length, 1);
+      assert.equal(events[0].update_type, 'participant_updated');
+      assert.ok(events[0].member_ids.has(ALICE));
+      assert.ok(events[0].agent_member_ids.has(key));
+      await membership.setAgentNickname(room.id, WS, ALICE, key, '');
+      assert.equal((await activeRows(room.id, key))[0].runtime_spec.label, 'app/claude');
+    } finally { events.stop(); }
+  });
+
+  it('nickname edits require the owning account and active membership and reject malformed mention labels', async () => {
+    const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
+    const rejected = (account, user, nickname, status) => assert.rejects(
+      membership.setAgentNickname(room.id, account, user, BOT, nickname), e => e.status === status,
+    );
+    await rejected(OTHER_WS, ALICE, 'Reviewer', 404);
+    await rejected(WS, OUTSIDER, 'Reviewer', 403);
+    await rejected(WS, ALICE, 'bad|token', 400);
+    await rejected(WS, ALICE, 'Reviewer', 400); // No runtime snapshot to rename.
+  });
+
   it('DM 에 사람을 초대하면 같은 room id 가 group 이 되고 이력이 그대로 남는다', async () => {
     const room = await seedRoom({}, [{ type: 'user', id: ALICE }, { type: 'agent', id: BOT }]);
     const msg = await seedMessage(room.id, '승격 전에 남긴 말');

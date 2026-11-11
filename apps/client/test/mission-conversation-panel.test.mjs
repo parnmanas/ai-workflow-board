@@ -27,7 +27,7 @@ import { ui, uiPattern } from './helpers/i18n.mjs';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupDom, React, act, click } from './helpers/jsdom.mjs';
+import { setupDom, React, act, click, typeInto, keydown } from './helpers/jsdom.mjs';
 import { installFakeEventSource, mountWithBoardStream } from './helpers/boardStream.mjs';
 import { api } from '../src/api.ts';
 import Panel from '../src/components/orchestration/MissionConversationPanel.tsx';
@@ -140,6 +140,43 @@ function textOf(container) {
 }
 
 // ─── 테스트 ───────────────────────────────────────────────────────────────────
+
+test('team nickname autocomplete sends a stable slot reference to the mission conversation', async () => {
+  const originalSend = api.sendChatRoomMessage;
+  const sent = [];
+  api.sendChatRoomMessage = async (roomId, content) => {
+    sent.push({ roomId, content });
+    return msg('nickname-message', content);
+  };
+  try {
+    await withPanel({
+      props: {
+        missionId: 'mission-1', accountId: 'ws-1', roomId: ROOM, live: true, events: [],
+        roster: { members: [
+          { slot_id: 'slot-reviewer', nickname: '검토자', name: 'Host/검토자' },
+          { slot_id: 'slot-builder', nickname: '구현자', name: 'Host/구현자' },
+        ] },
+      },
+      getChatRoomMessages: async () => [],
+      getChatRoom: async () => ({ participants: [{ participant_id: 'rt-lead', participant_type: 'agent', name: 'Host/리드', nickname: '리드' }] }),
+    }, async ({ view }) => {
+      const input = view.container.querySelector('textarea');
+      assert.ok(input);
+      typeInto(input, '@검토');
+      await settle();
+      const options = document.querySelectorAll('[role="option"]');
+      assert.equal(options.length, 1);
+      assert.match(options[0].textContent, /검토자/);
+      keydown('Enter', { target: input });
+      assert.equal(input.value.trim(), '@검토자');
+      keydown('Enter', { target: input });
+      await settle();
+      assert.deepEqual(sent, [{ roomId: ROOM, content: '@[slot:slot-reviewer|검토자]' }]);
+      assert.ok(view.container.textContent.includes(ui('@team-member mentions are sent to the orchestrator for assignment.')));
+      assert.ok(!view.container.textContent.includes('@[slot:'), 'the selected slot renders as a mention');
+    });
+  } finally { api.sendChatRoomMessage = originalSend; }
+});
 
 test('대화 메시지와 실행 이벤트가 서로 다른 렌더러로 시간순으로 엮인다', async () => {
   await withPanel(

@@ -2,6 +2,7 @@ import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import RuntimeSelectionFields from '../runtime/RuntimeSelectionFields';
 import React from 'react';
+import { Input } from '../common';
 import { tokens } from '../../tokens';
 import type {
   ClaudeBackendProfile,
@@ -37,6 +38,7 @@ import {
  */
 
 export interface SlotDraft {
+  label: string;
   manager_agent_id: string;
   /** CLI + execution strategy + permission tier, in RuntimeConfigFields' shape. */
   runtime: RuntimeSelection;
@@ -49,6 +51,7 @@ export interface SlotDraft {
 
 export function emptySlotDraft(): SlotDraft {
   return {
+    label: '',
     manager_agent_id: '',
     runtime: EMPTY_RUNTIME_SELECTION,
     model: '',
@@ -62,6 +65,7 @@ export function emptySlotDraft(): SlotDraft {
 export function slotDraftFromRuntime(rt: OrchestrationSlotRuntime | null): SlotDraft {
   if (!rt) return emptySlotDraft();
   return {
+    label: rt.label || '',
     manager_agent_id: rt.manager_agent_id,
     runtime: runtimeSelectionFromAgent(rt.cli, (rt.runtime_config as any) ?? null),
     model: rt.model ?? '',
@@ -92,6 +96,7 @@ export function slotDraftProblem(draft: SlotDraft): string | null {
 
 export function slotDraftToSpec(draft: SlotDraft): OrchestrationSlotSpecInput {
   return {
+    label: (draft.label || '').trim(),
     manager_agent_id: draft.manager_agent_id,
     cli: draft.runtime.runtime as string,
     model: draft.model.trim() || null,
@@ -122,6 +127,8 @@ export default function TeamSlotRuntimeFields({
 
   return (
     <>
+      <Input label={translate('Nickname (optional)')} value={value.label || ''} maxLength={80} disabled={disabled}
+        placeholder={translate('e.g. Researcher, Reviewer')} onChange={(e) => patch({ label: e.target.value })} />
       <RuntimeSelectionFields
         value={{ host_id: value.manager_agent_id, cli, model: value.model || null, effort: value.effort || null,
           runtime_config: { ...(buildRuntimeConfig(value.runtime) || {

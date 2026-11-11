@@ -64,7 +64,7 @@ function prepareMarkdown(text: string) {
     const range = math[Number(index)];
     return text.slice(range.start, range.end);
   });
-  const special = new RegExp(`${prefix}(\\d+)END|@\\[(?:user|agent|role|ticket):[\\w-]+(?:\\|[^\\]]*)?\\]|${ARTIFACT_TOKEN_RE.source}|@[a-zA-Z0-9_-]+|https?:\\/\\/[^\\s<>"']+`, 'g');
+  const special = new RegExp(`${prefix}(\\d+)END|@\\[(?:user|agent|role|slot|ticket):[\\w-]+(?:\\|[^\\]]*)?\\]|${ARTIFACT_TOKEN_RE.source}|@[a-zA-Z0-9_-]+|https?:\\/\\/[^\\s<>"']+`, 'g');
   function remarkContent() {
     return (tree: Root) => {
       // Nested/indented code and literal HTML can contain math-looking text too.

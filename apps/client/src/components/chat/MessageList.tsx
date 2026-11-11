@@ -21,8 +21,13 @@ export interface MessageListProps {
   currentUserId?: string;
 }
 
-export default function MessageList({ messages, participantCount, participants = [], currentUserId }: MessageListProps) {
+export default function MessageList({ messages: sourceMessages, participantCount, participants = [], currentUserId }: MessageListProps) {
   useLocale();
+  const messages = useMemo(() => {
+    const names = new Map(participants.filter(p => p.type === 'agent').map(p => [p.id, p.sublabel || p.name]));
+    return sourceMessages.map(message => message.sender_type === 'agent' && names.has(message.sender_id)
+      ? { ...message, sender_name: names.get(message.sender_id)! } : message);
+  }, [sourceMessages, participants]);
   // 갤러리 라이트박스 — 클릭이 곧 다운로드가 아니라 팝업 + prev/next.
   // key 기반이라 썸네일 로딩이 늦어 갤러리가 커져도 열린 위치가 흔들리지 않는다.
   const [lightboxKey, setLightboxKey] = useState<string | null>(null);

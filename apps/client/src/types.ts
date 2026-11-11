@@ -1528,6 +1528,7 @@ export interface ChatRoomDetail {
   open_join?: boolean;
   is_participant?: boolean;
   can_remove_participants?: boolean;
+  can_edit_agent_nicknames?: boolean;
 }
 
 export interface ChatRoomParticipantInfo {
@@ -1535,6 +1536,7 @@ export interface ChatRoomParticipantInfo {
   participant_type: 'user' | 'agent';
   participant_id: string;
   name: string;
+  nickname?: string | null;
   participant_name?: string;
   joined_at: string;
 }
@@ -2422,6 +2424,7 @@ export type OrchestrationFolderScope = 'shared' | 'isolated';
  * project's folder on the slot's host).
  */
 export interface OrchestrationSlotSpecInput {
+  label?: string;
   manager_agent_id: string;
   cli: string;
   model?: string | null;
@@ -2548,6 +2551,7 @@ export interface OrchestrationMissionRoster {
     slot_id: string;
     kind: string;
     name: string;
+    nickname?: string;
     role_label: string;
     cli: string;
     model: string | null;

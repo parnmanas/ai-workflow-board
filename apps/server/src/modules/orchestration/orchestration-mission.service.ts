@@ -410,6 +410,7 @@ export interface MissionRosterView {
     slot_id: string;
     kind: string;
     name: string;
+    nickname: string;
     role_label: string;
     cli: string;
     model: string | null;
@@ -1156,6 +1157,7 @@ export class OrchestrationMissionService {
       for (const h of hostRows) if (h.name) slotHostName.set(h.id, h.name);
     }
     const composeSlot = (agentId: string | null | undefined, spec: Record<string, any> | null | undefined, leaf: string): string => {
+      leaf = String(spec?.label || '').trim() || leaf;
       const hostPart = (spec?.manager_agent_id ? slotHostName.get(String(spec.manager_agent_id)) : undefined)
         ?? (agentId ? displayById.get(agentId) : undefined);
       const cleanHost = hostPart && !hostPart.includes('/') ? hostPart : undefined;
@@ -1193,7 +1195,7 @@ export class OrchestrationMissionService {
       title: mission.title,
       status: mission.status,
       orchestrator_agent_id: mission.orchestrator_agent_id,
-      orchestrator_name: composeSlot(
+      orchestrator_name: roster?.orchestrator.name ?? composeSlot(
         mission.orchestrator_agent_id, orchSpecRec, String(orchSpecRec?.cli ?? ''),
       ),
       plan_version: mission.plan_version,
@@ -1236,6 +1238,7 @@ export class OrchestrationMissionService {
               slot_id: m.slot_id,
               kind: m.kind,
               name: m.name,
+              nickname: m.spec.label || '',
               role_label: m.role_label,
               cli: m.spec.cli,
               model: m.spec.model,

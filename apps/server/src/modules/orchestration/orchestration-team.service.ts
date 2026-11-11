@@ -55,6 +55,7 @@ import { slotDisplayName } from './orchestration-roster';
  * round trip for. No folder — a mission decides where a slot works.
  */
 export interface SlotRuntimeView {
+  label: string;
   manager_agent_id: string;
   manager_name: string;
   manager_online: boolean;
@@ -351,6 +352,7 @@ export class OrchestrationTeamService {
       if (!spec) return null;
       const host = hostById.get(spec.manager_agent_id) ?? null;
       return {
+        label: spec.label || '',
         manager_agent_id: spec.manager_agent_id,
         manager_name: host?.name ?? '(unknown Runtime Host)',
         manager_online: !!host?.is_online,
@@ -367,7 +369,7 @@ export class OrchestrationTeamService {
       // legitimately exists on several hosts, so the host is part of the name.
       const orchSpec = parseTeamSlotSpec(t.orchestrator_spec);
       const orchName = orchSpec
-        ? slotDisplayName(hostById.get(orchSpec.manager_agent_id)?.name, '', orchSpec.cli)
+        ? slotDisplayName(hostById.get(orchSpec.manager_agent_id)?.name, orchSpec.label || '', orchSpec.cli)
         : '';
       const teamMembers = members.filter((m) => m.team_id === t.id);
 
@@ -391,7 +393,7 @@ export class OrchestrationTeamService {
           const mHost = mSpec ? hostById.get(mSpec.manager_agent_id) ?? null : null;
           return {
             id: m.id,
-            agent_name: mSpec ? slotDisplayName(mHost?.name, m.role_label, mSpec.cli) : (m.role_label || '(no runtime)'),
+            agent_name: mSpec ? slotDisplayName(mHost?.name, mSpec.label || m.role_label, mSpec.cli) : (m.role_label || '(no runtime)'),
             agent_type: mSpec?.cli ?? '',
             is_online: !!mHost?.is_online,
             role_label: m.role_label,

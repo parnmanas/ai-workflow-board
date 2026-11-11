@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MentionService } from '../dist/services/mention.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
@@ -52,7 +53,7 @@ function makeQueryBuilder() {
 
 const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 
-function makeSvc({ room, ticket, participantSpec, mentionRefs, participantRows, recentMessages, extraParticipants }) {
+function makeSvc({ room, ticket, participantSpec, mentionRefs, participantRows, recentMessages, extraParticipants, realMentions = false }) {
   const dataSource = {
     getRepository(entity) {
       if (entity === Ticket) return { async findOne() { return ticket; } };
@@ -131,7 +132,7 @@ function makeSvc({ room, ticket, participantSpec, mentionRefs, participantRows, 
   const connectivity = { isReachable: () => true };
   return new RoomMessagingService(
     roomRepo, participantRepo, messageRepo, ticketRepo, {}, {},
-    accountRepo, dataSource, noopLog, membership, mentionService, connectivity, undefined,
+    accountRepo, dataSource, noopLog, membership, realMentions ? new MentionService() : mentionService, connectivity, undefined,
     { listForAgent: () => [] },
   );
 }
@@ -187,6 +188,26 @@ test('ticket-less room @rt-mention emits chat_request from the participant snaps
 });
 
 // ─── Session-to-session: agent senders ─────────────────────────────────────
+test('a nickname mention targets the same runtime after a rename; team slots reach the orchestrator without direct dispatch', async () => {
+  const room = { ...groupRoom('room-nicknames'), orchestration_mission_id: null };
+  const svc = makeSvc({ room, participantSpec: { ...SPEC, label: 'New nickname' }, realMentions: true });
+  const request = captureOnce('chat_request');
+  try {
+    await svc.sendMessage(room.id, 'ws-1', 'user', 'user-1', 'Alice', `@[agent:${RT}|Old nickname] review`);
+    assert.equal(request.get()?.agent_id, RT);
+  } finally { request.off(); }
+
+  room.orchestration_mission_id = 'mission';
+  const direct = captureOnce('chat_request');
+  const broadcast = captureOnce('chat_room_message');
+  try {
+    await svc.sendMessage(room.id, 'ws-1', 'user', 'user-1', 'Alice', '@[slot:member-review|검토자] review');
+    assert.equal(direct.get(), null, 'a slot selection must not wake a member directly');
+    assert.ok(new Set(broadcast.get().agent_member_ids).has(RT), 'the orchestrator receives the mission room message');
+    assert.equal(broadcast.get().content, '@[slot:member-review|검토자] review');
+  } finally { direct.off(); broadcast.off(); }
+});
+
 // An agent's `@[agent:<rt-key>]` wakes the mentioned participant exactly like
 // a user's mention does — this is what lets two sessions talk to each other
 // (the Ralf→Rolf case: an agent-authored mention used to die silently).
