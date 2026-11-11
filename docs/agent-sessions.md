@@ -320,6 +320,14 @@ ACP 가 규정한 상호작용을 그대로 옮긴다 — AWB 가 CLI 별 모델
 재접속 시 작업 폴더 전달 여부와 관계없이 기존 저장소의 제목을 복원한다. 입력문으로 제목을 만드는 것은 새로 만든 무제목 세션의 첫 입력에만 적용하며, 기존 세션의 제목을 읽지 못한 경우에도 후속 입력으로 대체하지 않는다. CLI의 `session_info_update`는 `session/new`·`session/load` 응답 전과 라이브 턴 중 모두 반영하고, AWB 인덱스가 있는 세션은 갱신된 제목을 보존한다.
 
 client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boolean`, `plan` 을 광고하므로 어댑터가 이 기능을 켠다.
+
+질문 도구의 실행 행과 `tool_call_id`로 연결된 폼은 화면에서 카드 하나로 표시한다. 도구의 입력·결과는 그 카드의
+접힌 상세에 남기고, 같은 `elicitation_id`의 요청 재전송은 새 카드를 만들거나 이미 답한 질문을 다시 열지 않는다.
+Codex의 `request_user_input_async`는 네이티브 기록의 비동기 질문을 `elicitation_request{async:true}`로 옮긴다.
+이 질문은 CLI를 멈추지 않으므로 뒤에 진행 메시지와 도구 실행이 이어질 수 있다. 화면에도 작업이 계속될 수 있음을
+안내하고, 컴포저의 입력 대기 판정에서 제외한다. 답변 시 실행 중인 턴이 있으면 그 턴이 끝난 뒤 새 프롬프트로
+전달하고, 없으면 바로 전달한다. 일반 form elicitation은 응답 전까지 해당 요청을 열어 두는 기존 대기 방식을 유지한다.
+
 **모델 목록은 `HostModelsService` 한 경로로 해소한다.** 살아 있는 세션의 ACP 보고 → 가장 최근에
 영속된 `agent_session_cli_settings.known_config_options` → 하트비트 `available_models[cli]` 순서로
 처음 비지 않은 출처를 쓴다. ACP 보고가 있으면 하트비트 목록을 합치지 않고 표시 이름도 같은

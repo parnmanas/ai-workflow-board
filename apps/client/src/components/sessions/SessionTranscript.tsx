@@ -358,7 +358,7 @@ function ReasoningBlock({ text }: { text: string }) {
   );
 }
 
-function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }> }) {
+function ToolBlock({ block, summaryTitle }: { block: Extract<TranscriptBlock, { kind: 'tool' }>; summaryTitle?: string }) {
   useLocale();
   const chip = statusChip(block.status);
   const input = stringify(block.input);
@@ -368,7 +368,7 @@ function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }
       <summary style={{ ...summaryStyle, display: 'flex', alignItems: 'center', gap: 8, color: tokens.colors.textStrong }}>
         <span aria-hidden="true">{toolGlyph(block.toolKind, block.delegated)}</span>
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {block.delegated ? translate('Delegated: {0}', { 0: block.title }) : block.title}
+          {summaryTitle || (block.delegated ? translate('Delegated: {0}', { 0: block.title }) : block.title)}
         </span>
         {block.toolKind && (
           <span style={{ fontFamily: MONO, fontSize: 10.5, color: tokens.colors.textMuted }}>{block.toolKind}</span>
@@ -386,6 +386,7 @@ function ToolBlock({ block }: { block: Extract<TranscriptBlock, { kind: 'tool' }
           {block.status === 'in_progress' ? <span className="awb-pending-pulse">{chip.text}</span> : chip.text}
         </span>
       </summary>
+      {summaryTitle && <div style={{ marginTop: 6, fontSize: 12, color: tokens.colors.textSecondary }}>{block.title}</div>}
       {input && (
         <div>
           <CodeBlock code={input} displayCode={clip(input)} language="Input" maxHeight={320} />
@@ -634,8 +635,9 @@ function ElicitationField({ field, value, onChange, disabled }: {
 }
 
 /** 에이전트의 질문/폼(ACP elicitation). form 은 schema 대로 입력을 그리고 Submit/Decline, url 은 링크 카드. */
-function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
+function ElicitationBlock({ block, tool, deciding, enabled, onAnswer }: {
   block: Extract<TranscriptBlock, { kind: 'elicitation' }>;
+  tool?: Extract<TranscriptBlock, { kind: 'tool' }>;
   deciding: boolean;
   enabled: boolean;
   onAnswer?: (elicitationId: string, action: ElicitationAction, content: Record<string, unknown> | null) => void;
@@ -646,6 +648,11 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
   const decided = block.decision;
   const locked = deciding || !enabled || !onAnswer;
   const missing = fields.filter((f) => f.required && elicitationValueMissing(f, values[f.name]));
+  // Some adapters repeat field labels in the message. Keep additional context,
+  // but present the question itself once, beside its answer control.
+  const message = block.message.trim();
+  const repeatsFields = fields.some((f) => f.title.trim() === message)
+    || fields.filter((f) => f.required).map((f) => f.title.trim()).join('\n') === message;
   const decidedByLabel = decided?.decided_by === 'user' ? translate('by you') : decided?.decided_by === 'agent' ? translate('by the agent') : decided?.decided_by === 'timeout' ? translate('timed out') : decided?.decided_by === 'system' ? translate('agent process stopped') : decided?.decided_by;
   return (
     <div
@@ -660,9 +667,14 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: tokens.colors.textPrimary, fontWeight: 600 }}>
         <span aria-hidden="true">❓</span>
-        <span style={{ flex: 1, minWidth: 0 }}>{block.schema?.title || (block.mode === 'url' ? translate('Continue in your browser') : translate('The agent needs your input'))}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>{block.schema?.title || (block.mode === 'url' ? translate('Continue in your browser') : block.async ? translate('The agent has a question') : translate('The agent needs your input'))}</span>
       </div>
-      {block.message && (
+      {block.async && !decided && (
+        <div style={{ marginTop: 6, fontSize: 12, color: tokens.colors.textSecondary }}>
+          {translate('Work can continue while you answer. If the agent is busy, your answer will be delivered after its current response.')}
+        </div>
+      )}
+      {block.message && (!repeatsFields || decided) && (
         <div style={{ marginTop: 6, fontSize: 13, color: tokens.colors.textPrimary, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{block.message}</div>
       )}
       {block.schema?.description && (
@@ -728,6 +740,7 @@ function ElicitationBlock({ block, deciding, enabled, onAnswer }: {
           </div>
         </form>
       )}
+      {tool && <div style={{ marginTop: 8 }}><ToolBlock block={tool} summaryTitle={translate('Tool details')} /></div>}
     </div>
   );
 }
@@ -1585,6 +1598,25 @@ function VideoLink({
 
 export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage, loadLocalVideo, loadLocalVideoPreview }: SessionTranscriptProps) {
   useLocale();
+  // A question tool also emits an elicitation form. Show one card and retain
+  // the linked tool's input/result in its details, regardless of arrival order.
+  const questionTools = useMemo(() => {
+    const questionByTool = new Map<string, string>();
+    for (const block of blocks) {
+      if (block.kind === 'elicitation' && block.toolCallId) questionByTool.set(block.toolCallId, block.key);
+    }
+    const byQuestion = new Map<string, Extract<TranscriptBlock, { kind: 'tool' }>>();
+    const toolIds = new Set<string>();
+    for (const block of blocks) {
+      if (block.kind !== 'tool') continue;
+      const questionKey = questionByTool.get(block.toolCallId);
+      if (questionKey) {
+        byQuestion.set(questionKey, block);
+        toolIds.add(block.toolCallId);
+      }
+    }
+    return { byQuestion, toolIds };
+  }, [blocks]);
   // 전사 전체 이미지 갤러리 — 새 탭/다운로드 대신 팝업 + prev/next.
   // 각 이미지 블록이 URL 을 resolve 한 뒤 registerMedia 로 등록한다.
   const [galleryMap, setGalleryMap] = useState<Record<string, MediaLightboxItem>>({});
@@ -1628,6 +1660,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'reasoning':
             return <ReasoningBlock key={block.key} text={block.text} />;
           case 'tool':
+            if (questionTools.toolIds.has(block.toolCallId)) return null;
             return <ToolBlock key={block.key} block={block} />;
           case 'permission':
             return (
@@ -1644,6 +1677,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
               <ElicitationBlock
                 key={block.key}
                 block={block}
+                tool={questionTools.byQuestion.get(block.key)}
                 deciding={decidingRequestId === block.elicitationId}
                 enabled={permissionsEnabled}
                 onAnswer={onAnswerElicitation}

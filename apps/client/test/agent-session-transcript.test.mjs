@@ -229,6 +229,50 @@ test('groupSessionsByCwd 는 POSIX 경로의 대소문자는 다른 폴더로 �
 
 // ─── 질문/폼(elicitation) · plan · slash command ────────────────────────────────
 
+test('replayed questions keep one card and cannot reopen an answered request', () => {
+  seq = 0;
+  const question = { elicitation_id: 'q1', mode: 'form', message: 'Which environment?' };
+  const events = [
+    ev('elicitation_request', question),
+    ev('text', { text: 'Still ' }),
+    ev('elicitation_request', question),
+    ev('text', { text: 'working.' }),
+  ];
+  let blocks = buildTranscript(events);
+  assert.equal(blocks.filter((b) => b.kind === 'elicitation').length, 1);
+  assert.deepEqual(blocks.filter((b) => b.kind === 'assistant').map((b) => b.text), ['Still working.'], 'replay does not split the ongoing response');
+  events.push(ev('elicitation_decision', { elicitation_id: 'q1', action: 'accept', content: { env: 'dev' } }));
+  events.push(ev('elicitation_request', question));
+  blocks = buildTranscript(events);
+  const cards = blocks.filter((b) => b.kind === 'elicitation');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].key, events[0].id, 'form identity and position stay stable');
+  assert.deepEqual(cards[0].decision.content, { env: 'dev' });
+  assert.equal(pendingInteraction(blocks), null);
+
+  blocks = buildTranscript([...events, ev('elicitation_request', { ...question, elicitation_id: 'q2' })]);
+  assert.equal(blocks.filter((b) => b.kind === 'elicitation').length, 2, 'different requests with the same wording remain separate');
+  assert.equal(pendingInteraction(blocks)?.elicitationId, 'q2');
+});
+
+test('async questions stay answerable without hiding an earlier blocking question or permission', () => {
+  seq = 0;
+  const asyncQuestion = ev('elicitation_request', { elicitation_id: 'async', mode: 'form', async: true, message: 'Preference?' });
+  const asyncBlocks = buildTranscript([asyncQuestion]);
+  assert.equal(asyncBlocks[0].async, true);
+  assert.equal(asyncBlocks[0].decision, null);
+  assert.equal(pendingInteraction(asyncBlocks), null, 'an async question does not tell the composer that work is blocked');
+  for (const [type, payload, idKey] of [
+    ['elicitation_request', { elicitation_id: 'blocking', mode: 'form' }, 'elicitationId'],
+    ['permission_request', { request_id: 'blocking' }, 'requestId'],
+  ]) {
+    const events = [ev(type, payload), asyncQuestion,
+      ev('elicitation_request', { elicitation_id: 'answered', mode: 'form' }),
+      ev('elicitation_decision', { elicitation_id: 'answered', action: 'decline' })];
+    assert.equal(pendingInteraction(buildTranscript(events))?.[idKey], 'blocking', 'later async or answered cards cannot hide an unanswered blocking request');
+  }
+});
+
 test('buildTranscript folds an elicitation decision into its question card, and pendingInteraction sees form questions but not url ones', () => {
   seq = 0;
   const schema = { type: 'object', title: 'Deployment target', properties: { env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] }, notes: { type: 'string', title: 'Notes' } }, required: ['env'] };

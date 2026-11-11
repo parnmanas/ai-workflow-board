@@ -341,6 +341,77 @@ test('transcript: an elicitation form renders from its schema, gates Submit on r
   }
 });
 
+for (const toolFirst of [true, false]) {
+  test(`transcript: a question and its tool share one card (tool first: ${toolFirst})`, () => {
+    const dom = setupDom();
+    const event = (id, type, payload) => ({ id, seq: 1, turn_id: 't1', type, payload, created_at: '2026-11-11T00:00:00.000Z' });
+    const question = event('question', 'elicitation_request', {
+      elicitation_id: 'ask-1', mode: 'form', tool_call_id: 'tool-1', message: 'Which environment?',
+      schema: { type: 'object', properties: { env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] } }, required: ['env'] },
+    });
+    const tool = event('tool', 'tool_call', { tool_call_id: 'tool-1', title: 'Which environment?', input: { questions: ['Which environment?'] } });
+    const events = toolFirst ? [tool, question] : [question, tool];
+    // Re-delivery has a different transport id but the same request id.
+    events.push({ ...question, id: 'question-replay' });
+    const answers = [];
+    const props = { decidingRequestId: null, permissionsEnabled: true, onAnswerElicitation: (...args) => answers.push(args) };
+    const view = mount(h(SessionTranscript, { ...props, blocks: buildTranscript(events) }));
+    try {
+      const cards = view.container.querySelectorAll('[data-block="elicitation"]');
+      assert.equal(cards.length, 1, 'only one answer form');
+      const card = cards[0];
+      const details = card.querySelector('[data-block="tool"]');
+      assert.ok(details, 'tool input and results remain accessible inside the question');
+      assert.equal(details.open, false);
+      assert.match(details.querySelector('summary').textContent, uiPattern('Tool details'));
+      assert.equal(view.container.querySelectorAll('[data-block="tool"]').length, 1, 'no second top-level tool card');
+      change(card.querySelector('select'), 'prod');
+      // Streaming updates and another replay must not discard the selected answer.
+      events.push(event('update', 'tool_update', { tool_call_id: 'tool-1', status: 'completed', output: 'answer delivered' }));
+      events.push({ ...question, id: 'question-replay-again' });
+      view.rerender(h(SessionTranscript, { ...props, blocks: buildTranscript(events) }));
+      assert.equal(card.querySelector('select').value, 'prod');
+      assert.match(details.textContent, /answer delivered/);
+      click(card.querySelector('button[type="submit"]'));
+      assert.deepEqual(answers, [['ask-1', 'accept', { env: 'prod' }]]);
+      events.push(event('decision', 'elicitation_decision', { elicitation_id: 'ask-1', action: 'accept', content: { env: 'prod' } }));
+      events.push({ ...question, id: 'late-replay' });
+      view.rerender(h(SessionTranscript, { ...props, blocks: buildTranscript(events) }));
+      assert.equal(view.container.querySelectorAll('form').length, 0, 'replay does not ask again after submission');
+      assert.match(card.textContent, /Environment: prod/);
+
+      view.rerender(h(SessionTranscript, { ...props, blocks: buildTranscript([tool]) }));
+      assert.ok(view.container.querySelector('[data-block="tool"]'), 'history without the live question still shows the tool');
+    } finally { view.unmount(); dom.cleanup(); }
+  });
+}
+
+test('transcript: async questions explain continued work and do not repeat their field labels as a separate prompt', () => {
+  const dom = setupDom();
+  const question = {
+    id: 'async-question', seq: 1, turn_id: 't1', type: 'elicitation_request', created_at: '2026-11-11T00:00:00.000Z',
+    payload: {
+      elicitation_id: 'async-1', mode: 'form', async: true, message: 'Which environment?',
+      schema: { type: 'object', properties: { env: { type: 'string', title: 'Which environment?', enum: ['dev', 'prod'] } }, required: ['env'] },
+    },
+  };
+  const props = { decidingRequestId: null, permissionsEnabled: true, onAnswerElicitation() {} };
+  const view = mount(h(SessionTranscript, { ...props, blocks: buildTranscript([question]) }));
+  try {
+    const card = view.container.querySelector('[data-block="elicitation"]');
+    assert.match(card.textContent, uiPattern('The agent has a question'));
+    assert.match(card.textContent, uiPattern('Work can continue while you answer. If the agent is busy, your answer will be delivered after its current response.'));
+    assert.equal([...card.children].some((el) => el.textContent === 'Which environment?'), false, 'question is already the field label');
+    assert.ok(card.querySelector('select[aria-label="Which environment?"]'), 'async question remains answerable');
+    view.rerender(h(SessionTranscript, { ...props, blocks: buildTranscript([
+      { ...question, payload: { ...question.payload, async: false, message: 'Choose the deployment target before I proceed.' } },
+    ]) }));
+    assert.match(card.textContent, /Choose the deployment target before I proceed\./, 'distinct context is preserved');
+    assert.match(card.textContent, uiPattern('The agent needs your input'));
+    assert.doesNotMatch(card.textContent, uiPattern('The agent has a question'));
+  } finally { view.unmount(); dom.cleanup(); }
+});
+
 test('transcript: Decline sends a decline without content, and a dead session locks the form', () => {
   const dom = setupDom();
   try {

@@ -201,6 +201,7 @@ export type TranscriptBlock =
       turnId: string;
       elicitationId: string;
       mode: 'form' | 'url' | string;
+      async: boolean;
       message: string;
       schema: ElicitationSchemaView | null;
       url: string;
@@ -409,6 +410,9 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
     const p = ev.payload || {};
     const turnId = ev.turn_id || '';
     const last = blocks[blocks.length - 1];
+    // A replay can have a new event id but still represent the same question.
+    // Keep its original position and decision, including after it was answered.
+    if (ev.type === 'elicitation_request' && p.elicitation_id && elicitationIndex.has(str(p.elicitation_id))) continue;
     // Preserve actual response boundaries, even when 'end_turn' has no visible
     // block. Events belonging to another turn cannot end this turn's segment.
     if (['user_prompt', 'tool_call', 'permission_request', 'elicitation_request', 'image', 'error', 'turn'].includes(ev.type)) {
@@ -547,6 +551,7 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           turnId,
           elicitationId,
           mode: str(p.mode) === 'url' ? 'url' : 'form',
+          async: p.async === true,
           message: str(p.message),
           schema: normalizeElicitationSchema(p.schema),
           url: str(p.url),
@@ -756,12 +761,12 @@ export type PendingInteraction =
   | Extract<TranscriptBlock, { kind: 'permission' }>
   | Extract<TranscriptBlock, { kind: 'elicitation' }>;
 
-/** 사용자의 답을 기다리는 가장 최근 카드 — permission 이든 질문/폼(form elicitation)이든. url 은 기다리지 않는다. */
+/** 실행을 멈추고 답을 기다리는 가장 최근 카드. 비동기 질문과 URL 요청은 작업을 막지 않는다. */
 export function pendingInteraction(blocks: TranscriptBlock[]): PendingInteraction | null {
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const b = blocks[i];
-    if (b.kind === 'permission') return b.decision ? null : b;
-    if (b.kind === 'elicitation' && b.mode === 'form') return b.decision ? null : b;
+    if (b.kind === 'permission' && !b.decision) return b;
+    if (b.kind === 'elicitation' && b.mode === 'form' && !b.async && !b.decision) return b;
   }
   return null;
 }
