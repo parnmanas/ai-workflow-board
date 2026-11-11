@@ -12,6 +12,8 @@ const record = (id = 'call-question') => ({ type: 'event_msg', payload: { type: 
 test('native async messages become selectable questions, ordinary messages stay ordinary', () => {
   const question = codexAsyncQuestion(record());
   assert.equal(question.id, 'call-question');
+  assert.equal(question.toolCallId, 'call-question');
+  assert.ok(!question.schema.properties.q_1_note.title.includes(question.message), 'the optional note must not repeat the question');
   assert.deepEqual(question.schema.properties.q_1.oneOf.map((v) => v.const), ['짧은 요약', '자세한 설명', '__other__']);
   assert.deepEqual(question.schema.required, ['q_1']);
   assert.equal(codexAsyncQuestion({ ...record(), type: 'response_item' }), null);

@@ -7181,5 +7181,7 @@
   "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "Use @ to mention this agent by nickname. Leave blank to restore its default name.",
   "Edit nickname for {0}": "Edit nickname for {0}",
   "@team-member mentions are sent to the orchestrator for assignment.": "@team-member mentions are sent to the orchestrator for assignment.",
-  "Team member": "Team member"
+  "Team member": "Team member",
+  "Additional answer (optional)": "Additional answer (optional)",
+  "Complete the required fields.": "Complete the required fields."
 }

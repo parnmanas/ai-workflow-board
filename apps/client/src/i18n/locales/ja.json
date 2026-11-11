@@ -7181,5 +7181,7 @@
   "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "@を入力するとニックネームでこのエージェントをメンションできます。空欄にすると既定の名前に戻ります。",
   "Edit nickname for {0}": "{0}のニックネームを編集",
   "@team-member mentions are sent to the orchestrator for assignment.": "@チームメンバーのメンションは、そのメンバーへの割り当て依頼としてオーケストレーターに送られます。",
-  "Team member": "チームメンバー"
+  "Team member": "チームメンバー",
+  "Additional answer (optional)": "追加回答（任意）",
+  "Complete the required fields.": "必須項目を入力してください。"
 }

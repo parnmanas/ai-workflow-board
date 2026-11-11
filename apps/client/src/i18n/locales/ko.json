@@ -7181,5 +7181,7 @@
   "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "@를 입력해 이 에이전트를 별칭으로 멘션할 수 있습니다. 비우면 기본 이름으로 돌아갑니다.",
   "Edit nickname for {0}": "{0}의 별칭 수정",
   "@team-member mentions are sent to the orchestrator for assignment.": "@팀원 멘션은 해당 팀원을 지정하는 요청으로 오케스트레이터에게 전달됩니다.",
-  "Team member": "팀원"
+  "Team member": "팀원",
+  "Additional answer (optional)": "추가 답변 (선택)",
+  "Complete the required fields.": "필수 항목을 입력해 주세요."
 }

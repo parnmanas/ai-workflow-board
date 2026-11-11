@@ -12,6 +12,7 @@ import SessionComposer from '../src/components/sessions/SessionComposer.tsx';
 import { MentionTextarea } from '../src/components/common/MentionTextarea.tsx';
 import SessionTranscript from '../src/components/sessions/SessionTranscript.tsx';
 import { buildTranscript } from '../src/components/sessions/sessionTranscript.logic.ts';
+import { codexAsyncQuestion } from '../../agent-manager/src/lib/clis/codex/async-questions.ts';
 
 const h = React.createElement;
 
@@ -316,7 +317,7 @@ test('transcript: an elicitation form renders from its schema, gates Submit on r
     const submit = [...card.querySelectorAll('button')].find((b) => b.textContent === 'Submit');
     assert.ok(submit);
     assert.equal(submit.disabled, true, 'required field empty → Submit disabled');
-    assert.match(card.textContent, /Fill in Environment/);
+    assert.match(card.textContent, uiPattern('Complete the required fields.'));
 
     change(card.querySelector('select[aria-label="Environment"]'), 'prod');
     assert.equal(submit.disabled, false, 'required field filled → Submit enabled');
@@ -411,6 +412,48 @@ test('transcript: async questions explain continued work and do not repeat their
     assert.doesNotMatch(card.textContent, uiPattern('The agent has a question'));
   } finally { view.unmount(); dom.cleanup(); }
 });
+
+for (const legacy of [false, true]) {
+  test(`native async question has one visible prompt before and after answering (older manager: ${legacy})`, () => {
+    const dom = setupDom();
+    const title = '어느 팀원에게 전달할까요?';
+    const echo = `${title}\n- 구현자\n- 검토자`;
+    const question = codexAsyncQuestion({ type: 'event_msg', payload: { type: 'item_completed', item: {
+      type: 'AgentMessage', id: 'call_native_question', delivery: 'async',
+      content: [{ type: 'Text', text: echo }], questions: [{ title, options: ['구현자', '검토자'] }],
+    } } });
+    if (legacy) question.schema.properties.q_1_note.title = `${title} — additional answer / 직접 입력`;
+    const event = (id, type, payload) => ({ id, type, payload, turn_id: 'turn', seq: 1, created_at: '2026-11-11T00:00:00Z' });
+    const events = [
+      event('tool', 'tool_call', { tool_call_id: question.toolCallId, title: 'request_user_input_async', input: { questions: [{ title }] } }),
+      ...(!legacy ? [event('mirror', 'text', { text: echo })] : []),
+      event('question', 'elicitation_request', { elicitation_id: question.id, mode: 'form', async: true,
+        message: question.message, schema: question.schema, ...(!legacy ? { tool_call_id: question.toolCallId, echo_text: question.echoText } : {}) }),
+    ];
+    const answers = [];
+    const props = { permissionsEnabled: true, decidingRequestId: null, onAnswerElicitation: (...args) => answers.push(args) };
+    const view = mount(h(SessionTranscript, { ...props, blocks: buildTranscript(events) }));
+    const visibleText = () => {
+      const copy = view.container.cloneNode(true);
+      copy.querySelectorAll('details').forEach(el => el.remove());
+      return copy.textContent;
+    };
+    try {
+      assert.equal(view.container.querySelectorAll('[data-block="elicitation"]').length, 1);
+      assert.equal(visibleText().split(title).length - 1, 1, 'question, note label, validation hint and text mirror must not repeat the question');
+      assert.equal(view.container.querySelectorAll('[data-block="assistant"]').length, 0);
+      const card = view.container.querySelector('[data-block="elicitation"]');
+      assert.ok(card.querySelector('[data-block="tool"]'), 'native tool details are inside the question');
+      change(card.querySelector('select'), '__other__');
+      typeInto(card.querySelector('textarea'), '오케스트레이터');
+      act(() => card.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
+      assert.deepEqual(answers, [[question.id, 'accept', { q_1: '__other__', q_1_note: '오케스트레이터' }]]);
+      events.push(event('answer', 'elicitation_decision', { elicitation_id: question.id, action: 'accept', decided_by: 'user', content: { q_1: '검토자' } }));
+      view.rerender(h(SessionTranscript, { ...props, blocks: buildTranscript(events) }));
+      assert.equal(visibleText().split(title).length - 1, 1, 'an answered question also displays its wording once');
+    } finally { view.unmount(); dom.cleanup(); }
+  });
+}
 
 test('transcript: Decline sends a decline without content, and a dead session locks the form', () => {
   const dom = setupDom();

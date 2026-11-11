@@ -680,7 +680,11 @@ test('interactive contract: config options + commands in the snapshot, set_confi
   const service = app.get(AsyncSessionsService);
   await relay({ events: [{ id: 'async-question', seq: 12, turn_id: 'async-turn', type: 'elicitation_request', payload: {
     elicitation_id: 'async-1', mode: 'form', async: true, message: 'Summary?', schema: { type: 'object', properties: { q_1: { type: 'string' } }, required: ['q_1'] },
+    tool_call_id: 'call_async-1', echo_text: 'Summary?\n- brief\n- detailed',
   } }], state: { status: 'busy', reason: 'async_question' } });
+  const mirrored = await stream.waitFor('agent_session_event', d => d?.session_id === sid && d.event?.id === 'async-question', 4000);
+  assert.equal(mirrored.data.event.payload.tool_call_id, 'call_async-1');
+  assert.equal(mirrored.data.event.payload.echo_text, 'Summary?\n- brief\n- detailed');
   await relay({ events: [{ id: 'async-finished', seq: 13, turn_id: 'async-turn', type: 'turn', payload: { phase: 'finished', stop_reason: 'end_turn' } }], state: { status: 'ready', reason: 'turn_finished' } });
   assert.equal(service.pendingInteractions(managerId, 'codex', sid).find((r) => r.id === 'async-1').async, true, 'a nonblocking question survives the originating turn');
   const asyncAnswered = await call(`${sessionsUrl}/${sid}/elicitation`, { method: 'POST', headers: ownerHeaders, body: JSON.stringify({ elicitation_id: 'async-1', action: 'accept', content: { q_1: 'brief' } }) });

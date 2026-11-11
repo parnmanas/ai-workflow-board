@@ -643,7 +643,14 @@ function ElicitationBlock({ block, tool, deciding, enabled, onAnswer }: {
   onAnswer?: (elicitationId: string, action: ElicitationAction, content: Record<string, unknown> | null) => void;
 }) {
   useLocale();
-  const fields = block.schema?.fields ?? [];
+  const schemaFields = block.schema?.fields ?? [];
+  const fields = schemaFields.map(field => {
+    // Codex's generated note field used to repeat the entire question. Also
+    // normalize older live/replayed schemas so they improve without a restart.
+    const parent = block.async && /^q_\d+_note$/.test(field.name)
+      ? schemaFields.find(f => f.name === field.name.slice(0, -5) && f.choices?.some(c => c.value === '__other__')) : null;
+    return parent ? { ...field, title: translate('Additional answer (optional)') } : field;
+  });
   const [values, setValues] = useState<Record<string, unknown>>(() => initialElicitationValues(fields));
   const decided = block.decision;
   const locked = deciding || !enabled || !onAnswer;
@@ -674,7 +681,7 @@ function ElicitationBlock({ block, tool, deciding, enabled, onAnswer }: {
           {translate('Work can continue while you answer. If the agent is busy, your answer will be delivered after its current response.')}
         </div>
       )}
-      {block.message && (!repeatsFields || decided) && (
+      {block.message && !repeatsFields && (
         <div style={{ marginTop: 6, fontSize: 13, color: tokens.colors.textPrimary, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{block.message}</div>
       )}
       {block.schema?.description && (
@@ -735,7 +742,7 @@ function ElicitationBlock({ block, tool, deciding, enabled, onAnswer }: {
               style={{ padding: '6px 12px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.borderStrong}`, background: 'transparent', color: tokens.colors.textMuted, fontSize: 12.5, cursor: locked ? 'not-allowed' : 'pointer', opacity: locked ? 0.6 : 1 }}
             >
               {translate('Cancel')}</button>
-            {missing.length > 0 && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Fill in')} {missing.map((f) => f.title).join(', ')}</span>}
+            {missing.length > 0 && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Complete the required fields.')}</span>}
             {!enabled && <span style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>{translate('Session is not live — send a prompt to reopen it.')}</span>}
           </div>
         </form>

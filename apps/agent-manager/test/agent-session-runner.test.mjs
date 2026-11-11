@@ -1025,6 +1025,24 @@ test('closing a session while a question is pending cancels it with a system dec
   assert.equal(runner._snapshot().length, 0);
 });
 
+test('repeated ACP question requests share one form and the same answer, including a retry after answering', async (t) => {
+  const { cwd, server, runner } = await harness(t, { permissionTimeoutMs: 60_000 });
+  await runner.handle(request('open', { request_id: 'duplicate-open', session_id: null, cwd }));
+  const sid = server.rpc('duplicate-open').result.session_id;
+  for (const turnId of ['first', 'second']) {
+    const turn = runner.handle(request('prompt', { session_id: sid, turn_id: turnId, text: 'ELICIT_DUPLICATE' }));
+    await waitFor(() => server.events(sid).some(e => e.turn_id === turnId && e.type === 'elicitation_request'), 'question');
+    const asked = server.events(sid).find(e => e.turn_id === turnId && e.type === 'elicitation_request');
+    await runner.handle(request('elicitation', { session_id: sid, elicitation_id: asked.payload.elicitation_id, elicitation_action: 'accept', elicitation_content: { env: 'dev' } }));
+    await turn;
+    const events = server.events(sid).filter(e => e.turn_id === turnId);
+    assert.equal(events.filter(e => e.type === 'elicitation_request').length, 1);
+    assert.equal(events.filter(e => e.type === 'elicitation_decision').length, 1);
+    const replies = JSON.parse(events.filter(e => e.type === 'text').map(e => e.payload.text).join(''));
+    assert.deepEqual(replies, Array.from({ length: 3 }, () => ({ action: 'accept', content: { env: 'dev' } })));
+  }
+});
+
 test('native async questions are reported while work continues, replay after turn end, and deliver one answer prompt', async (t) => {
   // Exercise replay/answering without racing the async question's expiry against
   // the fixture's ordinary permission timeout (especially on Windows CI).
@@ -1039,13 +1057,15 @@ test('native async questions are reported while work continues, replay after tur
   await runner.handle(request('open', { request_id: 'async-open', session_id: null, cwd }));
   const sid = server.rpc('async-open').result.session_id;
   await appendFile(path, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', item: {
-    type: 'AgentMessage', id: 'native-q', delivery: 'async', questions: [{ title: '요약 방식?', options: ['짧게', '자세히'] }],
+    type: 'AgentMessage', id: 'native-q', delivery: 'async', content: [{ type: 'Text', text: '요약 방식?\n- 짧게\n- 자세히' }], questions: [{ title: '요약 방식?', options: ['짧게', '자세히'] }],
   } } }) + '\n');
   const originalTurn = runner.handle(request('prompt', { session_id: sid, turn_id: 'original-turn', text: 'continue working' }));
   await waitFor(() => server.events(sid).some((e) => e.type === 'permission_request')
     && server.events(sid).some((e) => e.type === 'elicitation_request' && e.payload.async), 'permission and native question while working');
   const asked = server.events(sid).find((e) => e.type === 'elicitation_request');
   assert.equal(asked.payload.async, true);
+  assert.equal(asked.payload.tool_call_id, 'native-q');
+  assert.equal(asked.payload.echo_text, '요약 방식?\n- 짧게\n- 자세히');
   assert.equal(asked.state.reason, 'async_question');
   const originalPermission = server.events(sid).find((e) => e.type === 'permission_request');
   await runner.handle(request('permission', { session_id: sid, permission_request_id: originalPermission.payload.request_id, option_id: 'allow-once' }));

@@ -21,11 +21,17 @@ export function codexAsyncQuestion(record: any): CliAsyncQuestion | null {
       type: 'string', title,
       oneOf: [...options.map((value) => ({ const: value, title: value })), { const: '__other__', title: 'Other / 직접 입력' }],
     } : { type: 'string', title };
-    if (options.length) properties[`${name}_note`] = { type: 'string', title: `${title} — additional answer / 직접 입력` };
+    if (options.length) properties[`${name}_note`] = { type: 'string', title: 'Additional answer / 직접 입력' };
     titles.push(title);
     required.push(name);
   }
-  return required.length ? { id: item.id.slice(0, 180), message: titles.join('\n'), schema: { type: 'object', properties, required } } : null;
+  const echoText = Array.isArray(item.content)
+    ? item.content.filter((part: any) => part?.type === 'Text' && typeof part.text === 'string').map((part: any) => part.text).join('\n')
+    : '';
+  return required.length ? {
+    id: item.id.slice(0, 180), toolCallId: item.id.slice(0, 180), echoText: echoText.length <= 16_000 ? echoText : '',
+    message: titles.join('\n'), schema: { type: 'object', properties, required },
+  } : null;
 }
 
 /** Incremental reads keep a large rollout cheap and never replay questions from an older turn. */

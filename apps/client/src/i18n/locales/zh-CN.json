@@ -7181,5 +7181,7 @@
   "Use @ to mention this agent by nickname. Leave blank to restore its default name.": "输入 @ 可通过昵称提及此智能体。留空可恢复默认名称。",
   "Edit nickname for {0}": "编辑 {0} 的昵称",
   "@team-member mentions are sent to the orchestrator for assignment.": "@团队成员的提及会作为指派该成员的请求发送给协调者。",
-  "Team member": "团队成员"
+  "Team member": "团队成员",
+  "Additional answer (optional)": "补充回答（可选）",
+  "Complete the required fields.": "请填写必填项。"
 }

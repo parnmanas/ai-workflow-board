@@ -250,6 +250,8 @@ interface LiveSession {
   loading: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   pendingElicitations: Map<string, PendingElicitation>;
+  /** A retried ACP request shares the original answer instead of opening another form. */
+  elicitationResults: Map<string, Promise<AcpElicitationOutcome>>;
   asyncQuestions: Map<string, { question: CliAsyncQuestion; event: StampedEvent; timer: NodeJS.Timeout }>;
   asyncQuestionWatcher: CliAsyncQuestionWatcher | null;
   usageLimitsWatcher: CliSessionWatcher | null;
@@ -1039,6 +1041,7 @@ export class AgentSessionRunner {
         loading: false,
         pendingPermissions: new Map(),
         pendingElicitations: new Map(),
+        elicitationResults: new Map(),
         asyncQuestions: new Map(),
         asyncQuestionWatcher: null,
         usageLimitsWatcher: null,
@@ -2214,6 +2217,14 @@ export class AgentSessionRunner {
     const turnId = live.turn?.turnId;
     this.#flushBuffers(live, turnId);
     const mode = request.mode === 'url' ? 'url' : 'form';
+    const nativeId = request.elicitationId ?? request.requestId ?? request.toolCallId;
+    const requestKey = nativeId == null || nativeId === '' ? '' : createHash('sha256').update(JSON.stringify([
+      turnId, nativeId, mode, request.toolCallId, request.message, request.requestedSchema, request.url,
+    ])).digest('hex');
+    if (requestKey) {
+      const existing = live.elicitationResults.get(requestKey);
+      if (existing) return existing;
+    }
     const elicitationId = (mode === 'url' && typeof request.elicitationId === 'string' && request.elicitationId) ? request.elicitationId : randomUUID();
     const payload: Record<string, unknown> = {
       elicitation_id: elicitationId,
@@ -2228,7 +2239,7 @@ export class AgentSessionRunner {
       return { action: 'accept' };
     }
     const [requestEvent] = this.#enqueue(live, [{ type: 'elicitation_request', payload, turn_id: turnId }], { status: 'awaiting_input', reason: 'elicitation' });
-    return new Promise<AcpElicitationOutcome>((resolve) => {
+    const result = new Promise<AcpElicitationOutcome>((resolve) => {
       const timer = setTimeout(() => {
         live.pendingElicitations.delete(elicitationId);
         this.#enqueue(live, [{
@@ -2241,6 +2252,11 @@ export class AgentSessionRunner {
       timer.unref?.();
       live.pendingElicitations.set(elicitationId, { resolve, timer, event: requestEvent });
     });
+    if (requestKey) {
+      if (live.elicitationResults.size >= 256) live.elicitationResults.delete(live.elicitationResults.keys().next().value!);
+      live.elicitationResults.set(requestKey, result);
+    }
+    return result;
   }
 
   #resolveElicitation(cli: string, sessionId: string, elicitationId: string, action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null): void {
@@ -2281,7 +2297,11 @@ export class AgentSessionRunner {
     this.#flushBuffers(live, live.turn?.turnId);
     const [event] = this.#enqueue(live, [{
       type: 'elicitation_request',
-      payload: { elicitation_id: question.id, mode: 'form', message: question.message, schema: question.schema, async: true },
+      payload: {
+        elicitation_id: question.id, mode: 'form', message: question.message, schema: question.schema, async: true,
+        ...(question.toolCallId ? { tool_call_id: question.toolCallId } : {}),
+        ...(question.echoText ? { echo_text: question.echoText } : {}),
+      },
       turn_id: live.turn?.turnId,
     }], { status: this.#statusOf(live), reason: 'async_question' });
     const timer = setTimeout(() => {

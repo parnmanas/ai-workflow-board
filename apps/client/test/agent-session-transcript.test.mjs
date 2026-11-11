@@ -273,6 +273,20 @@ test('async questions stay answerable without hiding an earlier blocking questio
   }
 });
 
+test('only the identified native question mirror is removed; surrounding work and other turns remain', () => {
+  const echo = 'Which team member?\n- Builder\n- Reviewer';
+  const event = (id, type, payload, turn_id = 'turn') => ({ id, type, payload, turn_id, seq: 1, created_at: '' });
+  for (const questionFirst of [false, true]) {
+    const question = event('question', 'elicitation_request', { elicitation_id: 'call_q', async: true, echo_text: echo, message: 'Which team member?' });
+    const text = event('text', 'text', { text: `Work before.\n${echo}\nWork after.` });
+    const blocks = buildTranscript([
+      ...(questionFirst ? [question, text] : [text, question]),
+      event('quoted', 'text', { text: echo }, 'other-turn'),
+    ]);
+    assert.deepEqual(blocks.filter(b => b.kind === 'assistant').map(b => b.text), ['Work before.\n\nWork after.', echo]);
+  }
+});
+
 test('buildTranscript folds an elicitation decision into its question card, and pendingInteraction sees form questions but not url ones', () => {
   seq = 0;
   const schema = { type: 'object', title: 'Deployment target', properties: { env: { type: 'string', title: 'Environment', enum: ['dev', 'prod'] }, notes: { type: 'string', title: 'Notes' } }, required: ['env'] };

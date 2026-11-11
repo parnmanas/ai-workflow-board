@@ -203,6 +203,7 @@ export type TranscriptBlock =
       mode: 'form' | 'url' | string;
       async: boolean;
       message: string;
+      echoText?: string;
       schema: ElicitationSchemaView | null;
       url: string;
       toolCallId: string;
@@ -553,9 +554,11 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
           mode: str(p.mode) === 'url' ? 'url' : 'form',
           async: p.async === true,
           message: str(p.message),
+          echoText: str(p.echo_text),
           schema: normalizeElicitationSchema(p.schema),
           url: str(p.url),
-          toolCallId: str(p.tool_call_id),
+          // Older Codex managers omitted the link although their async id is the native call id.
+          toolCallId: str(p.tool_call_id) || (p.async === true && elicitationId.startsWith('call_') ? elicitationId : ''),
           decision: null,
         });
         if (elicitationId) elicitationIndex.set(elicitationId, blocks.length - 1);
@@ -673,6 +676,25 @@ export function buildTranscript(events: AgentSessionEventRecord[]): TranscriptBl
   // operator 의 잠들기 표시는 화면이 읽는 신호다 — 보여 주지 않는다(docs/voice-operator.md "잠들기").
   for (const b of blocks) if (b.kind === 'assistant') b.text = splitSleepMarker(b.text).text;
   // 이미지 출처를 단다 — usage 를 붙이기 전에 해야 턴 끝 위치가 어긋나지 않는다.
+  // Some adapters also stream the native question as plain text. The manager
+  // supplies that exact mirror; never guess from similar wording or other turns.
+  for (const question of blocks) {
+    if (question.kind !== 'elicitation' || !question.async || !question.echoText?.trim()) continue;
+    const echo = question.echoText.trim();
+    for (const block of blocks) {
+      if (block.kind !== 'assistant' || block.turnId !== question.turnId) continue;
+      const at = block.text.indexOf(echo);
+      if (at < 0) continue;
+      const before = block.text.slice(0, at);
+      const after = block.text.slice(at + echo.length);
+      if ((!before.trim() || before.endsWith('\n')) && (!after.trim() || after.startsWith('\n'))) {
+        block.text = [before.trimEnd(), after.trimStart()].filter(Boolean).join('\n\n');
+      }
+    }
+  }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i].kind === 'assistant' && !(blocks[i] as Extract<TranscriptBlock, { kind: 'assistant' }>).text.trim()) blocks.splice(i, 1);
+  }
   tagImageSenders(blocks, explicitImageKeys);
   if (usageByTurn.size === 0) return blocks;
   // usage 를 각 턴의 **마지막 블록 뒤에** 한 번만 놓는다. 흐름 중간에 끼우지 않으므로

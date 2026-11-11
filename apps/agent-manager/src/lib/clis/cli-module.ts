@@ -213,6 +213,9 @@ export interface CliSessionStoreContext {
 
 export interface CliAsyncQuestion {
   id: string;
+  toolCallId?: string;
+  /** Native plain-text presentation of the same question, if the adapter also streams it. */
+  echoText?: string;
   message: string;
   schema: Record<string, unknown>;
 }

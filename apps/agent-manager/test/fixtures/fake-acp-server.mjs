@@ -37,6 +37,9 @@ if (process.env.FAKE_ACP_CODEX_CONFIG === '1') {
   });
 }
 let pendingElicitPrompt = null;
+let duplicateElicitPrompt = null;
+let duplicateElicitParams = null;
+let duplicateElicitReplies = [];
 /** `HOLD_TURN_TEST` 프롬프트 — steering 이나 cancel 이 올 때까지 열어 두는 턴. */
 let heldPrompt = null;
 // initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
@@ -149,6 +152,18 @@ rl.on('line', (line) => {
   const message = JSON.parse(line);
 
   if (!Object.hasOwn(message, 'method')) {
+    if (String(message.id).startsWith('duplicate-elicit-') && duplicateElicitPrompt) {
+      duplicateElicitReplies.push(message.result);
+      if (duplicateElicitReplies.length === 2) {
+        send({ jsonrpc: '2.0', id: 'duplicate-elicit-3', method: 'elicitation/create', params: duplicateElicitParams });
+      } else if (duplicateElicitReplies.length === 3) {
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: duplicateElicitParams.sessionId,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(duplicateElicitReplies) } } } });
+        result(duplicateElicitPrompt, { stopReason: 'end_turn' });
+        duplicateElicitPrompt = null;
+      }
+      return;
+    }
     if (message.id === 'elicit-1' && pendingElicitPrompt) {
       // 질문(폼)에 대한 답 — accept 면 답 내용을 echo 하고 턴을 끝낸다
       const action = message.result?.action;
@@ -417,6 +432,16 @@ rl.on('line', (line) => {
           params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'still here' } } },
         });
         result(message.id, { stopReason: 'end_turn' });
+        break;
+      }
+      if (JSON.stringify(message.params.prompt).includes('ELICIT_DUPLICATE')) {
+        duplicateElicitPrompt = message.id;
+        duplicateElicitReplies = [];
+        duplicateElicitParams = { sessionId: message.params.sessionId, mode: 'form', toolCallId: 'question-tool',
+          message: 'Which environment?', requestedSchema: { type: 'object', properties: { env: { type: 'string' } }, required: ['env'] } };
+        for (const id of ['duplicate-elicit-1', 'duplicate-elicit-2']) {
+          send({ jsonrpc: '2.0', id, method: 'elicitation/create', params: duplicateElicitParams });
+        }
         break;
       }
       if (JSON.stringify(message.params.prompt).includes('ELICIT_TEST')) {
