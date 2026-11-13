@@ -1421,4 +1421,38 @@ test('prompt with images forwards bytes to the manager; bad input is rejected wi
     images: Array.from({ length: 6 }, () => ({ base64: PNG_B64, mime_type: 'image/png' })),
   });
   assert.equal(tooMany.status, 413);
+  assert.equal(tooMany.body.error, 'too_many_images');
+
+  // Accepted files must survive the HTTP parser too: base64 adds one third,
+  // so even ONE valid 8MiB image exceeds the general 10MiB JSON limit.
+  const maxImage = { base64: Buffer.alloc(8 * 1024 * 1024, 7).toString('base64'), mime_type: 'image/png' };
+  for (const count of [1, 5]) {
+    const sid = `sess-pi-large-${count}`;
+    // Include the maximum text length, with characters JSON must escape.
+    const text = '\u0001'.repeat(100_000);
+    const large = await ask(sid, { text, images: Array(count).fill(maxImage) });
+    assert.equal(large.status, 202, large.text);
+    const forwarded = requests.find((r) => r.session_id === sid && r.op === 'prompt');
+    assert.equal(forwarded.images.length, count);
+    assert.ok(forwarded.images.every((image) => image.base64 === maxImage.base64 && image.mime_type === maxImage.mime_type),
+      'every image reaches the manager intact');
+    assert.ok(forwarded.text === text, 'the prompt text reaches the manager intact');
+    requests.splice(0); // Do not retain large payloads for the remaining checks.
+  }
+
+  // The larger transport budget must not bypass per-image validation.
+  const oversized = await ask('sess-pi-too-large', {
+    images: [{ base64: Buffer.alloc(8 * 1024 * 1024 + 1, 7).toString('base64'), mime_type: 'image/png' }],
+  });
+  assert.equal(oversized.status, 413);
+  assert.equal(oversized.body.error, 'image_too_large');
+  assert.equal(requests.length, 0, 'invalid images are never dispatched');
+
+  // Only prompt uploads get this budget, not adjacent session operations.
+  const otherRoute = await call(`${base}/api/agent-sessions/hosts/${managerId}/claude/sessions/sess-pi-1/cancel`, {
+    method: 'POST', headers: ownerHeaders, body: JSON.stringify({ images: [maxImage] }),
+  });
+  assert.equal(otherRoute.status, 413);
+  assert.match(otherRoute.body.error, /File too large/);
+  assert.equal(requests.length, 0);
 });

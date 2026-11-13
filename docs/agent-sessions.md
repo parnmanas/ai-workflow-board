@@ -742,7 +742,11 @@ opencode 가 `promptCapabilities.image` 를 광고하는(1.18.34 실측) 네이�
 1. 화면(`SessionComposer`)이 파일·붙여넣기를 받아 썸네일로 보여 준다(png/jpeg/gif/webp/bmp/avif,
    SVG 제외, 장당 8MB·최대 5장 — 서버가 최종 판정). 텍스트 없이 그림만 보내도 턴이 열린다.
 2. `POST …/sessions/:sessionId/prompt { text, images: [{ base64, mime_type }] }` —
-   서버는 검증만 하고 저장하지 않은 채 매니저로 흘려보낸다.
+   서버는 검증만 하고 저장하지 않은 채 매니저로 흘려보낸다. 이 경로의 JSON 본문 상한은
+   장당 8MiB·5장의 base64 확장(약 53.4MiB) + 최대 텍스트의 JSON 이스케이프 + 메타데이터 여유분으로
+   계산한다(`AGENT_SESSION_PROMPT_BODY_MAX_BYTES`, `http-body-parsers.ts`). 일반 10MiB 상한을
+   그대로 적용하면 미리보기에 붙은 정상 이미지도 보내는 순간 413으로 거절된다. 개별 파일·장수·텍스트
+   검증은 서비스에서 유지하며, 다른 API의 본문 상한은 그대로다. 회귀: `test/agent-sessions.test.mjs`.
 3. 매니저(`#runPrompt`)가 `[{text}, {type:'image', data, mimeType}…]` 로 `session/prompt` 를
    부른다. 깨진 1장은 턴을 죽이지 않고 `prompt_image_skipped` 로 알린다.
 4. 보낸 그림은 에코로 전사에 남는다 — 받은 이미지와 같은 `image` 이벤트라 다시열기·이미지 RPC 가

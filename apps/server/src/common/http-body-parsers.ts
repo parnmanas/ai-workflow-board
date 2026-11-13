@@ -1,5 +1,6 @@
 import { json, urlencoded, raw } from 'express';
 import type { INestApplication } from '@nestjs/common';
+import { AGENT_SESSION_PROMPT_BODY_MAX_BYTES } from './types/agent-sessions';
 
 // Shared HTTP body-parser wiring for the Express adapter.
 //
@@ -38,6 +39,12 @@ export function applyHttpBodyParsers(app: INestApplication): void {
   // 온다. 10MB 로 받으면 큰 이미지의 응답이 413 으로 버려져 화면은 타임아웃만 봤다. 매니저는 큰 응답을
   // gzip 으로 보내지만 이 상한은 푼 크기로 잰다.
   app.use('/api/agent/sessions/rpc', json({ limit: '16mb' }));
+
+  // Prompt uploads allow five 8MiB images: base64 alone can reach 53.4MiB.
+  // Even one valid image can exceed the general 10MiB cap. Size this parser
+  // from the prompt limits; the service still checks each image and the count.
+  app.use('/api/agent-sessions/hosts/:managerId/:cli/sessions/:sessionId/prompt',
+    json({ limit: AGENT_SESSION_PROMPT_BODY_MAX_BYTES }));
 
   // Raise the JSON/urlencoded limit from Express's 100KB default to 10MB. Agent
   // plugins ship proxy.log error/event batches (up to 500 entries) that routinely
