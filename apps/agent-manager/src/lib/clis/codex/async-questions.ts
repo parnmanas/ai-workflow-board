@@ -1,7 +1,7 @@
 import { open, stat } from 'node:fs/promises';
 import type { CliAsyncQuestion, CliAsyncQuestionWatcher } from '../cli-module.js';
 
-/** Codex emits request_user_input_async as an AgentMessage, not an ACP elicitation. */
+/** Codex records request_user_input_async as an AgentMessage with a stable call ID. */
 export function codexAsyncQuestion(record: any): CliAsyncQuestion | null {
   const item = record?.payload?.item;
   if (record?.type !== 'event_msg' || record.payload?.type !== 'item_completed'
@@ -85,5 +85,17 @@ export async function watchCodexAsyncQuestions(
   };
   const timer = setInterval(() => { void poll(); }, 500);
   timer.unref();
-  return { poll, close: () => { closed = true; clearInterval(timer); } };
+  return {
+    poll,
+    close: () => { closed = true; clearInterval(timer); },
+    // codex-acp 2.6 also emits these as elicitation/create, without a call ID.
+    // Keep the rollout as the single owner: it has the ID and accepts answers
+    // after the asking turn ends. Cancel the adapter's parallel answer flow,
+    // regardless of which producer arrives first. Blocking/URL forms stay ACP-owned.
+    ownsElicitation: (request) => {
+      const codex = request._meta?.codex;
+      return !closed && request.mode === 'form' && typeof codex === 'object' && codex !== null
+        && 'delivery' in codex && codex.delivery === 'async';
+    },
+  };
 }

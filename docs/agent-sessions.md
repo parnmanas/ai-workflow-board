@@ -324,6 +324,11 @@ client capabilities 로 `elicitation: {form, url}`, `session.configOptions.boole
 질문 도구의 실행 행과 `tool_call_id`로 연결된 폼은 화면에서 카드 하나로 표시한다. 도구의 입력·결과는 그 카드의
 접힌 상세에 남기고, 같은 `elicitation_id`의 요청 재전송은 새 카드를 만들거나 이미 답한 질문을 다시 열지 않는다.
 Codex의 `request_user_input_async`는 네이티브 기록의 비동기 질문을 `elicitation_request{async:true}`로 옮긴다.
+질문 폼과 답변 전달은 이 기록 감시 경로가 소유한다. codex-acp 2.6은 같은 질문을
+`_meta.codex.delivery: 'async'`인 ACP form으로도 보내지만 호출 ID를 싣지 않으므로 ID 기반 중복 제거로는
+합칠 수 없다. 감시기가 실행 중이면 그 ACP 요청은 카드·입력 대기 상태를 만들기 전에 `cancel`로 닫는다.
+두 생성 경로의 도착 순서에 의존하지 않으며, 기록의 안정된 호출 ID와 턴 종료 후 답변 전달을 유지한다.
+감시기를 시작하지 못했으면 ACP 폼으로 답할 수 있고, 일반 동기 질문과 URL 요청은 이 제외 대상이 아니다.
 이때 네이티브 호출 ID를 `tool_call_id`로 보존한다. 어댑터가 질문을 일반 텍스트로도 보낼 때는
 네이티브 `content`의 원문을 `echo_text`로 전달해 같은 턴의 정확히 일치하는 텍스트만 폼으로 합친다.
 다른 진행 문장이나 다른 턴의 같은 문장은 남긴다. 추가 답변 입력란과 필수 입력 안내에는 질문 전문을

@@ -225,12 +225,16 @@ export interface CliSessionWatcher {
   close(): void;
 }
 
-export type CliAsyncQuestionWatcher = CliSessionWatcher;
+export interface CliAsyncQuestionWatcher extends CliSessionWatcher {
+  /** True when this watcher already owns an adapter's parallel question flow.
+   * The runner cancels that ACP request without creating a second form or answer path. */
+  ownsElicitation?(request: { mode?: string; _meta?: Record<string, unknown> | null }): boolean;
+}
 
 export interface CliSessionStoreDriver {
   /** Latest provider quota snapshots from this session's own native records. */
   readLatestUsageLimits?(ctx: CliSessionStoreContext, sessionId: string): Promise<import('../session-usage-limits.js').SessionUsageLimits[]>;
-  /** Native nonblocking questions omitted by the ACP adapter. Only new records are delivered. */
+  /** Native nonblocking questions. Only new records are delivered; the watcher may own matching ACP forms too. */
   watchAsyncQuestions?(ctx: CliSessionStoreContext, sessionId: string, receive: (question: CliAsyncQuestion) => void): Promise<CliAsyncQuestionWatcher>;
   /** Optional native failure evidence for this turn only; null if unavailable or stale. */
   readTurnFailure?(ctx: CliSessionStoreContext, sessionId: string, startedAt: number): Promise<import('../session-failure.js').SessionFailureDetails | null>;

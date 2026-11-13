@@ -4,6 +4,7 @@ import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexAsyncQuestion, watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
+import { codexAsyncForm } from './fixtures/codex-async-elicitation.mjs';
 
 const record = (id = 'call-question') => ({ type: 'event_msg', payload: { type: 'item_completed', item: {
   type: 'AgentMessage', id, delivery: 'async', questions: [{ title: '어떤 설명을 먼저 듣고 싶으세요?', options: ['짧은 요약', '자세한 설명'] }],
@@ -61,4 +62,16 @@ test('watcher finds the rollout created after session/new', async (t) => {
   await writeFile(path, JSON.stringify(record()) + '\n');
   await watcher.poll();
   assert.equal(received.length, 1);
+});
+
+test('the native watcher owns only explicitly marked Codex async forms, including before the first record', async (t) => {
+  const watcher = await watchCodexAsyncQuestions(async () => null, () => {});
+  t.after(() => watcher.close());
+  assert.equal(watcher.ownsElicitation(codexAsyncForm), true);
+  assert.equal(watcher.ownsElicitation({ ...codexAsyncForm, _meta: undefined }), false, 'blocking questions remain answerable through ACP');
+  assert.equal(watcher.ownsElicitation({ ...codexAsyncForm, _meta: { codex: { delivery: 'sync' } } }), false);
+  assert.equal(watcher.ownsElicitation({ ...codexAsyncForm, _meta: { delivery: 'async' } }), false, 'unrelated ACP metadata is not a duplicate');
+  assert.equal(watcher.ownsElicitation({ ...codexAsyncForm, mode: 'url' }), false);
+  watcher.close();
+  assert.equal(watcher.ownsElicitation(codexAsyncForm), false);
 });

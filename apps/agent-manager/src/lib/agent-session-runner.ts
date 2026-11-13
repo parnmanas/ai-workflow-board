@@ -2214,6 +2214,7 @@ export class AgentSessionRunner {
    */
   async #onElicitation(live: LiveSession, request: AcpElicitationRequest): Promise<AcpElicitationOutcome> {
     if (live.loading) return { action: 'cancel' };
+    if (live.asyncQuestionWatcher?.ownsElicitation?.(request)) return { action: 'cancel' };
     const turnId = live.turn?.turnId;
     this.#flushBuffers(live, turnId);
     const mode = request.mode === 'url' ? 'url' : 'form';

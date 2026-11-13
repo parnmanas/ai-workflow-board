@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { codexAsyncForm } from './codex-async-elicitation.mjs';
 
 const rl = createInterface({ input: process.stdin });
 let nextSession = 1;
@@ -40,6 +41,8 @@ let pendingElicitPrompt = null;
 let duplicateElicitPrompt = null;
 let duplicateElicitParams = null;
 let duplicateElicitReplies = [];
+let asyncQuestionSessionId = null;
+let asyncQuestionRequests = 0;
 /** `HOLD_TURN_TEST` 프롬프트 — steering 이나 cancel 이 올 때까지 열어 두는 턴. */
 let heldPrompt = null;
 // initialize 에서 client 가 광고한 capabilities — 실제 어댑터처럼 slash command 알림은
@@ -52,6 +55,13 @@ function send(message) {
 
 function result(id, value) {
   send({ jsonrpc: '2.0', id, result: value });
+}
+
+function sendAsyncQuestion() {
+  send({ jsonrpc: '2.0', id: `async-elicit-${++asyncQuestionRequests}`, method: 'elicitation/create',
+    params: { sessionId: asyncQuestionSessionId, ...codexAsyncForm } });
+  send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: asyncQuestionSessionId,
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '[async-form-sent]' } } } });
 }
 
 function invalidParams(id, detail) {
@@ -152,6 +162,11 @@ rl.on('line', (line) => {
   const message = JSON.parse(line);
 
   if (!Object.hasOwn(message, 'method')) {
+    if (String(message.id).startsWith('async-elicit-')) {
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: asyncQuestionSessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `[async-form-reply:${message.result?.action}]` } } } });
+      return;
+    }
     if (String(message.id).startsWith('duplicate-elicit-') && duplicateElicitPrompt) {
       duplicateElicitReplies.push(message.result);
       if (duplicateElicitReplies.length === 2) {
@@ -347,6 +362,15 @@ rl.on('line', (line) => {
         break;
       }
       option.currentValue = message.params.value;
+      // Test-controlled ordering, with no sleep: a native form can precede or
+      // follow the file watcher. Ending the turn does not wait for an answer.
+      if (asyncQuestionSessionId && option.id === 'fast_mode') {
+        if (option.currentValue) sendAsyncQuestion();
+        else if (heldPrompt) {
+          result(heldPrompt, { stopReason: 'end_turn' });
+          heldPrompt = null;
+        }
+      }
       result(message.id, { configOptions });
       break;
     }
@@ -357,6 +381,13 @@ rl.on('line', (line) => {
       result(message.id, lastPromptParams);
       break;
     case 'session/prompt':
+      if (JSON.stringify(message.params.prompt).includes('ASYNC_QUESTION_TEST')) {
+        heldPrompt = message.id;
+        asyncQuestionSessionId = message.params.sessionId;
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: asyncQuestionSessionId,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'working on it' } } } });
+        break;
+      }
       if (JSON.stringify(message.params.prompt).includes('RESUME_MODEL_TEST')) {
         const model = configOptions[0].currentValue;
         const recorded = process.env.FAKE_ACP_RECORDED_MODEL;

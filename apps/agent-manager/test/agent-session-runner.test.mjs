@@ -17,6 +17,7 @@ import { parse as parseToml } from 'smol-toml';
 import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
 import { watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
+import { codexAsyncRecord } from './fixtures/codex-async-elicitation.mjs';
 import { appendFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -1043,6 +1044,72 @@ test('repeated ACP question requests share one form and the same answer, includi
   }
 });
 
+for (const first of ['adapter', 'watcher']) test(`Codex native ACP and rollout produce one question (${first} first)`, { timeout: 30_000 }, async (t) => {
+  const { root, cwd, store, server, runner } = await harness(t, { permissionTimeoutMs: 60_000 });
+  const path = join(root, 'native.jsonl');
+  await writeFile(path, '');
+  let watcher;
+  store.watchAsyncQuestions = async (_cli, _id, receive) => (watcher = await watchCodexAsyncQuestions(async () => path, receive));
+  await runner.handle(request('open', { request_id: 'dual-open', session_id: null, cwd }));
+  const sid = server.rpc('dual-open').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, turn_id: 'dual-turn', text: 'ASYNC_QUESTION_TEST' }));
+  const text = () => server.events(sid).filter(e => e.type === 'text').map(e => e.payload.text).join('');
+  const forms = () => server.events(sid).filter(e => e.type === 'elicitation_request');
+  await waitFor(() => text().includes('working on it'), 'active turn');
+  const fromAdapter = async () => {
+    await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: true }));
+    await waitFor(() => text().includes('[async-form-sent]'), 'native adapter form');
+  };
+  const fromWatcher = async () => {
+    await appendFile(path, JSON.stringify(codexAsyncRecord('call-async-question')) + '\n');
+    await watcher.poll();
+    await waitFor(() => forms().some(e => e.payload.async), 'rollout question');
+  };
+  if (first === 'adapter') { await fromAdapter(); await fromWatcher(); }
+  else { await fromWatcher(); await fromAdapter(); }
+  assert.equal(forms().length, 1, 'one native request_user_input_async must not become two forms with different IDs');
+  assert.equal(forms()[0].payload.elicitation_id, 'call-async-question');
+  assert.equal(forms()[0].payload.async, true);
+  assert.equal(server.states(sid).some(s => s.status === 'awaiting_input'), false, 'an optional async form must not claim to block the CLI');
+  await waitFor(() => text().includes('[async-form-reply:cancel]'), 'duplicate ACP request released without a second answer path');
+
+  await runner.handle(request('history', { request_id: 'dual-history', session_id: sid }));
+  assert.equal(server.rpc('dual-history').result.events.filter(e => e.type === 'elicitation_request').length, 1, 'reconnecting must also show one form');
+  // Same wording from another call is a separate question, not a text duplicate.
+  await appendFile(path, JSON.stringify(codexAsyncRecord('call-another-question')) + '\n');
+  await watcher.poll();
+  await waitFor(() => forms().length === 2, 'a different native call');
+
+  const answer = request('elicitation', { session_id: sid, elicitation_id: 'call-async-question', elicitation_action: 'accept', elicitation_content: { q_1: '짧게' } });
+  await runner.handle(answer);
+  await runner.handle(answer);
+  await waitFor(() => server.events(sid).some(e => e.type === 'user_prompt' && e.payload.text.includes('짧게')), 'answer event flushed');
+  assert.equal(server.events(sid).filter(e => e.type === 'user_prompt' && e.payload.text.includes('짧게')).length, 1, 'one answer delivery even if the browser repeats the submit');
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: false }));
+  await waitFor(() => server.events(sid).some(e => e.type === 'permission_request'), 'queued answer reaches the CLI');
+  const permission = server.events(sid).find(e => e.type === 'permission_request');
+  await runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));
+  await turn;
+  await waitFor(() => server.states(sid).at(-1).status === 'ready', 'answer turn finishes');
+});
+
+test('an ACP async form remains answerable if its native watcher could not start', async (t) => {
+  const { cwd, store, server, runner } = await harness(t);
+  store.watchAsyncQuestions = async () => { throw new Error('native records unavailable'); };
+  await runner.handle(request('open', { request_id: 'no-watcher', session_id: null, cwd }));
+  const sid = server.rpc('no-watcher').result.session_id;
+  const turn = runner.handle(request('prompt', { session_id: sid, text: 'ASYNC_QUESTION_TEST' }));
+  await waitFor(() => server.events(sid).some(e => e.type === 'text' && e.payload.text.includes('working on it')), 'active turn');
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: true }));
+  await waitFor(() => server.events(sid).some(e => e.type === 'elicitation_request'), 'ACP form fallback');
+  const form = server.events(sid).find(e => e.type === 'elicitation_request');
+  await runner.handle(request('elicitation', { session_id: sid, elicitation_id: form.payload.elicitation_id,
+    elicitation_action: 'accept', elicitation_content: { question_0: '짧게' } }));
+  await waitFor(() => server.events(sid).some(e => e.type === 'text' && e.payload.text.includes('[async-form-reply:accept]')), 'answer returned to ACP');
+  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: false }));
+  await turn;
+});
+
 test('native async questions are reported while work continues, replay after turn end, and deliver one answer prompt', async (t) => {
   // Exercise replay/answering without racing the async question's expiry against
   // the fixture's ordinary permission timeout (especially on Windows CI).
@@ -1052,7 +1119,7 @@ test('native async questions are reported while work continues, replay after tur
   let watcherClosed = false;
   store.watchAsyncQuestions = async (_cli, _id, receive) => {
     const watcher = await watchCodexAsyncQuestions(async () => path, receive);
-    return { poll: () => watcher.poll(), close: () => { watcherClosed = true; watcher.close(); } };
+    return { ...watcher, close: () => { watcherClosed = true; watcher.close(); } };
   };
   await runner.handle(request('open', { request_id: 'async-open', session_id: null, cwd }));
   const sid = server.rpc('async-open').result.session_id;
