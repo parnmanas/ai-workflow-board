@@ -1,0 +1,77 @@
+/* Queries use the actual work area, including when a tablet sidebar is open. */
+.awb-inspection { container: inspection / inline-size; min-width: 0; overflow-wrap: anywhere; }
+.awb-inspection-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; position: relative; }
+.awb-inspection-toolbar-actions, .awb-inspection-toolbar-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.awb-inspection-toolbar-menu { display: none; }
+.awb-inspection-toolbar .awb-session-menu { position: static; }
+.awb-inspection-toolbar .awb-session-menu-panel { top: calc(100% + 4px); right: 0; width: min(380px, 100%); max-height: min(420px, 55dvh); }
+.awb-inspection-menu-content { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.awb-inspection-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; margin-bottom: 16px; }
+.awb-inspection-filters > * { min-width: 0; }
+.awb-inspection :is(button, select), .awb-inspection-dialog :is(button, select) { min-height: 44px; }
+.awb-inspection-actions button, .awb-inspection-detail-heading > button, .awb-inspection-batch button, .awb-inspection-dialog button { min-width: 44px; }
+.awb-inspection button { max-width: 100%; }
+.awb-inspection-table { width: 100%; border-collapse: collapse; }
+.awb-inspection-table td { overflow-wrap: anywhere; }
+.awb-inspection-table .awb-inspection-name > div:first-child { flex-wrap: wrap; }
+.awb-inspection-name-button { background: none; border: 0; color: inherit; font: inherit; font-weight: 600; padding: 0; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.awb-inspection-actions > div { flex-wrap: wrap; }
+.awb-inspection-check { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 44px; min-height: 44px; cursor: pointer; }
+.awb-inspection-check input { width: 18px; height: 18px; flex-shrink: 0; }
+.awb-inspection-select-all-text { display: none; }
+.awb-inspection-detail-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.awb-inspection-detail-title { flex: 1; min-width: 0; }
+.awb-inspection-meta > span { max-width: 100%; white-space: normal !important; overflow-wrap: anywhere; }
+.awb-inspection-runs { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; align-items: start; }
+.awb-inspection-runs > div { min-width: 0; }
+.awb-inspection-history { max-height: 480px; overflow-y: auto; }
+.awb-inspection-history button { flex-shrink: 0; flex-wrap: wrap; }
+.awb-inspection-batch { flex-wrap: wrap; }
+.awb-inspection-batch > span { min-width: 0; }
+.awb-inspection-dialog { container: inspection-dialog / inline-size; }
+.awb-inspection-form-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.awb-inspection-form-row > div { flex: 1 1 180px !important; min-width: 0; }
+.awb-inspection-choice-row { flex-wrap: wrap; }
+.awb-inspection-dialog :is(input, select, textarea) { max-width: 100%; min-width: 0; }
+.awb-inspection-dialog label:has(> input:is([type=checkbox], [type=radio])) { min-height: 44px; }
+.awb-inspection-dialog input:is([type=checkbox], [type=radio]) { flex-shrink: 0; }
+
+@container inspection (max-width: 960px) {
+  /* One DOM/selection state for both the desktop table and compact cards. */
+  .awb-inspection-table, .awb-inspection-table tbody { display: block; min-width: 0 !important; }
+  .awb-inspection-table thead { display: block; }
+  .awb-inspection-table thead tr { display: flex; }
+  .awb-inspection-table th { display: none; }
+  .awb-inspection-table th.awb-inspection-select-all { display: block; width: 100% !important; text-align: left !important; padding: 4px 12px !important; }
+  .awb-inspection-select-all-text { display: inline; }
+  .awb-inspection-table tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); position: relative; padding: 12px; gap: 12px; border-bottom: 1px solid var(--awb-border); }
+  .awb-inspection-table tbody tr:last-child { border-bottom: 0; }
+  .awb-inspection-table td { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; gap: 4px; padding: 0 !important; border-bottom: 0 !important; text-align: left !important; white-space: normal !important; }
+  .awb-inspection-table td[data-label]::before { content: attr(data-label); font-size: 11px; font-weight: 600; opacity: 0.7; }
+  .awb-inspection-table td > :is(span, div) { max-width: 100%; }
+  .awb-inspection-table td span { white-space: normal !important; }
+  .awb-inspection-table .awb-inspection-name, .awb-inspection-table .awb-inspection-actions { grid-column: 1 / -1; }
+  .awb-inspection-table .awb-inspection-selection { position: absolute; right: 8px; top: 8px; }
+  .awb-inspection-selection + .awb-inspection-name { padding-right: 48px !important; }
+  .awb-inspection-table .awb-inspection-actions { border-top: 1px solid var(--awb-border); padding-top: 10px !important; }
+  .awb-inspection-actions > div { width: 100%; }
+}
+
+@container inspection (max-width: 700px) {
+  .awb-inspection-runs { grid-template-columns: minmax(0, 1fr); }
+  .awb-inspection-history { max-height: 200px; }
+}
+
+@container inspection (max-width: 640px) {
+  .awb-inspection-toolbar-description, .awb-inspection-toolbar-extra { display: none; }
+  .awb-inspection-toolbar-menu { display: block; }
+  .awb-inspection-toolbar-actions { width: 100%; justify-content: space-between; }
+  .awb-inspection-toolbar .awb-session-menu-trigger { min-width: 44px; }
+  .awb-inspection-detail-title { flex-basis: 100%; order: -1; }
+  .awb-inspection-detail-heading { gap: 8px; }
+  .awb-inspection-detail-heading > button:last-child { margin-left: auto; }
+}
+
+@container inspection-dialog (max-width: 520px) {
+  .awb-inspection-form-row > div { flex-basis: 100% !important; }
+}

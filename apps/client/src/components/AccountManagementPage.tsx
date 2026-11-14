@@ -96,7 +96,7 @@ export default function AccountManagementPage({ kind }: { kind: AccountManagemen
         title={info.title}
         description={info.description}
       />
-      <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 24 }}>
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 'clamp(12px, 2.5vw, 24px)' }}>
         {canManageGlobalHere && ['functions', 'credentials', 'resources'].includes(kind) && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
             <input type="checkbox" checked={createGlobal} onChange={event => setCreateGlobal(event.target.checked)} />

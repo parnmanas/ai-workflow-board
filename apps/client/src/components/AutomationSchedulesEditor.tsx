@@ -138,7 +138,7 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
   };
 
   return (
-    <div style={{ marginTop: 28 }}>
+    <div className="awb-inspection">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: tokens.colors.textStrong, marginBottom: 4 }}>
@@ -160,7 +160,7 @@ export default function AutomationSchedulesEditor({ accountId }: AutomationSched
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 820 }}>
+          <table className="awb-inspection-table" role="table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: 820 }}>
             <thead>
               <tr>
                 <th style={TH}>{translate('Name')}</th>
@@ -235,21 +235,21 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
       onMouseLeave={() => setHover(false)}
       style={{ background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
-      <td style={TD}>
+      <td className="awb-inspection-name" style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentLabel}</td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
-      <td style={TD}>
-        <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
-          <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
+      <td data-label={translate('Agent')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentLabel}</td>
+      <td data-label={translate('Cadence')} style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
+      <td data-label={translate('Enabled')} style={TD}>
+        <label className="awb-inspection-check">
+          <input type="checkbox" checked={s.enabled} onChange={onToggle} title={translate('Enabled')} aria-label={`${translate('Enabled')}: ${s.name}`} />
           {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </label>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+      <td data-label={translate('Next run (UTC)')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Last run')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {s.last_run_at ? (
           s.last_room_id ? (
             <Link
@@ -266,7 +266,7 @@ function ScheduleRow({ s, accountId, agentLabel, onEdit, onToggle, onRunNow, onD
           <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>
         )}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td className="awb-inspection-actions" style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
           <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
           <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
@@ -374,6 +374,7 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
 
   return (
     <Modal
+      className="awb-inspection-dialog"
       isOpen={true}
       onClose={onClose}
       title={schedule ? translate('Account 스케줄 수정') : translate('새 Account 스케줄')}
@@ -390,7 +391,7 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
 
         <div>
           <label style={fieldLabel}>{translate('무엇을 실행할까요')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-target" checked={targetKind === 'prompt'} onChange={() => setTargetKind('prompt')} />
               {translate('프롬프트 직접 입력')}</label>
@@ -442,7 +443,7 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
         {/* Cadence: interval vs cron */}
         <div>
           <label style={fieldLabel}>{translate('실행 주기')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="account-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
               {translate('주기 (interval)')}</label>
@@ -451,7 +452,7 @@ function ScheduleEditor({ schedule, accountId, agents, actions, onClose, onSaved
               {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div className="awb-inspection-form-row">
               <div style={{ width: 120 }}>
                 <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>

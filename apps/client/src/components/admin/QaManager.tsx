@@ -1,5 +1,6 @@
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
+import InspectionToolbar from './InspectionToolbar';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveAccountId, rawResourceUrl } from '../../api';
 import type { QaScenario, QaScenarioListItem, QaRun, QaStepResult, QaOnFailureTicketConfig, QaRunBatch, QaSchedule, QaScheduleScope, QaPhase, QaPhasesConfig, Deployment } from '../../types';
@@ -300,17 +301,18 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
   const batchRunning = activeBatch?.status === 'running';
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          {translate('Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.')}</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+    <div className="awb-inspection">
+      <InspectionToolbar
+        description={translate('Scenario-based QA — run a scenario, accumulate step pass/fail + screenshots, re-run to compare.')}
+        primary={<Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ New Scenario')}</Button>}
+      >
+        {close => <>
           {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
           <Button
             variant="secondary"
             size="md"
             disabled={visibleRunIds.length === 0 || batchStarting || batchRunning}
-            onClick={() => startBatch({ scenario_ids: visibleRunIds })}
+            onClick={() => { close(); startBatch({ scenario_ids: visibleRunIds }); }}
             title={translate('현재 필터에 맞는 활성 시나리오만 순차 실행')}
           >
             {translate('▶ 필터 결과 실행')} ({visibleRunIds.length})</Button>
@@ -318,16 +320,15 @@ export default function QaManager({ accountId, allScopes = false }: QaManagerPro
             variant="secondary"
             size="md"
             disabled={orderedSelected.length === 0 || batchStarting || batchRunning}
-            onClick={() => startBatch({ scenario_ids: orderedSelected.map((s) => s.id) })}
+            onClick={() => { close(); startBatch({ scenario_ids: orderedSelected.map((s) => s.id) }); }}
             title={translate('체크한 시나리오를 위→아래 순서대로 순차 실행')}
           >
             {translate('▶ 선택 순차 실행')}{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
           </Button>
-          <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ New Scenario')}</Button>
-        </div>
-      </div>
+        </>}
+      </InspectionToolbar>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+      <div className="awb-inspection-filters">
         <Select aria-label={translate('프로젝트')} label={translate('프로젝트')} value={projectFilter}
           options={[...projectSelectOptions(projects, projectFilter === 'unassigned' ? '' : projectFilter, translate('모든 프로젝트')), { value: 'unassigned', label: translate('프로젝트 미지정') }]}
           onChange={e => { setProjectFilter(e.target.value); setSelectedIds(new Set()); }} />
@@ -408,7 +409,7 @@ function BatchProgressBanner({ batch, scenarioName, onDismiss }: {
   const currentId = batch.scenario_ids[batch.current_index];
   return (
     <Card padding="14px">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+      <div className="awb-inspection-batch" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <Badge variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'} size="md">{translate('batch')} {batch.status}</Badge>
         <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
           {position} / {batch.total}
@@ -504,7 +505,7 @@ function SchedulesSection({ projectName, schedules, scenarios, disabled, onNew, 
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
+          <table className="awb-inspection-table" role="table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
             <thead>
               <tr>
                 <th style={TH}>{translate('Name')}</th>
@@ -557,27 +558,27 @@ function ScheduleRow({ s, projectName, scenarioCount, onEdit, onToggle, onRunNow
       onMouseLeave={() => setHover(false)}
       style={{ background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
-      <td style={TD}>
+      <td className="awb-inspection-name" style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
         <div style={{ fontSize: 12, color: tokens.colors.textMuted }}>{projectName}</div>
       </td>
-      <td style={TD}>
+      <td data-label={translate('Scope')} style={TD}>
         <Badge variant={s.scope === 'all' ? 'info' : 'neutral'} size="sm">{scopeLabel}</Badge>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
-      <td style={TD}>
-        <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
-          <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
+      <td data-label={translate('Cadence')} style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
+      <td data-label={translate('Enabled')} style={TD}>
+        <label className="awb-inspection-check">
+          <input type="checkbox" checked={s.enabled} onChange={onToggle} title={translate('Enabled')} aria-label={`${translate('Enabled')}: ${s.name}`} />
           {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </label>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+      <td data-label={translate('Next run (UTC)')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Last run')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td className="awb-inspection-actions" style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
           <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
           <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
@@ -630,11 +631,11 @@ function ScenarioTable({ projectName, scenarios, agentName, running, selectedIds
   };
   return (
     <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
+      <table className="awb-inspection-table" role="table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
         <thead>
           <tr>
-            <th style={{ ...TH, width: 36, textAlign: 'center' }}>
-              <input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} />
+            <th className="awb-inspection-select-all" style={{ ...TH, width: 36, textAlign: 'center' }}>
+              <label className="awb-inspection-check"><input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} /><span className="awb-inspection-select-all-text">{translate('전체 선택/해제')}</span></label>
             </th>
             <th style={TH}>{translate('Name')}</th>
             <th style={TH}>{translate('프로젝트 / 결과 처리')}</th>
@@ -693,16 +694,16 @@ function ScenarioRow({ projectName, s, agentName, running, selected, onToggleSel
       onMouseLeave={() => setHover(false)}
       style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
-      <td style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} />
+      <td className="awb-inspection-selection" style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+        <label className="awb-inspection-check"><input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} aria-label={`${translate('순차 실행에 포함')}: ${s.name}`} /></label>
       </td>
-      <td style={TD}>
+      <td className="awb-inspection-name" style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
+          <button className="awb-inspection-name-button" onClick={stop(onOpen)}>{s.name}</button>
           {!s.enabled && <Badge variant="warning" size="sm">{translate('disabled')}</Badge>}
         </div>
       </td>
-      <td style={TD}>
+      <td data-label={translate('프로젝트 / 결과 처리')} style={TD}>
         <div>{projectName}</div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted }}>{[
           s.on_failure_ticket?.enabled ? translate('실패 티켓') : '',
@@ -710,19 +711,19 @@ function ScenarioRow({ projectName, s, agentName, running, selected, onToggleSel
           s.result_delivery?.email ? translate('메일') : '',
         ].filter(Boolean).join(' · ') || translate('기록만')}</div>
       </td>
-      <td style={TD}>
+      <td data-label={translate('Driver')} style={TD}>
         {s.qa_driver ? <Badge variant="info" size="sm">{s.qa_driver}</Badge> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id, (s as any).target_runtime)}</td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Agent')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>{agentName(s.target_agent_id, (s as any).target_runtime)}</td>
+      <td data-label={translate('Last run')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never run')}</span>}
       </td>
-      <td style={TD}>
+      <td data-label={translate('Result')} style={TD}>
         {s.last_run_status
           ? <Badge variant={statusVariant(s.last_run_status)} size="sm">{s.last_run_status}</Badge>
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td className="awb-inspection-actions" style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
           <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running || !s.enabled}>
             {running ? translate('Starting…') : translate('▶ Run')}
@@ -788,12 +789,12 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
     run?.step_results?.find((sr) => sr.idx === idx);
 
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+    <div className="awb-inspection">
+      <div className="awb-inspection-detail-heading">
         <Button variant="ghost" size="sm" onClick={onBack}>{translate('← Back')}</Button>
-        <div style={{ flex: 1 }}>
+        <div className="awb-inspection-detail-title">
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{scenario.name}</div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+          <div className="awb-inspection-meta" style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
             {scenario.qa_driver && <Badge variant="info" size="sm">{scenario.qa_driver}</Badge>}
             <Badge variant="neutral" size="sm">{translate('agent:')} {agentName(scenario.target_agent_id, (scenario as any).target_runtime)}</Badge>
           </div>
@@ -853,12 +854,12 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
         </div>
       </div>
 
-      {/* Run history + detail */}
-      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-        <div style={{ width: 230, flexShrink: 0 }}>
+      {/* Run history + detail — wraps to one column on a narrow screen */}
+      <div className="awb-inspection-runs">
+        <div>
           <SectionLabel>{translate('Run history')}</SectionLabel>
           {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('No runs yet.')}</div>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div className="awb-inspection-history" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {runs.map((r) => (
               <button
                 key={r.id}
@@ -878,7 +879,7 @@ function ScenarioDetail({ scenario, accountId, agentName, onBack, onRun, running
           </div>
         </div>
 
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="awb-inspection-run-detail">
           <SectionLabel>{translate('Run detail')}</SectionLabel>
           {!activeRun ? (
             <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('Select a run.')}</div>
@@ -1339,6 +1340,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
 
   return (
     <Modal
+      className="awb-inspection-dialog"
       isOpen={true}
       onClose={onClose}
       title={scenario ? translate('Edit QA scenario') : translate('New QA scenario')}
@@ -1458,7 +1460,7 @@ function ScenarioEditor({ scenario, accountId, agents, onClose, onSaved }: Scena
                 <div style={{ fontSize: 12, color: tokens.colors.textMuted, margin: '4px 0 0 24px' }}>
                   {translate('자동 생성된 수정 티켓이 Done 이 되면 서버가 같은 시나리오를 결정적으로 재실행합니다. pass 면 종료(새 티켓 없음), 재실패면 새 수정 티켓 + 세대 카운터 증가, max 도달 시 중단 코멘트.')}{' '}{translate('⚠️ QA 는')} <b>{translate('돌고 있는 서버')}</b>{translate('를 검증합니다 — main→prod auto-deploy 지연이 있으면 재실행 지연(초)을 배포 시간만큼 주세요.')}</div>
                 {oftRerunOnFix && (
-                  <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                  <div className="awb-inspection-form-row" style={{ display: 'flex', gap: 10, marginTop: 10 }}>
                     <div style={{ flex: 1 }}>
                       <Input
                         label={translate('최대 재실행 횟수 (max_rerun_attempts)')}
@@ -1591,6 +1593,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
 
   return (
     <Modal
+      className="awb-inspection-dialog"
       isOpen={true}
       onClose={onClose}
       title={schedule ? translate('QA 스케줄 수정') : translate('새 QA 스케줄')}
@@ -1612,7 +1615,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
         {/* Scope: 전체 vs 선택 시나리오 토글 */}
         <div>
           <label style={fieldLabel}>{translate('대상 시나리오')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-scope" checked={scope === 'all'} onChange={() => setScope('all')} />
               {translate('전체 (실행 시점 enabled 시나리오로 자동 확장)')}</label>
@@ -1637,7 +1640,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
         {/* Cadence: interval vs cron */}
         <div>
           <label style={fieldLabel}>{translate('실행 주기')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="qa-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
               {translate('주기 (interval)')}</label>
@@ -1646,7 +1649,7 @@ function ScheduleEditor({ schedule, accountId, scenarios, onClose, onSaved }: Sc
               {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div className="awb-inspection-form-row">
               <div style={{ width: 120 }}>
                 <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>

@@ -1,5 +1,6 @@
 import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
+import InspectionToolbar from './InspectionToolbar';
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, getActiveAccountId, rawResourceUrl } from '../../api';
 import type {
@@ -86,7 +87,7 @@ function Pill({ variant = 'neutral', children }: { variant?: keyof typeof PILL_C
   return (
     <span style={{
       display: 'inline-block', fontSize: 11, fontWeight: 600, padding: '2px 8px',
-      borderRadius: tokens.radii.sm, background: c.bg, color: c.fg, whiteSpace: 'nowrap', lineHeight: 1.5,
+      borderRadius: tokens.radii.sm, background: c.bg, color: c.fg, maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere', lineHeight: 1.5,
     }}>
       {children}
     </span>
@@ -409,17 +410,18 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
   const batchRunning = activeBatch?.status === 'running';
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.spacing.md, gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>
-          {translate('보안 점검 — 체크리스트로 코드를 검사하고 severity 별 finding 을 누적, 증분(변경분) diff 로 재실행해 비교합니다.')}</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+    <div className="awb-inspection">
+      <InspectionToolbar
+        description={translate('보안 점검 — 체크리스트로 코드를 검사하고 severity 별 finding 을 누적, 증분(변경분) diff 로 재실행해 비교합니다.')}
+        primary={<Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ 새 프로파일')}</Button>}
+      >
+        {close => <>
           {/* 순차 batch 실행: 한 번에 하나씩, 끝나야 다음. */}
           <Button
             variant="secondary"
             size="md"
             disabled={profiles.length === 0 || batchStarting || batchRunning}
-            onClick={() => startBatch({ all: true })}
+            onClick={() => { close(); startBatch({ all: true }); }}
             title={translate('현재 scope 의 enabled 프로파일을 순차 실행')}
           >
             {translate('▶ 전체 순차 실행')}</Button>
@@ -427,13 +429,16 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
             variant="secondary"
             size="md"
             disabled={orderedSelected.length === 0 || batchStarting || batchRunning}
-            onClick={() => startBatch({ profile_ids: orderedSelected.map((p) => p.id) })}
+            onClick={() => { close(); startBatch({ profile_ids: orderedSelected.map((p) => p.id) }); }}
             title={translate('체크한 프로파일을 위→아래 순서대로 순차 실행')}
           >
             {translate('▶ 선택 순차 실행')}{orderedSelected.length ? ` (${orderedSelected.length})` : ''}
           </Button>
-          <Button variant="primary" size="md" onClick={() => setEditing('new')}>{translate('+ 새 프로파일')}</Button>
+        </>}
+      </InspectionToolbar>
+      <div className="awb-inspection-filters">
           <Select
+            aria-label={translate('트랙 (내부/외부)')}
             value={trackFilter}
             options={[
               { value: 'all', label: translate('전체 트랙') },
@@ -442,7 +447,6 @@ export default function SecurityManager({ accountId, allScopes = false }: Securi
             ]}
             onChange={(e) => setTrackFilter((e.target as HTMLSelectElement).value as 'all' | 'internal' | 'external')}
           />
-        </div>
       </div>
 
       {activeBatch && (
@@ -509,7 +513,7 @@ function BatchProgressBanner({ batch, profileName, onDismiss }: {
   const currentId = batch.profile_ids[batch.current_index];
   return (
     <Card padding="14px">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+      <div className="awb-inspection-batch" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <Pill variant={BATCH_STATUS_VARIANT[batch.status] ?? 'neutral'}>{translate('batch')} {batch.status}</Pill>
         <span style={{ fontSize: 13, fontWeight: 600, color: tokens.colors.textPrimary, fontVariantNumeric: 'tabular-nums' }}>
           {position} / {batch.total}
@@ -597,7 +601,7 @@ function SchedulesSection({ schedules, profiles, disabled, onNew, onEdit, onTogg
         </Card>
       ) : (
         <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
+          <table className="awb-inspection-table" role="table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: 760 }}>
             <thead>
               <tr>
                 <th style={TH}>{translate('Name')}</th>
@@ -649,33 +653,33 @@ function ScheduleRow({ s, profileCount, onEdit, onToggle, onRunNow, onDelete }: 
       onMouseLeave={() => setHover(false)}
       style={{ background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
-      <td style={TD}>
+      <td className="awb-inspection-name" style={TD}>
         <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{s.name}</span>
       </td>
-      <td style={TD}>
+      <td data-label={translate('Kind')} style={TD}>
         <span title={isRefresh ? translate('체크리스트 갱신 (run 미생성)') : translate('보안 점검 batch')}>
           <Pill variant={isRefresh ? 'warning' : 'success'}>
             {isRefresh ? translate('checklist refresh') : translate('scan')}
           </Pill>
         </span>
       </td>
-      <td style={TD}>
+      <td data-label={translate('Scope')} style={TD}>
         <Pill variant={s.scope === 'all' ? 'info' : 'neutral'}>{scopeLabel}</Pill>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
-      <td style={TD}>
-        <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
-          <input type="checkbox" checked={s.enabled} onChange={onToggle} title="enable/disable" />
+      <td data-label={translate('Cadence')} style={{ ...TD, color: tokens.colors.textSecondary, fontFamily: 'monospace', fontSize: 12 }}>{formatCadence(s)}</td>
+      <td data-label={translate('Enabled')} style={TD}>
+        <label className="awb-inspection-check">
+          <input type="checkbox" checked={s.enabled} onChange={onToggle} title={translate('Enabled')} aria-label={`${translate('Enabled')}: ${s.name}`} />
           {!s.enabled && <Pill variant="warning">{translate('disabled')}</Pill>}
         </label>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+      <td data-label={translate('Next run (UTC)')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {s.enabled ? nextUtc : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Last run')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {s.last_run_at ? relativeTime(s.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never')}</span>}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td className="awb-inspection-actions" style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }}>
           <Button variant="primary" size="sm" onClick={onRunNow} title={translate('지금 즉시 실행 (enabled 무시, next_run_at 안 건드림)')}>{translate('▶ Run now')}</Button>
           <Button variant="ghost" size="sm" onClick={onEdit}>{translate('Edit')}</Button>
@@ -723,11 +727,11 @@ function ProfileTable({ profiles, agentName, running, refreshing, selectedIds, o
   };
   return (
     <div style={{ overflowX: 'auto', border: `1px solid ${tokens.colors.border}`, borderRadius: tokens.radii.md }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 920 }}>
+      <table className="awb-inspection-table" role="table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: 920 }}>
         <thead>
           <tr>
-            <th style={{ ...TH, width: 36, textAlign: 'center' }}>
-              <input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} />
+            <th className="awb-inspection-select-all" style={{ ...TH, width: 36, textAlign: 'center' }}>
+              <label className="awb-inspection-check"><input type="checkbox" checked={allSelected} onChange={toggleAll} title={translate('전체 선택/해제')} /><span className="awb-inspection-select-all-text">{translate('전체 선택/해제')}</span></label>
             </th>
             <th style={TH}>{translate('Name')}</th>
             <th style={TH}>{translate('Driver')}</th>
@@ -789,43 +793,43 @@ function ProfileRowView({ p, agentName, running, refreshing, selected, onToggleS
       onMouseLeave={() => setHover(false)}
       style={{ cursor: 'pointer', background: hover ? tokens.colors.surfaceHover : 'transparent' }}
     >
-      <td style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} />
+      <td className="awb-inspection-selection" style={{ ...TD, textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+        <label className="awb-inspection-check"><input type="checkbox" checked={selected} onChange={onToggleSelect} title={translate('순차 실행에 포함')} aria-label={`${translate('순차 실행에 포함')}: ${p.name}`} /></label>
       </td>
-      <td style={TD}>
+      <td className="awb-inspection-name" style={TD}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontWeight: 600, color: tokens.colors.textPrimary }}>{p.name}</span>
+          <button className="awb-inspection-name-button" onClick={stop(onOpen)}>{p.name}</button>
           {!p.enabled && <Pill variant="warning">{translate('disabled')}</Pill>}
         </div>
         <div style={{ fontSize: 11, color: tokens.colors.textMuted, marginTop: 2 }}>{agentName(p.target_agent_id, (p as any).target_runtime)}</div>
       </td>
-      <td style={TD}>
+      <td data-label={translate('Driver')} style={TD}>
         {p.scan_driver ? <Pill variant="info">{p.scan_driver}</Pill> : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={TD}><TargetBadge resourceId={p.target_resource_id} kind={(p as any).target_kind} driverConfig={(p as any).scan_driver_config} />
+      <td data-label={translate('Target')} style={TD}><TargetBadge resourceId={p.target_resource_id} kind={(p as any).target_kind} driverConfig={(p as any).scan_driver_config} />
         <div style={{ marginTop: 2 }}><Pill variant={(p as any).category === 'external' ? 'warning' : 'success'}>{(p as any).category ?? 'internal'}</Pill></div></td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Scope')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{p.scope_mode}</span>
       </td>
-      <td style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Last run')} style={{ ...TD, color: tokens.colors.textSecondary, whiteSpace: 'nowrap' }}>
         {p.last_run_at ? relativeTime(p.last_run_at) : <span style={{ color: tokens.colors.textMuted }}>{translate('never run')}</span>}
       </td>
-      <td style={TD}>
+      <td data-label={translate('Result')} style={TD}>
         {p.last_run_status
           ? <Pill variant={statusVariant(p.last_run_status)}>{p.last_run_status}</Pill>
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={TD}>
+      <td data-label={translate('Worst')} style={TD}>
         {p.highest_severity
           ? <SeverityBadge severity={p.highest_severity} />
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td data-label={translate('Pass')} style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         {p.pass_rate !== null
           ? <span title={translate('{0} run{1}', { 0: p.run_count, 1: p.run_count === 1 ? '' : translate('s') })} style={{ color: p.pass_rate === 100 ? tokens.colors.success : tokens.colors.textSecondary, fontVariantNumeric: 'tabular-nums' }}>{p.pass_rate}%</span>
           : <span style={{ color: tokens.colors.textMuted }}>—</span>}
       </td>
-      <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td className="awb-inspection-actions" style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap' }}>
         <div style={{ display: 'inline-flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
           <Button variant="primary" size="sm" onClick={stop(onRun)} disabled={running}>
             {running ? translate('Starting…') : translate('▶ Run')}
@@ -891,12 +895,12 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
   })();
 
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+    <div className="awb-inspection">
+      <div className="awb-inspection-detail-heading">
         <Button variant="ghost" size="sm" onClick={onBack}>{translate('← Back')}</Button>
-        <div style={{ flex: 1 }}>
+        <div className="awb-inspection-detail-title">
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.colors.textPrimary }}>{profile.name}</div>
-          <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="awb-inspection-meta" style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
             {profile.scan_driver && <Pill variant="info">{profile.scan_driver}</Pill>}
             <TargetBadge resourceId={profile.target_resource_id} kind={(profile as any).target_kind} driverConfig={(profile as any).scan_driver_config} />
             <Pill variant={(profile as any).category === 'external' ? 'warning' : 'success'}>{(profile as any).category ?? 'internal'}</Pill>
@@ -933,11 +937,11 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
       </div>
 
       {/* Run history + detail */}
-      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-        <div style={{ width: 230, flexShrink: 0 }}>
+      <div className="awb-inspection-runs">
+        <div>
           <SectionLabel>{translate('Run history')}</SectionLabel>
           {runs.length === 0 && <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('No runs yet.')}</div>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div className="awb-inspection-history" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {runs.map((r) => {
               const worst = highestSeverity(r.findings);
               return (
@@ -963,7 +967,7 @@ function ProfileDetail({ profile, accountId, agentName, onBack, onRun, running, 
           </div>
         </div>
 
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="awb-inspection-run-detail">
           <SectionLabel>{translate('Run detail')}</SectionLabel>
           {!activeRun ? (
             <div style={{ color: tokens.colors.textSecondary, fontSize: 13 }}>{translate('Select a run.')}</div>
@@ -1319,6 +1323,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
 
   return (
     <Modal
+      className="awb-inspection-dialog"
       isOpen={true}
       onClose={onClose}
       title={profile ? translate('보안 프로파일 수정') : translate('새 보안 프로파일')}
@@ -1355,7 +1360,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
           )}
           onChange={(e) => setTargetResourceId((e.target as HTMLSelectElement).value)}
         />
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div className="awb-inspection-form-row" style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
             <Select
               label={translate('트랙 (내부/외부)')}
@@ -1386,7 +1391,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
             />
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div className="awb-inspection-form-row" style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
             <Input label={translate('Scan driver (code-review / dependency / secrets / nuclei / zap-baseline / nmap / tls-check …)')} value={scanDriver} onChange={(e) => setScanDriver((e.target as HTMLInputElement).value)} />
           </div>
@@ -1410,7 +1415,7 @@ function ProfileEditor({ profile, accountId, agents, onClose, onSaved }: Profile
           <label style={fieldLabel}>{translate('Driver config (JSON)')}</label>
           <textarea style={{ ...textareaStyle, minHeight: 80 }} value={configText} onChange={(e) => setConfigText(e.target.value)} />
         </div>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div className="awb-inspection-form-row" style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 2 }}>
             <Input label={translate('Tags (comma separated)')} value={tagsText} onChange={(e) => setTagsText((e.target as HTMLInputElement).value)} />
           </div>
@@ -1548,6 +1553,7 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
 
   return (
     <Modal
+      className="awb-inspection-dialog"
       isOpen={true}
       onClose={onClose}
       title={schedule ? translate('보안 스케줄 수정') : translate('새 보안 스케줄')}
@@ -1583,7 +1589,7 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
         {/* Scope: 전체 vs 선택 프로파일 토글 */}
         <div>
           <label style={fieldLabel}>{translate('대상 프로파일')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: scope === 'selected' ? 8 : 0 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-scope" checked={scope === 'all'} onChange={() => setScope('all')} />
               {translate('전체 (실행 시점 enabled 프로파일로 자동 확장)')}</label>
@@ -1608,7 +1614,7 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
         {/* Cadence: interval vs cron */}
         <div>
           <label style={fieldLabel}>{translate('실행 주기')}</label>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+          <div className="awb-inspection-choice-row" style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
             <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13, color: tokens.colors.textSecondary, cursor: 'pointer' }}>
               <input type="radio" name="sec-sched-cadence" checked={cadenceKind === 'interval'} onChange={() => setCadenceKind('interval')} />
               {translate('주기 (interval)')}</label>
@@ -1617,7 +1623,7 @@ function ScheduleEditor({ schedule, accountId, profiles, onClose, onSaved }: Sch
               {translate('cron')}</label>
           </div>
           {cadenceKind === 'interval' ? (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div className="awb-inspection-form-row">
               <div style={{ width: 120 }}>
                 <Input label={translate('값')} type="number" value={intervalValue} onChange={(e) => setIntervalValue((e.target as HTMLInputElement).value)} />
               </div>

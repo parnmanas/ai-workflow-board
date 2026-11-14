@@ -46,6 +46,7 @@ for (const width of [390, 1024]) {
     const { writes, errors } = await fixture(page);
     await page.getByLabel('Project', { exact: true }).selectOption('project-a');
     await expect(page.getByText('Scenario b', { exact: true })).toHaveCount(0);
+    if (width === 390) await page.locator('.awb-inspection-toolbar').getByRole('button', { name: 'More actions', exact: true }).click();
     const run = page.getByRole('button', { name: '▶ Run filtered scenarios (1)', exact: true });
     await expect(run).toBeInViewport(); await run.click();
     await expect.poll(() => writes.find(w => w.path === '/qa/batches')?.input.scenario_ids).toEqual(['a']);
