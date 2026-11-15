@@ -247,8 +247,15 @@ test('a timed-out history upload retries a smaller page within the server deadli
   }));
   t.mock.method(store, 'readHistory', async () => ({ session: { cli: 'claude', session_id: CLAUDE_ID, cwd: root }, events, truncated: false, omitted: 0 }));
   const timeouts = [];
-  const realTimeout = AbortSignal.timeout.bind(AbortSignal);
-  t.mock.method(AbortSignal, 'timeout', (ms) => { timeouts.push(ms); return realTimeout(20); });
+  t.mock.method(AbortSignal, 'timeout', (ms) => {
+    timeouts.push(ms);
+    const controller = new AbortController();
+    // This fake transport has no socket to keep Node alive. AbortSignal.timeout's
+    // unref timer can otherwise cancel the entire test file before the abort fires.
+    const timer = setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), 20);
+    t.after(() => clearTimeout(timer));
+    return controller.signal;
+  });
   const transport = globalThis.fetch;
   let attempts = 0;
   const sizes = [];
