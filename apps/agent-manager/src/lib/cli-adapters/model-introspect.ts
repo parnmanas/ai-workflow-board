@@ -9,10 +9,13 @@
 // every path collapses to [] / a curated fallback rather than throwing, because
 // the heartbeat that consumes it must never wedge on model inspection.
 
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { promises as fsp, readFileSync, statSync } from 'node:fs';
 
 import { parseWindowsShimTargets } from '../cli-resolver.js';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Scan an installed CLI binary for embedded strings matching `pattern`.
@@ -24,11 +27,10 @@ export async function scanBinaryStrings(binPath: string, pattern: RegExp): Promi
   const out = new Set<string>();
   const target = resolveShimTarget(binPath, REAL_SHIM_IO);
   try {
-    const raw = execFileSync('strings', ['-n', '6', target], {
+    const { stdout: raw } = await execFileAsync('strings', ['-n', '6', target], {
       encoding: 'latin1',
       timeout: 4000,
       maxBuffer: 256 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
     });
     collectMatches(raw, pattern, out);
     if (out.size) return [...out];

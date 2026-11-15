@@ -3211,6 +3211,7 @@ export interface AgentSessionDetail {
   session: AgentSessionSummary | null;
   live: AgentSessionLiveSnapshot;
   events: AgentSessionEventRecord[];
+  next_before?: string | null;
 }
 
 export interface AgentSessionUpdateEvent {

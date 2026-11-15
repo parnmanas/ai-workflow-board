@@ -11,7 +11,7 @@ import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
 import { api } from '../src/api.ts';
 import { cliCatalog } from '../src/cli/catalog.ts';
 import { resetHostModelsStore } from '../src/cli/hostModels.ts';
-import SessionsPage from '../src/components/sessions/SessionsPage.tsx';
+import SessionsPage, { SessionView } from '../src/components/sessions/SessionsPage.tsx';
 
 const h = React.createElement;
 const fixtures = {
@@ -113,3 +113,50 @@ for (const [cli, initialChoices] of Object.entries(fixtures)) {
     assert.ok(!updatedHeader.some(([id]) => id === 'retired-model'));
   });
 }
+
+test('paged history preserves live arrivals and prepends without a scroll jump', async (t) => {
+  const dom = setupDom();
+  const previousStorage = globalThis.localStorage;
+  globalThis.localStorage = window.localStorage;
+  localStorage.setItem('auth_token', 'paged-history-test');
+  const { FakeEventSource, uninstall } = installFakeEventSource();
+  t.mock.method(api, 'getMe', async () => ({ id: 'u', status: 'active', role: 'admin', resolved_permissions: [], accounts: [{ id: 'account', name: 'Account' }] }));
+  t.mock.method(api, 'getVoiceConfig', async () => null);
+  t.mock.method(api, 'listSessionProposals', async () => ({ proposals: [] }));
+  t.mock.method(api, 'getHostSessionUsageLimits', async () => ({ events: [] }));
+  const live = { manager_id: 'host', manager_name: 'Host', cli: 'codex', session_id: 'paged', cwd: '/repo', title: 'Paged session',
+    status: 'ready', config_options: [], available_modes: [], available_commands: [], current_mode: null,
+    pending_permissions: [], pending_elicitations: [], auth: null, last_error: null, updated_at: new Date().toISOString() };
+  const event = (id, text) => ({ id, seq: Number(id), type: 'text', turn_id: id, payload: { text }, created_at: new Date().toISOString() });
+  const latest = event('3', 'Recent answer');
+  const reads = [];
+  t.mock.method(api, 'getHostSession', (_host, _cli, _session, before) => new Promise((resolve) => reads.push({ before, resolve })));
+  const view = mount(h(MemoryRouter, null, h(AuthProvider, null, h(BoardStreamProvider, null,
+    h(SessionView, { accountId: 'account', managerId: 'host', cli: 'codex', sessionId: 'paged', host: null, onNew() {} })))));
+  t.after(() => { view.unmount(); uninstall(); dom.cleanup(); globalThis.localStorage = previousStorage; });
+  await settle();
+  const emit = (item) => act(() => FakeEventSource.instances.at(-1).emit('agent_session_event', {
+    manager_id: 'host', cli: 'codex', session_id: 'paged', event: item,
+  }));
+  emit(event('4', 'Arrived during initial load'));
+  await act(async () => reads[0].resolve({ session: { session_id: 'paged', cwd: '/repo', title: 'Paged session' }, live, events: [latest], next_before: '3' }));
+  await settle();
+  const transcript = view.container.querySelector('.awb-session-transcript');
+  assert.match(transcript.textContent, /Recent answer/);
+  assert.match(transcript.textContent, /Arrived during initial load/);
+  const older = button('이전 기록 더 보기');
+  click(older); click(older);
+  assert.equal(reads.length, 2, 'two clicks must not create two page requests');
+  assert.equal(reads[1].before, '3');
+  emit(event('5', 'Arrived during older load'));
+  await settle();
+  Object.defineProperty(transcript, 'scrollHeight', { configurable: true, get: () => transcript.textContent.includes('Earlier answer') ? 1200 : 1000 });
+  Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 300 });
+  transcript.scrollTop = 10;
+  await act(async () => reads[1].resolve({ session: null, live, events: [event('1', 'Earlier answer'), latest], next_before: null }));
+  await settle();
+  assert.equal((transcript.textContent.match(/Recent answer/g) ?? []).length, 1);
+  assert.match(transcript.textContent, /Earlier answer[\s\S]*Recent answer[\s\S]*Arrived during initial load[\s\S]*Arrived during older load/);
+  assert.equal(transcript.scrollTop, 210, 'prepend preserves the content the reader was looking at');
+  assert.equal(button('이전 기록 더 보기'), undefined);
+});

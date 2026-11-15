@@ -306,29 +306,32 @@ function HostProjectsView({ accountId, managerId, host, onNew, onNewWithCwd }: {
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState<string | null>(null); // cli 이름
+  const cliKey = JSON.stringify(host?.clis ?? []);
+  const instanceId = host?.instance_id;
 
   const load = useCallback(async () => {
-    if (!host) return;
+    if (!instanceId) return;
+    const clis = JSON.parse(cliKey) as string[];
     const sequence = ++loadSequenceRef.current;
     const checkpoint = listUpdatesRef.current.checkpoint();
     setLoading(true);
-    const results: Record<string, AgentSessionSummary[]> = {};
+    setSessionsByCli((prev) => Object.fromEntries(clis.map((cli) => [cli, prev[cli] ?? []])));
     const errs: string[] = [];
-    await Promise.all(host.clis.map(async (cli) => {
+    setErrors([]);
+    await Promise.all(clis.map(async (cli) => {
       try {
         const list = await api.listHostSessions(managerId, cli);
-        results[cli] = Array.isArray(list) ? list : [];
+        if (loadSequenceRef.current !== sequence) return;
+        const merged = listUpdatesRef.current.merge(managerId, cli, Array.isArray(list) ? list : [], checkpoint);
+        setSessionsByCli((prev) => ({ ...prev, [cli]: merged }));
       } catch (err: any) {
         errs.push(`${runtimeLabel(cli)}: ${err?.message || translate('fetch failed')}`);
-        results[cli] = [];
       }
     }));
     if (loadSequenceRef.current !== sequence) return;
-    for (const cli of host.clis) results[cli] = listUpdatesRef.current.merge(managerId, cli, results[cli] ?? [], checkpoint);
-    setSessionsByCli(results);
     setErrors(errs);
     setLoading(false);
-  }, [host, managerId]);
+  }, [cliKey, instanceId, managerId]);
 
   useEffect(() => { void load(); return () => { loadSequenceRef.current++; }; }, [load]);
 
@@ -434,6 +437,11 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
     setLiveRaw((prev) => mergeLiveSnapshot(prev, next));
   }, []);
   const [events, setEvents] = useState<AgentSessionEventRecord[]>([]);
+  const [nextHistoryBefore, setNextHistoryBefore] = useState<string | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderPendingRef = useRef(false);
+  const historyGenerationRef = useRef(0);
+  const historyLiveRef = useRef<AgentSessionEventRecord[] | null>(null);
   const refreshedUsage = useSessionUsageRefresh(accountId, managerId, cli, sessionId);
   const usageEvents = useMemo(() => [...events, ...refreshedUsage], [events, refreshedUsage]);
   const [loading, setLoading] = useState(true);
@@ -520,22 +528,35 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   const contentRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
+    const generation = ++historyGenerationRef.current;
+    historyLiveRef.current = [];
+    olderPendingRef.current = false;
+    setLoadingOlder(false);
+    setNextHistoryBefore(null);
     setLoading(true);
     try {
       const detail = await api.getHostSession(managerId, cli, sessionId);
+      if (generation !== historyGenerationRef.current) return;
       setSummary(detail.session);
       setLive(detail.live);
-      setEvents(Array.isArray(detail.events) ? detail.events : []);
+      let loaded = Array.isArray(detail.events) ? detail.events : [];
+      for (const event of historyLiveRef.current ?? []) loaded = appendLiveEvent(loaded, event);
+      setEvents(loaded);
+      setNextHistoryBefore(detail.next_before ?? null);
       setError(null);
     } catch (err: any) {
-      setError(err?.message || translate('Failed to load the session from the Runtime Host'));
+      if (generation === historyGenerationRef.current) setError(err?.message || translate('Failed to load the session from the Runtime Host'));
     } finally {
-      setLoading(false);
+      if (generation === historyGenerationRef.current) {
+        historyLiveRef.current = null;
+        setLoading(false);
+      }
     }
   }, [managerId, cli, sessionId]);
 
   useEffect(() => {
     void load();
+    return () => { historyGenerationRef.current++; };
   }, [load]);
 
   const matches = useCallback((d: { manager_id?: string; cli?: string; session_id?: string } | null | undefined) =>
@@ -548,6 +569,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
 
   useBoardStreamEvent('agent_session_event', useCallback((data: AgentSessionEventEvent) => {
     if (!matches(data) || !data.event) return;
+    if (historyLiveRef.current) historyLiveRef.current = appendLiveEvent(historyLiveRef.current, data.event);
     setEvents((prev) => appendLiveEvent(prev, data.event));
     // 보고 있는 화면에서만 읽는다. 다른 화면에 있을 때 알리는 것은 음성 알림의 몫이다.
     // 이름을 불러 깨운 대화는 탭이 숨어 있어도 읽는다 — 켜 둔 단말을 스피커처럼 쓰는 경우다.
@@ -696,15 +718,41 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   }, [loading, live, connecting, status, managerId, cli, sessionId, connect]);
 
   // 스크롤 규칙(첫 진입 바닥 고정 · 근접 추종 · 비동기 높이 재고정)은 chat 방·미션
-  // 대화·미션 step 세션과 같은 훅이 맡는다. 전사는 페이지네이션이 없어 onLoadOlder 가 없다.
-  const { atBottom: follow, scrollToBottom } = useConversationScroll({
+  // 대화·미션 step 세션과 같은 훅이 맡는다.
+  const { atBottom: follow, scrollToBottom, preserveScrollPosition } = useConversationScroll({
     scrollRef,
     contentRef,
     resetKey: `${managerId}/${cli}/${sessionId}`,
-    tailKey: blocks.length,
+    tailKey: blocks.at(-1)?.key ?? null,
     contentKey: blocks.length,
     ready: !loading && blocks.length > 0,
   });
+
+  const loadOlder = async () => {
+    if (!nextHistoryBefore || olderPendingRef.current || loading) return;
+    const generation = historyGenerationRef.current;
+    const before = nextHistoryBefore;
+    olderPendingRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const detail = await api.getHostSession(managerId, cli, sessionId, before);
+      if (generation !== historyGenerationRef.current) return;
+      preserveScrollPosition();
+      setEvents((current) => {
+        const seen = new Set(current.map((event) => event.id));
+        return [...(detail.events ?? []).filter((event) => !seen.has(event.id)), ...current];
+      });
+      setNextHistoryBefore(detail.next_before === before ? null : detail.next_before ?? null);
+      setError(null);
+    } catch (err: any) {
+      if (generation === historyGenerationRef.current) setError(err?.message || translate('Failed to load the session from the Runtime Host'));
+    } finally {
+      if (generation === historyGenerationRef.current) {
+        olderPendingRef.current = false;
+        setLoadingOlder(false);
+      }
+    }
+  };
 
   const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
@@ -814,13 +862,13 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   // 전사의 이미지 바이트. `<img src>` 는 Authorization 헤더를 못 보내므로 전사가 URL 이
   // 아니라 Blob 을 받아 쓴다 — 토큰을 쿼리로 노출하는 두 번째 인증 경로를 만들지 않기 위해서다.
   const loadImage = useCallback(
-    (imageRef: string) => api.getHostSessionImage(managerId, cli, sessionId, imageRef),
+    (imageRef: string, signal?: AbortSignal) => api.getHostSessionImage(managerId, cli, sessionId, imageRef, signal),
     [managerId, cli, sessionId],
   );
   // 에이전트가 답에 경로로 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) — 매니저가 그 장비에서 읽어 준다.
   // 상대 경로의 기준으로 화면이 아는 cwd 를 함께 보낸다(살아 있는 세션이면 매니저가 자기 cwd 를 쓴다).
   const loadLocalImage = useCallback(
-    (path: string) => api.getHostSessionLocalImage(managerId, cli, sessionId, path, cwd),
+    (path: string, signal?: AbortSignal) => api.getHostSessionLocalImage(managerId, cli, sessionId, path, cwd, signal),
     [managerId, cli, sessionId, cwd],
   );
   // 답에 경로로 적은 영상 — 같은 경로 규칙으로 매니저가 조각을 읽어 주고, 전사가 끝까지 모아 재생한다.
@@ -1134,6 +1182,11 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
       />
 
       <div className="awb-session-transcript" ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
+        {nextHistoryBefore && (
+          <Button variant="ghost" size="sm" disabled={loadingOlder || loading} onClick={() => void loadOlder()}>
+            {loadingOlder ? translate('Loading…') : translate('이전 기록 더 보기')}
+          </Button>
+        )}
         {loading && events.length === 0 ? (
           <div style={{ color: tokens.colors.textMuted, fontSize: 13 }}>{translate('Reading the session from the Runtime Host…')}</div>
         ) : blocks.length === 0 ? (

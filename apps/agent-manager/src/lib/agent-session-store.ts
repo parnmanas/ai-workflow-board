@@ -132,6 +132,18 @@ export function refitHistory(history: HistoryResult, maxBytes: number): HistoryR
   return { ...history, ...fitHistoryWindow(history.session.session_id, body, history.omitted, maxBytes) };
 }
 
+/** Page backwards by stable native event id, so appending a turn does not shift the cursor. */
+export function pageHistory(history: HistoryResult, before?: string, maxBytes = 128 * 1024): HistoryResult & { next_before: string | null } {
+  const end = before ? history.events.findIndex((event) => event.id === before) : history.events.length;
+  if (end < 0) {
+    throw Object.assign(new Error('This history page is no longer available. Reload the session to read the latest history.'), { code: 'history_cursor_expired' });
+  }
+  const candidates = history.events.slice(0, end);
+  const bytes = Number.isFinite(maxBytes) ? Math.max(16 * 1024, Math.min(256 * 1024, maxBytes)) : 128 * 1024;
+  const events = fitHistoryBytes(candidates, bytes);
+  return { ...history, events, next_before: events.length < candidates.length ? events[0].id : null };
+}
+
 /** `defaultExec` 출력 상한 — 예전 execFile `maxBuffer` 와 같은 값이다. */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
 

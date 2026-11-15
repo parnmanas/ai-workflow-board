@@ -73,6 +73,8 @@ export interface ConversationScrollApi {
   /** 지금 바닥에 붙어 있는가 — "↓ 최신으로" 버튼의 표시 조건. */
   atBottom: boolean;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
+  /** Capture immediately before a manually requested older page is prepended. */
+  preserveScrollPosition: () => void;
 }
 
 export function useConversationScroll({
@@ -90,6 +92,11 @@ export function useConversationScroll({
   const nearBottomRef = useRef(true);
   const anchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+
+  const preserveScrollPosition = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+  }, [scrollRef]);
 
   const setNearBottom = useCallback((value: boolean) => {
     nearBottomRef.current = value;
@@ -189,5 +196,5 @@ export function useConversationScroll({
     return () => el.removeEventListener('scroll', onScroll);
   }, [scrollRef, onLoadOlder, setNearBottom, resetKey]);
 
-  return { atBottom, scrollToBottom };
+  return { atBottom, scrollToBottom, preserveScrollPosition };
 }

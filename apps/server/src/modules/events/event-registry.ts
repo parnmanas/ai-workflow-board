@@ -1109,6 +1109,7 @@ export const EVENT_TYPES: EventDefinition[] = [
           plugin_version: String(inst.plugin_version || 'unknown'),
           cli: String(inst.cli || DEFAULT_CLI_ID),
           cli_adapters: Array.isArray(inst.cli_adapters) ? inst.cli_adapters.map(String) : [],
+          acp_session_clis: Array.isArray(inst.acp_session_clis) ? inst.acp_session_clis.map(String) : undefined,
           runtime_capabilities:
             inst.runtime_capabilities
             && typeof inst.runtime_capabilities === 'object'
@@ -1375,6 +1376,8 @@ export const EVENT_TYPES: EventDefinition[] = [
         cli: event.cli,
         op: event.op,
         request_id: event.request_id,
+        history_before: event.history_before,
+        history_page_bytes: event.history_page_bytes,
         session_id: event.session_id ?? null,
         cwd: event.cwd,
         title: event.title,

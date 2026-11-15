@@ -24,6 +24,8 @@ export function useAgentSessionsNav(accountId: string | null): AgentSessionsNav 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generationRef = useRef(0);
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
 
   const fetchHosts = useCallback(async (accountId: string, generation: number) => {
     setLoading(true);
@@ -59,8 +61,22 @@ export function useAgentSessionsNav(accountId: string | null): AgentSessionsNav 
     return () => window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, reload);
   }, [accountId, fetchHosts]);
 
-  useBoardStreamEvent('agent_instance_update', () => {
-    if (accountId) void fetchHosts(accountId, generationRef.current);
+  useBoardStreamEvent('agent_instance_update', (data: any) => {
+    if (!accountId) return;
+    const instance = data?.instance;
+    if (instance?.account_id && instance.account_id !== accountId) return;
+    if (instance?.mode && instance.mode !== 'manager') return;
+    const known = hostsRef.current.find((host) => host.manager_id === instance?.agent_id);
+    if (data?.action === 'updated' && known && known.instance_id === instance.instance_id
+      && known.hostname === instance.hostname && known.plugin_version === instance.plugin_version
+      && Array.isArray(instance.acp_session_clis)
+      && JSON.stringify(known.clis) === JSON.stringify(instance.acp_session_clis)) {
+      // Ordinary presence carries everything that changed. No REST round trip.
+      setHosts((prev) => prev.map((host) => host.manager_id === known.manager_id
+        ? { ...host, last_seen_at: instance.last_seen_at ?? host.last_seen_at } : host));
+      return;
+    }
+    void fetchHosts(accountId, generationRef.current);
   });
 
   // 이 브라우저의 SSE 가 다시 붙으면(대개 서버 재시작) 그 사이의 매니저 등록 이벤트를 놓쳤다 — 다시 받는다.

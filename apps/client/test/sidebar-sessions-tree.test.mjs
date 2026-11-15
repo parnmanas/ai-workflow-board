@@ -96,6 +96,9 @@ function installFetchStub({ hosts, sessionsByCli, permissions, control = {} }) {
   const json = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
   globalThis.fetch = (url) => {
     const path = String(url);
+    control.requests?.push(path);
+    const override = control.respond?.(path);
+    if (override !== undefined) return override;
     const sessionList = /\/agent-sessions\/hosts\/([^/]+)\/([^/]+)\/sessions$/.exec(path);
     if (sessionList && control.failSessionList) {
       return Promise.resolve({ ok: false, status: 504, json: async () => ({ error: 'The Runtime Host did not respond in time.' }) });
@@ -206,7 +209,7 @@ async function mountSidebar(t, options = {}) {
                   rooms: [],
                   roomsLoading: false,
                 }),
-                withSessionPage ? h(Routes, null, h(Route, { path: '/sessions/:managerId', element: h(SessionsPage) })) : null,
+                withSessionPage ? h(Routes, null, h(Route, { path: '/sessions/:managerId', element: h('main', null, h(SessionsPage)) })) : null,
               ),
             ),
           ),
@@ -239,9 +242,9 @@ async function mountSidebar(t, options = {}) {
   };
 
   /** 매니저 인스턴스 등록/제거 SSE(하트비트가 처음 들어오거나 TTL 로 빠질 때). */
-  const emitInstanceUpdate = async (action, agentId = MANAGER_ID) => {
+  const emitInstanceUpdate = async (action, agentId = MANAGER_ID, fields = {}) => {
     for (const es of FakeEventSource.instances) {
-      es.emit('agent_instance_update', { action, instance: { agent_id: agentId, mode: 'manager' }, timestamp: ago(0) });
+      es.emit('agent_instance_update', { action, instance: { agent_id: agentId, mode: 'manager', ...fields }, timestamp: ago(0) });
     }
     await flush();
   };
@@ -581,3 +584,48 @@ for (const [old, current, tone] of [['ready', 'busy', 'live'], ['busy', 'ready',
     assert.equal(dotTone(), tone, 'the fallback cache includes the latest live status');
   });
 }
+
+test('ordinary heartbeats do not reload the host catalog or the selected host sessions', async (t) => {
+  const control = { requests: [] };
+  const { view, emitInstanceUpdate } = await mountSidebar(t, { control, withSessionPage: true, entry: `/sessions/${MANAGER_ID}` });
+  const reads = () => control.requests.filter((path) => path.includes('/agent-sessions/'));
+  const initial = reads().length;
+  assert.ok(initial > 0);
+  for (let i = 0; i < 12; i++) {
+    await emitInstanceUpdate('updated', MANAGER_ID, {
+      instance_id: HOST.instance_id, hostname: HOST.hostname, plugin_version: HOST.plugin_version,
+      account_id: WS_ID, acp_session_clis: HOST.clis, last_seen_at: new Date(Date.now() + i * 30_000).toISOString(),
+    });
+  }
+  assert.equal(reads().length, initial, 'a minute of presence must not become repeated full scans');
+  assert.ok(hasRow(hostsTree(view), 'awb 리뷰'));
+});
+
+test('one slow CLI does not hold the other CLI session list behind its timeout', async (t) => {
+  let finish;
+  const gate = new Promise((resolve) => { finish = resolve; });
+  const control = {
+    respond: (path) => path.endsWith('/codex/sessions') ? gate.then(() => ({ ok: true, status: 200, json: async () => [] })) : undefined,
+  };
+  const { view } = await mountSidebar(t, { control, withSessionPage: true, entry: `/sessions/${MANAGER_ID}` });
+  try {
+    assert.ok(view.container.querySelector('main').textContent.includes('awb 리뷰'), 'Claude sessions are usable while Codex is still pending');
+  } finally {
+    finish();
+    await flush();
+  }
+});
+
+test('a capability change removes sessions for a CLI the host no longer offers', async (t) => {
+  const hosts = [{ ...HOST }];
+  const { view, emitInstanceUpdate } = await mountSidebar(t, { hosts, withSessionPage: true, entry: `/sessions/${MANAGER_ID}` });
+  const page = view.container.querySelector('main');
+  assert.ok(page.textContent.includes('codex 실험'));
+  hosts[0] = { ...HOST, clis: ['claude'] };
+  await emitInstanceUpdate('updated', MANAGER_ID, {
+    instance_id: HOST.instance_id, hostname: HOST.hostname, plugin_version: HOST.plugin_version,
+    account_id: WS_ID, acp_session_clis: ['claude'],
+  });
+  assert.ok(page.textContent.includes('awb 리뷰'));
+  assert.ok(!page.textContent.includes('codex 실험'));
+});

@@ -238,6 +238,7 @@ const LIVE_TTL_MS = 24 * 60 * 60_000;
 const RPC_ERROR_STATUS: Record<string, number> = {
   timeout: HOST_RPC_TIMEOUT_STATUS,
   not_found: 404,
+  history_cursor_expired: 409,
   // local_image — 경로가 이미지 파일이 아니거나(415), 너무 크거나(413), 경로 모양이 틀렸다(400).
   invalid_path: 400,
   not_image: 415,
@@ -1205,11 +1206,18 @@ export class AgentSessionsService implements OnModuleDestroy {
     managerId: string,
     cli: string,
     sessionId: string,
-  ): Promise<{ session: AgentSessionSummary | null; live: AgentSessionLiveSnapshot; events: AgentSessionEventRecord[] }> {
+    before?: string,
+  ): Promise<{ session: AgentSessionSummary | null; live: AgentSessionLiveSnapshot; events: AgentSessionEventRecord[]; next_before: string | null }> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
+    if (before !== undefined && (typeof before !== 'string' || before.length > 512 || !before.length)) {
+      throw new AgentSessionError(400, 'history_cursor_invalid');
+    }
     const revisionBefore = this.liveRevision;
-    const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown }>(managerId, cli, 'history', { account_id: accountId, session_id: sessionId }, userId);
+    const result = await this.rpc<{ session?: unknown; events?: unknown; live?: unknown; next_before?: unknown }>(managerId, cli, 'history', {
+      account_id: accountId, session_id: sessionId, history_page_bytes: 128 * 1024,
+      ...(before ? { history_before: before } : {}),
+    }, userId);
     const summary = this.normalizeSummary(cli, result?.session);
     const events = Array.isArray(result?.events)
       ? result.events.map((e: any, i: number) => this.normalizeEvent(e, i)).filter((e): e is AgentSessionEventRecord => !!e)
@@ -1247,7 +1255,9 @@ export class AgentSessionsService implements OnModuleDestroy {
       });
     }
     if (!advancedDuringRead) this.reconcileWithManager(state, reportedStatus, 'history', reportedLive ?? undefined);
-    return { session: summary, live: this.snapshot(state), events };
+    const next = result?.next_before;
+    return { session: summary, live: this.snapshot(state), events,
+      next_before: typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== before ? next : null };
   }
 
   // ─── 사용자 쓰기 ───────────────────────────────────────────────────────

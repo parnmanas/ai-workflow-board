@@ -21,6 +21,60 @@ function setup(t) {
   t.after(() => dom.cleanup());
 }
 
+test('offscreen images stay idle; visible images use at most three transfers and unmount cancels the queue', async (t) => {
+  setup(t);
+  const originalObserver = globalThis.IntersectionObserver;
+  const observers = [];
+  globalThis.IntersectionObserver = class {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe(target) { this.target = target; }
+    disconnect() {}
+  };
+  t.after(() => { if (originalObserver === undefined) delete globalThis.IntersectionObserver; else globalThis.IntersectionObserver = originalObserver; });
+  const transfers = [];
+  globalThis.fetch.mock.mockImplementation((_url, init) => new Promise((resolve, reject) => {
+    transfers.push({ resolve, signal: init.signal });
+    init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+  }));
+  const events = Array.from({ length: 22 }, (_, i) => ({ id: String(i), seq: i + 1, type: 'image', turn_id: 'turn',
+    payload: { image_ref: `ref-${i}`, mime_type: 'image/png' }, created_at: new Date().toISOString() }));
+  const view = mount(React.createElement(SessionTranscript, {
+    blocks: buildTranscript(events), decidingRequestId: null, permissionsEnabled: true, onDecidePermission() {},
+    loadImage: (ref, signal) => api.getHostSessionImage('host', 'claude', 'session', ref, signal),
+  }));
+  await act(async () => {});
+  assert.equal(transfers.length, 0);
+  assert.equal(observers.length, 22);
+  await act(async () => { for (const observer of observers) observer.callback([{ isIntersecting: true, target: observer.target }]); });
+  assert.equal(transfers.length, 3);
+  view.unmount();
+  await act(async () => {});
+  assert.ok(transfers.every((item) => item.signal.aborted));
+  assert.equal(transfers.length, 3, 'nineteen queued images never start after navigation');
+});
+
+test('concurrent session reads share one fetch but account and login boundaries never share responses', async (t) => {
+  setup(t);
+  const replies = [];
+  globalThis.fetch.mock.mockImplementation(() => new Promise((resolve) => replies.push(resolve)));
+  localStorage.setItem('auth_token', 'user-a');
+  const a = api.listAgentSessionHosts('account-a');
+  const duplicate = api.listAgentSessionHosts('account-a');
+  const otherAccount = api.listAgentSessionHosts('account-b');
+  localStorage.setItem('auth_token', 'user-b');
+  const otherUser = api.listAgentSessionHosts('account-a');
+  assert.equal(replies.length, 3);
+  replies.forEach((reply, i) => reply(Response.json([{ manager_id: String(i) }])));
+  const [first, second, third, fourth] = await Promise.all([a, duplicate, otherAccount, otherUser]);
+  assert.deepEqual(first, second);
+  assert.notDeepEqual(first, third);
+  assert.notDeepEqual(first, fourth);
+  const reload = api.listAgentSessionHosts('account-a');
+  assert.equal(replies.length, 4, 'completed reads do not turn into a stale cache');
+  replies[3](Response.json([]));
+  await reload;
+});
+
 for (const [kind, load] of Object.entries(loaders)) {
   test(`${kind}: a gateway HTML error stays concise and retry recovers the image`, async (t) => {
     setup(t);
@@ -90,7 +144,9 @@ test('image: the event mime types the untyped bytes so downloads get an extensio
     loadImage: (ref) => api.getHostSessionImage('host', 'claude', 'session', ref),
   }));
   t.after(() => view.unmount());
-  await act(async () => {});
+  for (let i = 0; i < 20 && made.length < 2; i++) {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
   assert.deepEqual(made.map((blob) => blob.type).sort(), ['application/octet-stream', 'image/png'], 'PNG is typed, SVG stays bytes');
   for (const blob of made) assert.equal(await blob.text(), 'image bytes', 'typing keeps the bytes');
 });

@@ -18,7 +18,7 @@ import { access, constants as fsConstants, lstat, mkdir, readFile, readdir, rm, 
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
-import { AgentSessionStore, refitHistory, type HistoryEvent, type HistoryResult, type SessionSummary } from './agent-session-store.js';
+import { AgentSessionStore, pageHistory, refitHistory, type HistoryEvent, type HistoryResult, type SessionSummary } from './agent-session-store.js';
 import { AgentSessionDelivery } from './agent-session-delivery.js';
 import { normalizeSessionUsage, usageEventPayload } from './session-usage.js';
 import { describeSessionFailure } from './session-failure.js';
@@ -94,6 +94,9 @@ export interface AgentSessionRequest {
   mode_id?: string;
   /** image — 보관된 이미지 참조(이벤트 payload 의 `image_ref`). */
   image_ref?: string;
+  /** history — bounded pages, newest first; absent keeps the legacy response. */
+  history_before?: string;
+  history_page_bytes?: number;
   /** local_image · local_video — 에이전트가 답에 적은 미리보기 파일 경로(`![alt](path)` 이미지·html·md·영상). 상대 경로는 세션 cwd 기준. */
   image_path?: string;
   /** local_video — 읽을 조각의 시작 바이트와 최대 길이(매니저가 조각 상한으로 다시 자른다). */
@@ -835,21 +838,27 @@ export class AgentSessionRunner {
           // 아직 결정되지 않은 permission 요청은 CLI 홈 파일에 없다(SSE 로만 흘렀다). 화면을
           // 다시 열거나 새로고침한 사용자가 "Needs your approval" 만 보고 카드는 못 보는 일이
           // 없도록 기록 끝에 다시 실어 보낸다 — id 가 같아 라이브로 이미 받은 행과 겹치지 않는다.
-          const pending = live
+          const pending = live && !request.history_before
             ? [...live.pendingPermissions.values(), ...live.pendingElicitations.values(), ...live.asyncQuestions.values()].map((p) => p.event)
             : [];
           const state = live ? this.#stateOf(live) : null;
-          const reply = (h: HistoryResult): AgentSessionRpcBody => ({
+          const reply = (h: HistoryResult & { next_before?: string | null }): AgentSessionRpcBody => ({
             ok: true,
             result: {
               session: h.session ?? (live ? this.#summaryOf(live) : null),
               events: pending.length ? [...h.events, ...pending.map((e, i) => ({ ...e, seq: h.events.length + i + 1 }))] : h.events,
               truncated: h.truncated,
+              ...(h.next_before !== undefined ? { next_before: h.next_before } : {}),
               live: state,
             },
           });
           // 거절되면 창을 줄여 다시 보낸다 — 최근 대화만이라도 열리는 것이 40초 뒤 에러보다 낫다.
-          await this.#reply(requestId, op, reply(history), ...HISTORY_RETRY_BYTES.map((max) => () => reply(refitHistory(history, max))));
+          if (request.history_page_bytes !== undefined || request.history_before) {
+            const page = (max?: number) => reply(pageHistory(history, request.history_before, max ?? request.history_page_bytes));
+            await this.#reply(requestId, op, page(), () => page(64 * 1024), () => page(16 * 1024));
+          } else {
+            await this.#reply(requestId, op, reply(history), ...HISTORY_RETRY_BYTES.map((max) => () => reply(refitHistory(history, max))));
+          }
           return;
         }
         case 'open': {
@@ -874,18 +883,41 @@ export class AgentSessionRunner {
    */
   async #reply(requestId: string, op: string, body: AgentSessionRpcBody, ...smaller: Array<() => AgentSessionRpcBody>): Promise<void> {
     const managerId = this.#options.getManagerId();
-    let sent = await postAgentSessionRpcResponse(this.#config, managerId, requestId, body, op);
-    for (const next of smaller) {
-      if (sent.status !== 413) return;
-      log(`[agent-session] ${op} response rejected as too large (HTTP 413) — retrying with a smaller one`);
-      sent = await postAgentSessionRpcResponse(this.#config, managerId, requestId, next(), op);
+    // Retry only delivery of the same result/request id, never the operation (especially session/new).
+    // A 30s failed upload used to consume the history RPC's entire 40s deadline.
+    const short = ['list', 'info', 'usage_limits'].includes(op);
+    const retryTransport = short || op === 'history' || op === 'open';
+    const budget = short ? 12_000 : 24_000;
+    const deadline = performance.now() + budget;
+    let failures = 0;
+    let status = 0;
+    while (true) {
+      const remaining = Math.floor(deadline - performance.now());
+      if (retryTransport && remaining <= 0) break;
+      const sent = await postAgentSessionRpcResponse(this.#config, managerId, requestId, body, op,
+        retryTransport ? Math.max(1, Math.min(short ? 4_000 : 8_000, remaining)) : undefined);
+      status = sent.status;
+      if (sent.ok) return;
+      const next = smaller.shift();
+      if (status === 413 && next) {
+        log(`[agent-session] ${op} response rejected as too large (HTTP 413) — retrying with a smaller one`);
+        body = next();
+        continue;
+      }
+      const transient = status === 0 || status === 408 || status === 429 || status >= 500;
+      if (!retryTransport || !transient || ++failures >= 3) break;
+      if (next) body = next();
+      log(`[agent-session] ${op} response delivery failed (HTTP ${status}); retrying request ${requestId.slice(0, 8)}`);
+      await new Promise((resolve) => setTimeout(resolve, failures * 200));
     }
-    if (sent.status !== 413) return;
+    if (status !== 413 && !(retryTransport && (status === 0 || status === 408 || status === 429 || status >= 500))) return;
     await postAgentSessionRpcResponse(this.#config, managerId, requestId, {
       ok: false,
-      code: 'too_large',
-      error: `The Runtime Host's ${op} response was rejected as too large (HTTP 413) by the AWB server or a proxy in front of it.`,
-    }, op);
+      code: status === 413 ? 'too_large' : 'response_delivery_failed',
+      error: status === 413
+        ? `The Runtime Host's ${op} response was rejected as too large (HTTP 413) by the AWB server or a proxy in front of it.`
+        : `The Runtime Host could not transfer its ${op} response. Please retry.`,
+    }, op, 1_000);
   }
 
   async stopAll(reason = 'manager_shutdown'): Promise<void> {
@@ -930,9 +962,9 @@ export class AgentSessionRunner {
     let cwd = requestedCwd.trim();
     if (requestedSessionId) {
       // Restore metadata even when the caller already supplied a working directory.
-      const history = await this.#store.readHistory(cli, requestedSessionId).catch(() => null);
-      cwd ||= history?.session?.cwd || '';
-      title = history?.session?.title || title;
+      const info = await this.#store.readSessionInfo(cli, requestedSessionId).catch(() => null);
+      cwd ||= info?.session?.cwd || '';
+      title = info?.session?.title || title;
     }
     validateSessionLaunchOptions(cli, request.config_defaults);
     const workspace = await this.#workspaces.prepare(cli, requestedSessionId, cwd, String(request.config_defaults?.[SESSION_WORKFLOW_KEY] ?? 'main'));

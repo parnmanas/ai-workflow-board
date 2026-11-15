@@ -732,6 +732,7 @@ export interface AgentInstanceUpdatePayload {
     plugin_version: string;
     cli: string;
     cli_adapters: string[];
+    acp_session_clis?: string[];
     runtime_capabilities?: Record<string, {
       installed: boolean;
       healthy: boolean;
@@ -999,6 +1000,9 @@ export interface AgentSessionRequestPayload {
   // 따라오지 않아 컴파일러가 서버 코드를 막았다(실제로 'restart' 추가 때 걸렸다).
   op: AgentSessionRequestOp;
   request_id?: string;
+  /** history — bounded pages before a stable native event id. */
+  history_before?: string;
+  history_page_bytes?: number;
   /** open(신규)일 때만 null. */
   session_id?: string | null;
   cwd?: string;

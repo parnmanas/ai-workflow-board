@@ -264,6 +264,20 @@ function accountHeaders(accountId: string): Record<string, string> {
   return { ...getAuthHeaders(), 'X-Account-Id': accountId };
 }
 
+// Sidebar and page subscribe to the same stream. Share only in-flight reads;
+// never reuse a previous user's/account's response or suppress an explicit reload.
+const sessionReads = new Map<string, Promise<unknown>>();
+function sessionRead<T>(path: string, options?: RequestInit): Promise<T> {
+  const key = JSON.stringify([apiBase(), path, getAuthHeaders(), options?.headers]);
+  const existing = sessionReads.get(key);
+  if (existing) return existing as Promise<T>;
+  const pending = request<T>(path, options).finally(() => {
+    if (sessionReads.get(key) === pending) sessionReads.delete(key);
+  });
+  sessionReads.set(key, pending);
+  return pending;
+}
+
 /** Error thrown by `request` — `code` is the server slug, `body` the parsed JSON error body. */
 export type ApiError = Error & { code?: string; status?: number; body?: any };
 
@@ -1794,7 +1808,7 @@ export const api = {
   listAgentSessionHosts: (accountId?: string) => {
     const init: RequestInit = {};
     if (accountId) init.headers = { ...getAuthHeaders(), 'X-Account-Id': accountId };
-    return request<AgentSessionHost[]>('/agent-sessions/hosts', init);
+    return sessionRead<AgentSessionHost[]>('/agent-sessions/hosts', init);
   },
   getHostCliSettings: (managerId: string, cli: string) =>
     request<AgentSessionCliSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/settings`),
@@ -1818,7 +1832,7 @@ export const api = {
       }),
     }),
   listHostSessions: (managerId: string, cli: string) =>
-    request<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),
+    sessionRead<AgentSessionSummary[]>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions`),
   /** `force` 는 세션 잠금을 쥔 외부 프로세스까지 종료하고 연다 — 매니저가 그 프로세스의
    *  이름·PID 를 `resume_locked_external` 오류로 알려 준 뒤, 확인 대화상자를 거쳐서만 켠다. */
   openHostSession: (managerId: string, cli: string, input: { session_id?: string | null; cwd?: string; title?: string; force?: boolean; config_overrides?: Record<string, string | boolean | null> }) =>
@@ -1828,27 +1842,27 @@ export const api = {
     }),
   getHostSessionUsageLimits: (managerId: string, cli: string, sessionId: string) =>
     request<{ events: AgentSessionEventRecord[] }>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/usage-limits`),
-  getHostSession: (managerId: string, cli: string, sessionId: string) =>
-    request<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}`),
+  getHostSession: (managerId: string, cli: string, sessionId: string, before?: string) =>
+    sessionRead<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}${before ? `?before=${encodeURIComponent(before)}` : ''}`),
   /**
    * 세션이 내보낸 이미지 한 장의 **바이트**. `<img src>` 는 Authorization 헤더를 보낼 수
    * 없으므로, 토큰을 쿼리로 노출하는 별도 인증 경로를 만드는 대신(로그·referrer 로 새어
    * 나간다) 여기서 헤더로 받아 Blob URL 로 바꿔 쓴다 — 엔드포인트는 기존 가드
    * (`agent_sessions.use`) 를 그대로 통과한다.
    */
-  getHostSessionImage: async (managerId: string, cli: string, sessionId: string, imageRef: string): Promise<Blob> => {
+  getHostSessionImage: async (managerId: string, cli: string, sessionId: string, imageRef: string, signal?: AbortSignal): Promise<Blob> => {
     const path = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
       + `/sessions/${encodeURIComponent(sessionId)}/image/${encodeURIComponent(imageRef)}`;
-    const resp = await fetchOk(path);
+    const resp = await fetchOk(path, { signal });
     return resp.blob();
   },
   /** 에이전트가 답에 **경로로** 적은 미리보기 파일(`![alt](E:/…png)`, `[보고서](./report.html)`) — 그 Runtime Host 의 매니저가 읽어 준다.
    *  `cwd` 는 상대 경로의 기준. 실패하면 서버가 준 사유(message)로 던진다. */
-  getHostSessionLocalImage: async (managerId: string, cli: string, sessionId: string, path: string, cwd: string): Promise<Blob> => {
+  getHostSessionLocalImage: async (managerId: string, cli: string, sessionId: string, path: string, cwd: string, signal?: AbortSignal): Promise<Blob> => {
     const query = new URLSearchParams({ path, ...(cwd ? { cwd } : {}) });
     const url = `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}`
       + `/sessions/${encodeURIComponent(sessionId)}/local-image?${query.toString()}`;
-    const resp = await fetchOk(url);
+    const resp = await fetchOk(url, { signal });
     return resp.blob();
   },
   /**

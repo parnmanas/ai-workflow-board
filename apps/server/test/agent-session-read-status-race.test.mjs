@@ -22,6 +22,28 @@ function setup() {
   return { service, seed, patch, respond: (value) => resolveRpc(value) };
 }
 
+test('history paging survives SSE mapping and returns its cursor without weakening host/account checks', async () => {
+  const { EVENT_TYPES } = await import('../dist/modules/events/event-registry.js');
+  const f = setup();
+  let envelope;
+  f.service.rpc = async (manager, cli, op, args) => {
+    envelope = EVENT_TYPES.find((type) => type.eventType === 'agent_session_request').map({ manager_id: manager, cli, op, ...args });
+    return { session: row, events: [], live: { status: 'ready' }, next_before: 'native:42' };
+  };
+  const result = await f.service.getSession('account', 'user', 'host', 'codex', sid, 'native:90');
+  assert.equal(envelope.payload.account_id, 'account');
+  assert.equal(envelope.payload.history_before, 'native:90');
+  assert.equal(envelope.payload.history_page_bytes, 128 * 1024);
+  assert.equal(result.next_before, 'native:42');
+  const presence = EVENT_TYPES.find((type) => type.eventType === 'agent_instance_update').map({
+    action: 'updated', instance: { agent_id: 'host', account_id: 'account', acp_session_clis: ['codex', 'claude'] },
+  });
+  assert.deepEqual(presence.payload.instance.acp_session_clis, ['codex', 'claude'], 'ordinary presence must let the UI compare capabilities without another REST read');
+  await assert.rejects(f.service.getSession('account', 'user', 'host', 'codex', sid, 'x'.repeat(513)), /history_cursor_invalid/);
+  f.service.rpc = async () => ({ session: row, events: [], live: null });
+  assert.equal((await f.service.getSession('account', 'user', 'host', 'codex', sid)).next_before, null, 'old managers remain readable');
+});
+
 for (const op of ['history', 'list']) {
   const start = (s) => op === 'history'
     ? s.getSession('account', 'user', 'host', 'codex', sid)

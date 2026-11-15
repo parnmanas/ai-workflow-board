@@ -186,6 +186,100 @@ test('list / history RPCs answer from the CLI home store', async (t) => {
   assert.equal(server.rpc('rpc-missing').code, 'not_found');
 });
 
+test('history pages cross a slow upload link without losing earlier events or a newly appended turn', async (t) => {
+  const { root, runner, server, store } = await harness(t);
+  const events = Array.from({ length: 180 }, (_, i) => ({
+    id: `native-${i}`, seq: i + 1, turn_id: `turn-${Math.floor(i / 2)}`, type: i % 2 ? 'text' : 'user_prompt',
+    payload: { text: `${i}: ${randomBytes(8000).toString('base64')}` }, created_at: new Date(i * 1000).toISOString(),
+  }));
+  const history = { session: { cli: 'claude', session_id: CLAUDE_ID, cwd: root }, events, truncated: false, omitted: 0 };
+  t.mock.method(store, 'readHistory', async () => history);
+  // The real failure was a 786KB compressed upload that arrived after the 40s RPC deadline.
+  // This transport drops a reply larger than 150KB, rather than returning HTTP 413.
+  const transport = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/rpc/') && Buffer.byteLength(init.body) > 150 * 1024) throw new TypeError('fetch failed');
+    return transport(url, init);
+  };
+  let before;
+  let collected = [];
+  let page = 0;
+  do {
+    const id = `rpc-page-${page++}`;
+    await runner.handle(request('history', { request_id: id, session_id: CLAUDE_ID, history_page_bytes: 128 * 1024, ...(before ? { history_before: before } : {}) }));
+    const reply = server.rpc(id);
+    assert.equal(reply.ok, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(reply.result.events)) < 128 * 1024);
+    collected = [...reply.result.events, ...collected];
+    before = reply.result.next_before;
+    if (page === 1) history.events = [...events, { ...events[0], id: 'arrived-later', seq: 181 }];
+    assert.ok(page < 30, 'cursor makes backwards progress');
+  } while (before);
+  assert.deepEqual(collected.map((e) => e.id), events.map((e) => e.id));
+  assert.ok(page > 1);
+});
+
+test('a lost new-session reply retries delivery without creating a second session', async (t) => {
+  const { runner, store, cwd, server } = await harness(t);
+  const record = t.mock.method(store, 'recordAwbSession');
+  const transport = globalThis.fetch;
+  let attempts = 0;
+  const bodies = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/rpc/rpc-open-lost')) {
+      bodies.push(Buffer.from(init.body).toString());
+      if (++attempts === 1) throw new TypeError('fetch failed');
+    }
+    return transport(url, init);
+  };
+  await runner.handle(request('open', { request_id: 'rpc-open-lost', cwd }));
+  assert.equal(server.rpc('rpc-open-lost').ok, true);
+  assert.equal(attempts, 2);
+  assert.equal(record.mock.callCount(), 1, 'session/new is executed once');
+  assert.equal(bodies[0], bodies[1], 'retry sends the identical created session');
+});
+
+test('a timed-out history upload retries a smaller page within the server deadline', async (t) => {
+  const { root, runner, store, server } = await harness(t);
+  const events = Array.from({ length: 40 }, (_, i) => ({
+    id: `timeout-${i}`, seq: i + 1, turn_id: null, type: 'text',
+    payload: { text: randomBytes(8000).toString('base64') }, created_at: new Date(i * 1000).toISOString(),
+  }));
+  t.mock.method(store, 'readHistory', async () => ({ session: { cli: 'claude', session_id: CLAUDE_ID, cwd: root }, events, truncated: false, omitted: 0 }));
+  const timeouts = [];
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (ms) => { timeouts.push(ms); return realTimeout(20); });
+  const transport = globalThis.fetch;
+  let attempts = 0;
+  const sizes = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/rpc/rpc-history-timeout')) {
+      sizes.push(Buffer.byteLength(init.body));
+      if (++attempts === 1) {
+        await new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        });
+      }
+    }
+    return transport(url, init);
+  };
+  await runner.handle(request('history', { request_id: 'rpc-history-timeout', session_id: CLAUDE_ID, history_page_bytes: 128 * 1024 }));
+  const reply = server.rpc('rpc-history-timeout');
+  assert.equal(reply.ok, true);
+  assert.equal(attempts, 2);
+  assert.ok(sizes[1] < sizes[0], 'the failed transfer is retried with fewer events');
+  assert.ok(timeouts.every((ms) => ms <= 8000), 'no 30-second upload can consume the 40-second history deadline');
+  assert.equal(reply.result.next_before, reply.result.events[0].id, 'the smaller retry preserves access to older events');
+});
+
+test('reopening reads metadata without parsing the whole transcript again', async (t) => {
+  const { runner, store, server } = await harness(t);
+  const history = t.mock.method(store, 'readHistory', () => { throw new Error('Unexpected full transcript scan'); });
+  await runner.handle(request('open', { request_id: 'rpc-info-resume', session_id: CLAUDE_ID }));
+  assert.equal(server.rpc('rpc-info-resume').ok, true);
+  assert.equal(history.mock.callCount(), 0);
+});
+
 // 원격 서버에서 89MB(이미지 107장) 세션이 한 시간 동안 열리지 않았다 — 매니저 로그에 rpc POST 413 이 56번 남았고,
 // 응답이 버려질 때마다 서버는 답을 받지 못해 화면은 40초 타임아웃만 봤다. 본문 상한은 AWB 서버만 두는 게 아니다
 // (서버 앞의 프록시는 nginx 기본 1MB). 그래서 413 이면 기록은 최근 것을 지키며 줄여 다시 보내고, 끝내 못 보내는

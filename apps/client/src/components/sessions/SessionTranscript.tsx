@@ -1,3 +1,4 @@
+import { queueSessionMedia } from './sessionMediaQueue';
 import { getLocaleTag } from '../../i18n/core';
 import { t as translate, getLocale } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
@@ -32,11 +33,11 @@ export interface SessionTranscriptProps {
    *  `<img src>` 는 Authorization 헤더를 못 보내므로 URL 이 아니라 Blob 을 받아서 쓴다 —
    *  토큰을 쿼리로 노출하는 두 번째 인증 경로를 만들지 않기 위해서다. 안 넘기면 이미지
    *  블록은 "볼 수 없음" 으로 접힌다. */
-  loadImage?: (imageRef: string) => Promise<Blob>;
+  loadImage?: (imageRef: string, signal?: AbortSignal) => Promise<Blob>;
   /** 에이전트가 답에 **경로로** 적은 이미지(`![alt](E:/…png)`) → 바이트. Runtime Host 매니저가
    *  그 장비에서 읽어 준다(Codex 데스크톱 앱이 같은 마크다운을 자기 장비 파일로 그리는 것의 원격판).
    *  안 넘기면 그 자리에 경로만 보인다. */
-  loadLocalImage?: (path: string) => Promise<Blob>;
+  loadLocalImage?: (path: string, signal?: AbortSignal) => Promise<Blob>;
   /** 답에 **경로로** 적은 영상(`![데모](./out/demo.mp4)`) → 바이트. 매니저가 조각으로 읽어 주는 것을 끝까지
    *  모은다 — 전사는 진행률을 보이고, 떠나면 `signal` 로 멈춘다. 안 넘기면 그 자리에 경로만 보인다. */
   loadLocalVideo?: LocalVideoLoader;
@@ -288,7 +289,7 @@ function AutomaticPromptBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; loadLocalVideoPreview?: LocalVideoPreviewLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
+function AssistantBlock({ text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string, signal?: AbortSignal) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; loadLocalVideoPreview?: LocalVideoPreviewLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
   useLocale();
   // 원격 영상 링크(맨 URL 포함)는 글 안에 둔 채 바로 아래에 썸네일을 붙인다 — 링크를 카드로 떼면 목록이 끊긴다.
   const renderLink = useCallback<MarkdownLinkRenderer>(
@@ -833,11 +834,13 @@ function ImageBlock({
   openMedia,
 }: {
   block: Extract<TranscriptBlock, { kind: 'image' }>;
-  loadImage?: (imageRef: string) => Promise<Blob>;
+  loadImage?: (imageRef: string, signal?: AbortSignal) => Promise<Blob>;
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
   useLocale();
+  const visibilityRef = useRef<HTMLDivElement | null>(null);
+  const near = useNearViewport(visibilityRef);
   const fromUser = (block as { from?: string }).from === 'user';
   const [url, setUrl] = useState<string>(block.uri || '');
   const [error, setError] = useState<string | null>(null);
@@ -847,15 +850,17 @@ function ImageBlock({
   const isVideo = (block.mimeType || '').toLowerCase().startsWith('video/');
 
   useEffect(() => {
+    if (!near) return;
     setUrl(block.uri || '');
     setError(null);
     // 어댑터가 URL 로 준 외부 이미지는 그대로 쓴다 — 가져올 바이트가 없다.
     if (block.uri || !block.imageRef || !loadImage) return;
+    const controller = new AbortController();
     let revoked = false;
     let objectUrl = '';
     void (async () => {
       try {
-        const blob = await loadImage(block.imageRef);
+        const blob = await queueSessionMedia(() => loadImage(block.imageRef, controller.signal), controller.signal);
         if (revoked) return;
         objectUrl = URL.createObjectURL(typedSessionMedia(blob, block.mimeType));
         setUrl(objectUrl);
@@ -865,9 +870,10 @@ function ImageBlock({
     })();
     return () => {
       revoked = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [block.uri, block.imageRef, block.mimeType, loadImage, attempt]);
+  }, [block.uri, block.imageRef, block.mimeType, loadImage, attempt, near]);
 
   useEffect(() => {
     if (url && registerMedia && (block.imageRef || block.uri)) {
@@ -898,7 +904,7 @@ function ImageBlock({
   }
   if (!url) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
+      <div ref={visibilityRef} style={{ minHeight: 160, display: 'flex', flexDirection: 'column', alignItems: align === 'flex-end' ? 'flex-end' : 'flex-start', gap: 3 }}>
         <SenderLabel align={fromUser ? 'right' : 'left'}>{label}</SenderLabel>
         <div data-block="image" data-from={fromUser ? 'user' : 'agent'} style={{ fontSize: 11.5, color: tokens.colors.textMuted }}>
           {translate('이미지 불러오는 중… (')}{block.mimeType}{sizeLabel})
@@ -991,11 +997,13 @@ function MarkdownImage({
   alt: string;
   target: string;
   source: 'local' | 'remote';
-  loadLocalImage?: (path: string) => Promise<Blob>;
+  loadLocalImage?: (path: string, signal?: AbortSignal) => Promise<Blob>;
   registerMedia?: (key: string, item: MediaLightboxItem) => void;
   openMedia?: (key: string) => void;
 }) {
   useLocale();
+  const visibilityRef = useRef<HTMLDivElement | null>(null);
+  const near = useNearViewport(visibilityRef);
   const [url, setUrl] = useState<string>(source === 'remote' ? target : '');
   const [error, setError] = useState<string | null>(null);
 
@@ -1003,14 +1011,16 @@ function MarkdownImage({
   const mediaKey = `md:${source}:${target}`;
 
   useEffect(() => {
+    if (!near) return;
     if (source !== 'local' || !loadLocalImage) return;
+    const controller = new AbortController();
     let revoked = false;
     let objectUrl = '';
     setUrl('');
     setError(null);
     void (async () => {
       try {
-        const blob = await loadLocalImage(target);
+        const blob = await queueSessionMedia(() => loadLocalImage(target, controller.signal), controller.signal);
         if (revoked) return;
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
@@ -1020,9 +1030,10 @@ function MarkdownImage({
     })();
     return () => {
       revoked = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [source, target, loadLocalImage, attempt]);
+  }, [source, target, loadLocalImage, attempt, near]);
 
   useEffect(() => {
     if (url && registerMedia) {
@@ -1056,7 +1067,7 @@ function MarkdownImage({
   }
   if (!url) {
     return (
-      <div data-block="markdown-image" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+      <div ref={visibilityRef} data-block="markdown-image" style={{ minHeight: 160, whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
         {translate('이미지 불러오는 중…')} {caption}
       </div>
     );
@@ -1117,15 +1128,19 @@ function MarkdownFile({
   alt: string;
   target: string;
   fileKind: 'html' | 'markdown';
-  loadLocalFile?: (path: string) => Promise<Blob>;
+  loadLocalFile?: (path: string, signal?: AbortSignal) => Promise<Blob>;
 }) {
   useLocale();
+  const visibilityRef = useRef<HTMLDivElement | null>(null);
+  const near = useNearViewport(visibilityRef);
   const [url, setUrl] = useState<string>('');
   const [mdText, setMdText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!near) return;
     if (!loadLocalFile) return;
+    const controller = new AbortController();
     let revoked = false;
     let objectUrl = '';
     setUrl('');
@@ -1133,7 +1148,7 @@ function MarkdownFile({
     setError(null);
     void (async () => {
       try {
-        const blob = await loadLocalFile(target);
+        const blob = await queueSessionMedia(() => loadLocalFile(target, controller.signal), controller.signal);
         if (revoked) return;
         if (fileKind === 'html') {
           objectUrl = URL.createObjectURL(blob);
@@ -1147,9 +1162,10 @@ function MarkdownFile({
     })();
     return () => {
       revoked = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [target, fileKind, loadLocalFile]);
+  }, [target, fileKind, loadLocalFile, near]);
 
   const label = fileKind === 'html' ? 'HTML' : translate('Markdown');
   const caption = (
@@ -1171,7 +1187,7 @@ function MarkdownFile({
   if (fileKind === 'html') {
     if (!url) {
       return (
-        <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+        <div ref={visibilityRef} data-block="markdown-file" style={{ minHeight: 100, whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
           {label} {translate('불러오는 중…')} {caption}
         </div>
       );
@@ -1201,7 +1217,7 @@ function MarkdownFile({
   }
   if (mdText === null) {
     return (
-      <div data-block="markdown-file" style={{ whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
+      <div ref={visibilityRef} data-block="markdown-file" style={{ minHeight: 100, whiteSpace: 'normal', fontSize: 11.5, color: tokens.colors.textMuted }}>
         {label} {translate('불러오는 중…')} {caption}
       </div>
     );

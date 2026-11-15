@@ -235,12 +235,13 @@ export class AgentSessionsController {
     @Param('managerId') managerId: string,
     @Param('cli') cli: string,
     @Param('sessionId') sessionId: string,
+    @Query('before') before: string | undefined,
     @Req() req: Request,
     @Res() res: Response,
   ) {
     const account = this.accountId(req, res);
     if (!account) return;
-    return this.run(res, 200, () => this.sessions.getSession(account, this.userId(req), managerId, cli, sessionId));
+    return this.run(res, 200, () => this.sessions.getSession(account, this.userId(req), managerId, cli, sessionId, before));
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/prompt')

@@ -1383,16 +1383,20 @@ async function sendAgentSessionRequest(
   /** 로그 접두어 — 같은 전송 경로를 쓰는 표면이 둘이라(세션/터미널) 로그에서 구분한다. */
   surface = 'agent-session',
   extraHeaders: Record<string, string> = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<AgentSessionRestResult> {
+  const started = performance.now();
   try {
     const resp = await fetch(url, {
       method,
       headers: { 'X-Agent-Key': config.apiKey, 'Content-Type': 'application/json', Accept: 'application/json', ...extraHeaders },
       body: payload,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     let body: any = null;
     try { body = await resp.json(); } catch { body = null; }
+    const elapsed = Math.round(performance.now() - started);
+    if (elapsed >= 2_000) log(`${surface} ${label} ${method} took ${elapsed}ms (HTTP ${resp.status})`);
     if (!resp.ok) log(`${surface} ${label} ${method} failed: HTTP ${resp.status} ${body?.error ?? ''}`.trim());
     return { ok: resp.ok, status: resp.status, body };
   } catch (err: any) {
@@ -1422,6 +1426,7 @@ export async function postAgentSessionRpcResponse(
   body: AgentSessionRpcBody,
   /** 로그용 — 어떤 요청의 응답이 실패했는지 로그만 보고 알 수 있어야 한다. */
   op = '',
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<AgentSessionRestResult> {
   if (!requestId) return { ok: false, status: 0 };
   const url = `${trimSlash(config.url)}/api/agent/sessions/rpc/${encodeURIComponent(requestId)}`;
@@ -1429,11 +1434,11 @@ export async function postAgentSessionRpcResponse(
   const bytes = Buffer.byteLength(payload);
   const label = `rpc(${requestId.slice(0, 8)}${op ? ` ${op}` : ''} ${(bytes / 1048576).toFixed(2)}MiB)`;
   if (bytes >= RPC_GZIP_MIN_BYTES) {
-    const sent = await sendAgentSessionRequest(config, 'POST', url, new Uint8Array(await gzipAsync(payload)), `${label} gzip`, 'agent-session', { 'Content-Encoding': 'gzip' });
+    const sent = await sendAgentSessionRequest(config, 'POST', url, new Uint8Array(await gzipAsync(payload)), `${label} gzip`, 'agent-session', { 'Content-Encoding': 'gzip' }, timeoutMs);
     // 압축 본문을 거절하는 중간 장비(415)에만 원문으로 다시 보낸다.
     if (sent.status !== 415) return sent;
   }
-  return sendAgentSessionRequest(config, 'POST', url, payload, label);
+  return sendAgentSessionRequest(config, 'POST', url, payload, label, 'agent-session', {}, timeoutMs);
 }
 
 /**
