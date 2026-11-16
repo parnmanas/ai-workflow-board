@@ -8,6 +8,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { installFakeEventSource } from './helpers/boardStream.mjs';
 import { AuthProvider } from '../src/contexts/AuthContext.tsx';
 import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
+import { ConfirmProvider } from '../src/contexts/ConfirmContext.tsx';
 import { api } from '../src/api.ts';
 import { cliCatalog } from '../src/cli/catalog.ts';
 import { resetHostModelsStore } from '../src/cli/hostModels.ts';
@@ -159,4 +160,58 @@ test('paged history preserves live arrivals and prepends without a scroll jump',
   assert.match(transcript.textContent, /Earlier answer[\s\S]*Recent answer[\s\S]*Arrived during initial load[\s\S]*Arrived during older load/);
   assert.equal(transcript.scrollTop, 210, 'prepend preserves the content the reader was looking at');
   assert.equal(button('이전 기록 더 보기'), undefined);
+});
+
+for (const choice of [
+  { selector: 'select[aria-label="Session credential"]', value: 'second', patch: { credential_id: 'second' } },
+  { selector: 'select[aria-label="Session backend"]', value: 'alternate', patch: { backend_profile_id: 'alternate' } },
+  { selector: 'select[data-session-launch-option="__permission_mode"]', value: 'skip', patch: { config_overrides: { __permission_mode: 'skip' } } },
+]) test(`session process settings confirm before applying ${Object.keys(choice.patch)[0]}`, async (t) => {
+  const dom = setupDom();
+  const previousStorage = globalThis.localStorage;
+  globalThis.localStorage = window.localStorage;
+  localStorage.setItem('auth_token', 'process-settings-test');
+  const { uninstall } = installFakeEventSource();
+  const host = { manager_id: 'host', instance_id: 'instance', name: 'Host', hostname: 'machine', clis: ['claude'] };
+  const live = { manager_id: 'host', manager_name: 'Host', cli: 'claude', session_id: 'same-session', cwd: '/repo', title: 'Session',
+    status: 'ready', config_options: [], available_modes: [], available_commands: [], auth: null, last_error: null, updated_at: new Date().toISOString() };
+  const settings = { manager_id: 'host', cli: 'claude', session_id: 'same-session', revision: 'revision-1',
+    supports_credential: true, credential_id: 'first', credential: { id: 'first', name: 'First', provider: 'claude_api_key' },
+    candidates: [{ id: 'first', name: 'First', provider: 'claude_api_key' }, { id: 'second', name: 'Second', provider: 'claude_api_key' }],
+    supports_backend: true, backend: null, backend_candidates: [{ id: 'alternate', name: 'Alternate' }],
+    default_config: {}, known_config_options: [], launch_options: [{ config_id: '__permission_mode', name: 'Permissions', type: 'select',
+      options: [{ value: 'skip', name: 'Skip' }] }] };
+  t.mock.method(api, 'getMe', async () => ({ id: 'u', status: 'active', role: 'admin', resolved_permissions: [], accounts: [{ id: 'account', name: 'Account' }] }));
+  t.mock.method(api, 'getVoiceConfig', async () => null);
+  t.mock.method(api, 'listSessionProposals', async () => ({ proposals: [] }));
+  t.mock.method(api, 'getHostSessionUsageLimits', async () => ({ events: [] }));
+  t.mock.method(api, 'getHostSession', async () => ({ session: live, live, events: [] }));
+  const reads = t.mock.method(api, 'getHostSessionSettings', async () => settings);
+  const hostWrite = t.mock.method(api, 'setHostCliSettings', async () => { throw new Error('Must not change host settings'); });
+  const restart = t.mock.method(api, 'restartHostSession', async () => ({ ...live, status: 'starting', updated_at: new Date(Date.now() + 1000).toISOString() }));
+  const view = mount(h(MemoryRouter, null, h(AuthProvider, null, h(BoardStreamProvider, null, h(ConfirmProvider, null,
+    h(SessionView, { accountId: 'account', managerId: 'host', cli: 'claude', sessionId: live.session_id, host, onNew() {} }))))));
+  t.after(() => { view.unmount(); uninstall(); dom.cleanup(); globalThis.localStorage = previousStorage; });
+  await settle();
+  assert.equal(reads.mock.callCount(), 0, 'settings load only when the menu is opened');
+  click(document.querySelector('button[aria-label="Session menu"]'));
+  await settle();
+  const previous = document.querySelector(choice.selector).value;
+  change(document.querySelector(choice.selector), choice.value);
+  await settle();
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent.includes(ui('Restart required')));
+  assert.equal(restart.mock.callCount(), 0, 'selecting an option alone must not stop a running process');
+  click(button('Cancel'));
+  await settle();
+  assert.equal(restart.mock.callCount(), 0);
+  click(document.querySelector('button[aria-label="Session menu"]'));
+  await settle();
+  assert.equal(document.querySelector(choice.selector).value, previous, 'cancelling preserves the actual saved choice');
+  change(document.querySelector(choice.selector), choice.value);
+  await settle();
+  click(button('Yes, restart'));
+  await settle();
+  assert.equal(restart.mock.callCount(), 1);
+  assert.deepEqual(restart.mock.calls[0].arguments, ['host', 'claude', 'same-session', { ...choice.patch, expected_revision: 'revision-1' }]);
+  assert.equal(hostWrite.mock.callCount(), 0);
 });

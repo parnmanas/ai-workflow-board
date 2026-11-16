@@ -7183,5 +7183,10 @@
   "@team-member mentions are sent to the orchestrator for assignment.": "@团队成员的提及会作为指派该成员的请求发送给协调者。",
   "Team member": "团队成员",
   "Additional answer (optional)": "补充回答（可选）",
-  "Complete the required fields.": "请填写必填项。"
+  "Complete the required fields.": "请填写必填项。",
+  "Process settings": "进程设置",
+  "Restart required": "需要重启",
+  "Yes, restart": "是，重启",
+  "Changes apply only to this session. Restart confirmation appears before applying.": "更改仅应用于此会话。应用前将确认是否重启。",
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "应用此设置需要重启会话进程。对话记录会保留，但正在进行的轮次将被中断。现在重启吗？"
 }

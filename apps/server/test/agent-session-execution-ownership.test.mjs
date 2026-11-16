@@ -1,8 +1,8 @@
 // A native CLI session keeps its original execution account and settings even
 // when the page's account or the defaults for future sessions change — with one
-// explicit exception: Restart rebinds the credential (only) to the owning
-// account's current CLI settings, so a login that hit its usage limit can be
-// swapped from the Host settings (docs/agent-sessions.md "실행 고정").
+// exception: Restart takes the owning account's current CLI login unless the
+// user explicitly chose a session credential in the menu. Explicit choices
+// survive future restarts (docs/agent-sessions.md "실행 고정").
 // Runs through the real HTTP/DB stack on either sql.js or PostgreSQL; only the
 // manager's native CLI adapter is mocked with its normal reverse-RPC protocol.
 import test from 'node:test';
@@ -315,6 +315,74 @@ test('native execution pins ownership, credential and runtime settings across am
       method: 'POST', headers: headers(accountB.id, otherToken), body: '{}',
     });
     assert.equal(denied.status, 403, denied.text);
+  });
+  await t.test('session menu settings are read-only and reject invalid or stale changes before stopping the process', async () => {
+    const repo = ds.getRepository('AgentSessionExecution');
+    const read = () => call(`${base}${sessionPath}/settings`, { headers: headers(accountA.id) });
+    const initial = await read();
+    assert.equal(initial.status, 200, initial.text);
+    assert.equal(initial.body.credential_id, replacementCredential.id);
+    assert.ok(!initial.body.candidates.some((c) => c.id === ambientCredential.id));
+    assert.ok(initial.body.launch_options.every((o) => o.config_id !== '__git_workflow'));
+    assert.ok(!JSON.stringify(initial.body).includes('sk-fixture-'));
+    const untouchedId = `menu-only-${randomUUID()}`;
+    const untouched = await call(`${base}${cliPath}/sessions/${untouchedId}/settings`, { headers: headers(accountA.id) });
+    assert.equal(untouched.status, 200, untouched.text);
+    assert.equal(await repo.findOneBy({ session_id: untouchedId }), null, 'opening the menu does not claim a native session');
+    const before = await repo.findOneBy({ session_id: nativeId });
+    for (const patch of [
+      { credential_id: ambientCredential.id },
+      { credential_id: 'missing' },
+      { credential_id: randomUUID() },
+      { credential_id: 123 },
+      { backend_profile_id: 'missing' },
+      { config_overrides: { __permission_mode: 'unsupported' } },
+      { config_overrides: { __git_workflow: 'worktree' } },
+      { config_overrides: { model: 'model-original' } },
+    ]) {
+      const count = requests.length;
+      const result = await call(`${base}${sessionPath}/restart`, { method: 'POST', headers: headers(accountA.id),
+        body: JSON.stringify({ ...patch, expected_revision: initial.body.revision }) });
+      assert.ok(result.status >= 400 && result.status < 500, result.text);
+      assert.equal(requests.length, count, 'a rejected setting must not restart the process');
+      assert.deepEqual(await repo.findOneBy({ session_id: nativeId }), before, 'a rejected setting must not change the saved binding');
+    }
+    const denied = await call(`${base}${sessionPath}/settings`, { headers: headers(accountB.id, otherToken) });
+    assert.equal(denied.status, 403, denied.text);
+    await send('config-option', { config_id: 'model', value: 'model-original' });
+    const count = requests.length;
+    const stale = await call(`${base}${sessionPath}/restart`, { method: 'POST', headers: headers(accountA.id),
+      body: JSON.stringify({ credential_id: originalCredential.id, expected_revision: initial.body.revision }) });
+    assert.equal(stale.status, 409, stale.text);
+    assert.equal(requests.length, count);
+  });
+
+  await t.test('session-specific login, backend and launch settings restart the same session and survive later default changes', async () => {
+    const current = await call(`${base}${sessionPath}/settings`, { headers: headers(accountA.id) });
+    const hostBefore = await call(`${base}${cliPath}/settings`, { headers: headers(accountA.id) });
+    const sent = await send('restart', { expected_revision: current.body.revision, credential_id: originalCredential.id,
+      backend_profile_id: replacementProfile.id, config_overrides: { __permission_mode: 'bypassPermissions' } });
+    assert.equal(sent.session_id, nativeId);
+    assert.equal(sent.credential_id, originalCredential.id);
+    assert.equal(sent.runtime_profile.id, replacementProfile.id);
+    assert.equal(sent.config_defaults.__permission_mode, 'bypassPermissions');
+    assert.equal(sent.config_defaults.__mode, undefined);
+    assert.equal(sent.config_defaults.model, 'model-original');
+    const hostAfter = await call(`${base}${cliPath}/settings`, { headers: headers(accountA.id) });
+    assert.deepEqual(hostAfter.body, hostBefore.body, 'editing a session does not change the Host defaults');
+    const saved = await ds.getRepository('AgentSessionExecution').findOneBy({ session_id: nativeId });
+    assert.equal(saved.credential_override, true);
+    assert.equal((await send('restart')).credential_id, originalCredential.id, 'plain restart preserves the explicit session login');
+    const latest = await call(`${base}${sessionPath}/settings`, { headers: headers(accountA.id) });
+    assert.equal(latest.body.credential_id, originalCredential.id);
+    assert.equal(latest.body.backend.id, replacementProfile.id);
+    assert.notEqual(latest.body.revision, current.body.revision);
+    const cleared = await send('restart', { expected_revision: latest.body.revision, credential_id: null, backend_profile_id: null,
+      config_overrides: { __permission_mode: null } });
+    assert.equal(cleared.credential_id, null);
+    assert.equal(cleared.runtime_profile, null);
+    assert.equal(cleared.config_defaults.__permission_mode, undefined);
+    assert.equal((await send('restart')).credential_id, null, 'explicit Host login is not replaced by the default credential');
   });
   assert.deepEqual(rpcFailures, [], 'all mocked manager RPC responses were accepted');
 });

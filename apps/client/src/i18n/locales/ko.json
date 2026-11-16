@@ -7183,5 +7183,10 @@
   "@team-member mentions are sent to the orchestrator for assignment.": "@팀원 멘션은 해당 팀원을 지정하는 요청으로 오케스트레이터에게 전달됩니다.",
   "Team member": "팀원",
   "Additional answer (optional)": "추가 답변 (선택)",
-  "Complete the required fields.": "필수 항목을 입력해 주세요."
+  "Complete the required fields.": "필수 항목을 입력해 주세요.",
+  "Process settings": "프로세스 설정",
+  "Restart required": "재시작 필요",
+  "Yes, restart": "예, 재시작",
+  "Changes apply only to this session. Restart confirmation appears before applying.": "변경 사항은 이 세션에만 적용됩니다. 적용 전에 재시작 여부를 확인합니다.",
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "이 설정을 적용하려면 세션 프로세스를 재시작해야 합니다. 대화 기록은 유지되지만 진행 중인 턴은 중단됩니다. 지금 재시작할까요?"
 }

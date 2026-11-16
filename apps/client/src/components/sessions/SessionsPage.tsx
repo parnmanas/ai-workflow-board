@@ -15,6 +15,7 @@ import type {
   AgentSessionEventRecord,
   AgentSessionHost,
   AgentSessionLiveSnapshot,
+  AgentSessionRestartSettings,
   AgentSessionSummary,
   AgentSessionUpdateEvent,
   VoiceOperator,
@@ -25,6 +26,7 @@ import CliSettingsPanel from './CliSettingsPanel';
 import NewSessionModal from './NewSessionModal';
 import RuntimeOptionControl from '../runtime/RuntimeOptionControl';
 import SessionHeaderMenu, { SessionMenuItem, SessionMenuSection } from './SessionHeaderMenu';
+import SessionProcessSettings from './SessionProcessSettings';
 import SessionProposalCards from './SessionProposalCards';
 import { proposalsForSession, useSessionProposals } from './sessionProposals';
 import { noteHostSessionModels } from '../../cli/hostModels';
@@ -437,6 +439,8 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
     setLiveRaw((prev) => mergeLiveSnapshot(prev, next));
   }, []);
   const [events, setEvents] = useState<AgentSessionEventRecord[]>([]);
+  const [restarting, setRestarting] = useState(false);
+  const restartPendingRef = useRef(false);
   const [nextHistoryBefore, setNextHistoryBefore] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderPendingRef = useRef(false);
@@ -907,14 +911,31 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
    * 프로세스가 아는 모델 목록·기능은 옛 바이너리의 것이고, 다시 띄우기 전에는 바뀌지
    * 않는다. 기록은 CLI 홈에 있어서 대화는 이어진다.
    */
-  const restart = useCallback(async () => {
+  const restart = useCallback(async (settings?: AgentSessionRestartSettings) => {
+    if (restartPendingRef.current) return;
+    restartPendingRef.current = true;
+    setRestarting(true);
+    const generation = historyGenerationRef.current;
     try {
-      await api.restartHostSession(managerId, cli, sessionId);
+      if (settings && !(await confirm({
+        title: translate('Restart required'),
+        message: translate('Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?'),
+        confirmLabel: translate('Yes, restart'), cancelLabel: translate('Cancel'), danger: false,
+      }))) return;
+      if (generation !== historyGenerationRef.current) return;
+      const next = await api.restartHostSession(managerId, cli, sessionId, settings);
+      if (generation !== historyGenerationRef.current) return;
+      setLive(next);
+      setConnectError(null);
+      setConnectErrorCode(null);
       showToast(translate('Restarting the session process…'), 'info');
     } catch (err: any) {
       showToast(err?.message || translate('Failed to restart'), 'error');
+    } finally {
+      restartPendingRef.current = false;
+      setRestarting(false);
     }
-  }, [managerId, cli, sessionId, showToast]);
+  }, [managerId, cli, sessionId, showToast, confirm, setLive]);
 
   const missingCredential = (status === 'error' && live?.last_error_code === 'credential_not_found')
     || connectErrorCode === 'credential_not_found';
@@ -978,7 +999,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   const { primary: headerOptions, secondary: menuOptions } = splitHeaderConfigOptions(configOptions);
   // 여는 중(starting)에만 잠근다. 턴 중이나 승인 대기 중에도 어댑터는 변경을 받아들이고,
   // 오히려 그때가 가장 바꾸고 싶은 순간이다(계속 묻는 게 번거로워 "Approve for me" 로 옮기는 경우).
-  const controlsDisabled = status === 'starting';
+  const controlsDisabled = status === 'starting' || restarting;
   const selectStyle: React.CSSProperties = {
     padding: '4px 8px', borderRadius: tokens.radii.md, border: `1px solid ${tokens.colors.border}`,
     background: tokens.colors.surface, color: tokens.colors.textPrimary, fontSize: 12,
@@ -1088,6 +1109,10 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
                       {thisOperator && <MenuFact term="Operator">★ {thisOperator.name}</MenuFact>}
                     </dl>
                   </SessionMenuSection>
+                  <SessionMenuSection title={translate('Process settings')}>
+                    <SessionProcessSettings managerId={managerId} cli={cli} sessionId={sessionId} disabled={controlsDisabled}
+                      onChange={(settings) => { closeMenu(); void restart(settings); }} />
+                  </SessionMenuSection>
                   {menuOptions.length > 0 && (
                     <SessionMenuSection title={translate('Settings')}>
                       {menuOptions.map((option) => (option.type === 'boolean'
@@ -1108,13 +1133,12 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
                     <SessionMenuItem
                       icon="⟳"
                       label={translate('Restart process')}
-                      disabled={status === 'starting'}
+                      disabled={controlsDisabled}
                       title={
                         status === 'starting'
                           ? translate('이미 프로세스를 여는 중입니다.')
                           : translate('세션 프로세스를 다시 띄웁니다. 대화 기록은 CLI 홈에 있어 그대로 이어지고, ') +
                             translate('새 프로세스는 지금 디스크에 있는 CLI 를 씁니다 — CLI 를 올린 뒤 새 모델이 안 보일 때 쓰세요. ') +
-                            translate('인증은 지금 CLI 설정에 고른 credential 로 다시 묶입니다 — usage limit 에 걸렸으면 CLI 설정에서 바꾼 뒤 누르세요. ') +
                             translate('진행 중인 턴이 있으면 끊깁니다.')
                       }
                       onSelect={() => { closeMenu(); void restart(); }}

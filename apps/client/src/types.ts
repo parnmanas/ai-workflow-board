@@ -3160,6 +3160,18 @@ export interface AgentSessionCliSettings {
   updated_at: string | null;
 }
 
+export interface AgentSessionProcessSettings extends AgentSessionCliSettings {
+  session_id: string;
+  revision: string;
+}
+
+export interface AgentSessionRestartSettings {
+  expected_revision: string;
+  credential_id?: string | null;
+  backend_profile_id?: string | null;
+  config_overrides?: Record<string, string | boolean | null>;
+}
+
 /** `default_config` 안에서 레거시 세션 모드를 가리키는 예약 키(서버 AGENT_SESSION_MODE_DEFAULT_KEY). */
 export const AGENT_SESSION_MODE_DEFAULT_KEY = '__mode';
 

@@ -16,6 +16,9 @@ export class AgentSessionExecution {
   session_id: string;
   @Column({ type: 'varchar', nullable: true, default: null })
   credential_id: string | null;
+  /** An explicit session choice survives later changes to the Host's default login. */
+  @Column({ type: 'boolean', default: false })
+  credential_override: boolean;
   @Column({ type: 'text', default: '{}' })
   config_defaults: string;
   @Column({ type: 'text', nullable: true, default: null })

@@ -2,6 +2,7 @@ import { t as translate } from './i18n/core';
 import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage, MailThreadList, BusinessMailWithThread, MailSendInput } from './business-mail.types';
 import { localizeBusinessConnector, localizeMailConnector, localizeSelfServiceAssessment, localizeTrademarkConnector } from './i18n/catalog';
 import type { AgentTemplate } from './types';
+import type { AgentSessionProcessSettings, AgentSessionRestartSettings } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
 import type { TrademarkIntegrationsView, TrademarkIntegrationInput, TrademarkIntegration, TrademarkIntegrationAction } from './business.types';
@@ -1946,6 +1947,8 @@ export const api = {
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/cancel`,
       { method: 'POST' },
     ),
+  getHostSessionSettings: (managerId: string, cli: string, sessionId: string) =>
+    request<AgentSessionProcessSettings>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/settings`),
   /**
    * 세션 프로세스를 죽이고 같은 세션 id 로 다시 띄운다.
    *
@@ -1953,10 +1956,10 @@ export const api = {
    * 올려도 모델 목록·기능이 갱신되지 않는다. 기록은 CLI 홈에 있으므로 재시작해도
    * 대화는 이어진다 — 죽는 것은 프로세스뿐이다.
    */
-  restartHostSession: (managerId: string, cli: string, sessionId: string) =>
+  restartHostSession: (managerId: string, cli: string, sessionId: string, settings?: AgentSessionRestartSettings) =>
     request<AgentSessionLiveSnapshot>(
       `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/restart`,
-      { method: 'POST' },
+      { method: 'POST', ...(settings ? { body: JSON.stringify(settings) } : {}) },
     ),
   repairHostSessionCredential: (managerId: string, cli: string, sessionId: string) =>
     request<AgentSessionLiveSnapshot>(

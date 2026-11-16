@@ -57,7 +57,7 @@ async function fixture(page, { missing = false, expired = false } = {}) {
   });
   await page.goto(`/sessions/${host.manager_id}/codex/${live.session_id}`);
   return {
-    quotaReads, historyReads,
+    quotaReads, historyReads, live,
     setQuota: (value) => { quotaResponse = value; },
     failQuota: (value) => { failQuota = value; },
   };
@@ -222,3 +222,48 @@ test('a quota response arriving after switching sessions cannot change the new s
   await page.waitForTimeout(200);
   await expect(page.getByRole('meter', { name: '5h limit', exact: true })).toHaveAttribute('aria-valuenow', '10');
 });
+
+for (const size of [{ width: 320, height: 568 }, { width: 768, height: 1024 }, { width: 667, height: 375 }]) {
+  test(`session credential and launch changes require restart confirmation at ${size.width}x${size.height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(size);
+    const { live } = await fixture(page);
+    const writes = [];
+    await page.route('**/quota-session/settings', route => route.fulfill({ json: {
+      manager_id: 'quota-host', cli: 'codex', session_id: 'quota-session', revision: 'fixture-revision',
+      supports_credential: true, credential_id: 'first', credential: { id: 'first', name: 'First', provider: 'codex_oauth' },
+      candidates: [{ id: 'first', name: 'First', provider: 'codex_oauth' },
+        { id: 'second', name: 'Second account with a very long credential name for the narrow session menu', provider: 'codex_oauth' }],
+      supports_backend: false, backend: null, backend_candidates: [], default_config: {}, known_config_options: [],
+      launch_options: [{ config_id: '__permission_mode', name: 'Permissions at launch', type: 'select',
+        options: [{ value: 'skip', name: 'Skip approval prompts' }] }],
+    } }));
+    await page.route('**/quota-session/restart', async route => {
+      writes.push(route.request().postDataJSON());
+      await route.fulfill({ status: 202, json: { ...live, status: 'starting', updated_at: new Date(Date.now() + 1000).toISOString() } });
+    });
+    const menu = page.getByRole('button', { name: 'Session menu', exact: true });
+    await menu.click();
+    const credential = page.getByRole('combobox', { name: 'Session credential', exact: true });
+    await credential.scrollIntoViewIfNeeded();
+    await credential.selectOption('second');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('Restart required');
+    await expect(dialog.getByRole('button', { name: 'Yes, restart', exact: true })).toBeInViewport();
+    expect(writes).toHaveLength(0);
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await menu.click();
+    await expect(credential).toHaveValue('first');
+    const permission = page.getByRole('combobox', { name: 'Permissions at launch', exact: true });
+    await permission.scrollIntoViewIfNeeded();
+    await permission.selectOption('skip');
+    await expect(dialog).toBeVisible();
+    const yes = dialog.getByRole('button', { name: 'Yes, restart', exact: true });
+    await expect(yes).toBeInViewport();
+    await page.screenshot({ path: testInfo.outputPath('session-restart-confirm.png') });
+    await yes.click();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0]).toEqual({ expected_revision: 'fixture-revision', config_overrides: { __permission_mode: 'skip' } });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}

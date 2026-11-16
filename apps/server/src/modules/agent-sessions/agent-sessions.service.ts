@@ -1,7 +1,7 @@
 import { mergeSessionConfig } from '../../common/session-launch-options';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { In, IsNull, Like, Repository, DataSource } from 'typeorm';
 import { ApiKey } from '../../entities/ApiKey';
 import { RuntimeHost } from '../../entities/RuntimeHost';
@@ -560,12 +560,14 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (existing) return {
       account_id: existing.account_id,
       credential_id: existing.credential_id,
+      credential_override: existing.credential_override,
       config_defaults: this.parseDefaults(existing.config_defaults),
       runtime_profile: existing.runtime_profile ? JSON.parse(existing.runtime_profile) as CliRuntimeProfile : null,
     };
     const execution = {
       account_id: accountId,
       credential_id: await this.boundCredentialId(accountId, managerId, cli),
+      credential_override: false,
       config_defaults: await this.configDefaultsFor(accountId, managerId, cli) || {},
       runtime_profile: await this.backendProfileFor(accountId, managerId, cli),
     };
@@ -749,6 +751,107 @@ export class AgentSessionsService implements OnModuleDestroy {
 
   private launchOptions(managerId: string, cli: string): AgentSessionConfigOption[] {
     return this.managerRecords().find((r) => r.agent_id === managerId)?.session_launch_options?.[cli] ?? [];
+  }
+
+  private executionRevision(execution: { credential_id: string | null; credential_override: boolean; config_defaults: Record<string, string | boolean>; runtime_profile: CliRuntimeProfile | null }): string {
+    return createHash('sha256').update(JSON.stringify(execution)).digest('hex');
+  }
+
+  private async sessionSettingsExecution(accountId: string, managerId: string, cli: string, sessionId: string) {
+    const row = await this.dataSource.getRepository(AgentSessionExecution).findOne({ where: { manager_id: managerId, cli, session_id: sessionId } });
+    if (row && row.account_id !== accountId) throw new AgentSessionError(403, 'account_access_denied');
+    const defaults = row ? null : await this.settings.findOne({ where: { account_id: accountId, manager_id: managerId, cli } });
+    const execution = {
+      credential_id: row ? row.credential_id : defaults?.credential_id ?? null,
+      credential_override: row?.credential_override ?? false,
+      config_defaults: this.parseDefaults(row ? row.config_defaults : defaults?.default_config),
+      runtime_profile: row ? (row.runtime_profile ? JSON.parse(row.runtime_profile) as CliRuntimeProfile : null)
+        : await this.backendProfileFor(accountId, managerId, cli),
+    };
+    return { row, execution };
+  }
+
+  /** Read only: opening or cancelling the menu must not create an execution binding. */
+  async getSessionSettings(accountId: string, managerId: string, cli: string, sessionId: string) {
+    this.requireHost(accountId, managerId, cli);
+    this.assertSessionId(sessionId);
+    const choices = await this.getCliSettings(accountId, managerId, cli);
+    const { execution } = await this.sessionSettingsExecution(accountId, managerId, cli, sessionId);
+    const profile = execution.runtime_profile;
+    return {
+      ...choices,
+      session_id: sessionId,
+      credential_id: execution.credential_id,
+      credential: choices.candidates.find((c) => c.id === execution.credential_id) ?? null,
+      backend: profile ? this.backendRef(profile, choices.backend_candidates.find((b) => b.id === profile.id)?.name ?? profile.id) : null,
+      default_config: execution.config_defaults,
+      // A saved session workspace cannot change its Git workflow on resume.
+      launch_options: choices.launch_options.filter((o) => o.config_id !== '__git_workflow'),
+      revision: this.executionRevision(execution),
+    };
+  }
+
+  private async changeSessionSettingsForRestart(accountId: string, managerId: string, cli: string, sessionId: string, input: Record<string, unknown>) {
+    if (Object.keys(input).some((key) => !['credential_id', 'backend_profile_id', 'config_overrides', 'expected_revision'].includes(key))) {
+      throw new AgentSessionError(400, 'session_settings_invalid');
+    }
+    const { row, execution } = await this.sessionSettingsExecution(accountId, managerId, cli, sessionId);
+    if (input.expected_revision !== this.executionRevision(execution)) {
+      throw new AgentSessionError(409, 'session_settings_changed', 'The session settings changed. Reload the settings and try again.');
+    }
+    if ('credential_id' in input) {
+      if (input.credential_id !== null && (typeof input.credential_id !== 'string' || !input.credential_id.trim())) throw new AgentSessionError(400, 'credential_invalid');
+      execution.credential_id = input.credential_id === null ? null : (input.credential_id as string).trim();
+      execution.credential_override = true;
+    }
+    if ('backend_profile_id' in input) {
+      if (!BACKEND_PROFILE_CLIS.has(cli)) throw new AgentSessionError(409, 'backend_unsupported');
+      if (input.backend_profile_id !== null && (typeof input.backend_profile_id !== 'string' || !input.backend_profile_id.trim())) throw new AgentSessionError(400, 'backend_profile_invalid');
+      const profile = input.backend_profile_id === null ? null
+        : (await this.backendProfileList()).find((p) => p.runtime.id === input.backend_profile_id)?.runtime;
+      if (profile === undefined) throw new AgentSessionError(404, 'backend_profile_not_found');
+      execution.runtime_profile = profile;
+    }
+    if (execution.credential_id) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(execution.credential_id)) throw new AgentSessionError(400, 'credential_invalid');
+      const cred = await this.credentials.findOne({ where: { id: execution.credential_id } });
+      if (!cred || (cred.account_id !== null && cred.account_id !== accountId)) throw new AgentSessionError(404, 'credential_not_found');
+      const prefix = SESSION_CLI_CREDENTIAL_PREFIX[cli];
+      if (!prefix) throw new AgentSessionError(409, 'credential_unsupported');
+      if (!cred.provider.startsWith(prefix)) throw new AgentSessionError(400, 'credential_provider_mismatch');
+    }
+    if (execution.runtime_profile?.credential_ref && execution.runtime_profile.credential_ref !== execution.credential_id) {
+      throw new AgentSessionError(409, 'backend_credential_mismatch', 'This backend requires a different credential. Select a matching credential and backend.');
+    }
+    if ('config_overrides' in input) {
+      const patch = input.config_overrides;
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)
+        || Object.keys(patch).some((key) => key === '__git_workflow' || !this.launchOptions(managerId, cli).some((o) => o.config_id === key))) {
+        throw new AgentSessionError(400, 'session_settings_invalid', 'Only editable process launch options can be changed on restart.');
+      }
+      execution.config_defaults = this.mergeConfig(managerId, cli, execution.config_defaults, patch);
+      if ('__permission_mode' in patch) {
+        delete execution.config_defaults.__mode;
+        const choices = await this.getCliSettings(accountId, managerId, cli);
+        for (const option of choices.known_config_options.filter((o) => o.category === 'mode')) delete execution.config_defaults[option.config_id];
+      }
+    }
+    const repo = this.dataSource.getRepository(AgentSessionExecution);
+    const values = { credential_id: execution.credential_id, credential_override: execution.credential_override,
+      config_defaults: JSON.stringify(execution.config_defaults), runtime_profile: execution.runtime_profile ? JSON.stringify(execution.runtime_profile) : null };
+    if (row) {
+      const updated = await repo.update({ id: row.id, account_id: accountId, credential_id: row.credential_id ?? IsNull(),
+        credential_override: row.credential_override, config_defaults: row.config_defaults, runtime_profile: row.runtime_profile ?? IsNull() }, values);
+      if (updated.affected !== 1) throw new AgentSessionError(409, 'session_settings_changed', 'The session settings changed. Reload the settings and try again.');
+    } else {
+      // A concurrent first open wins; never replace the execution it just claimed.
+      try { await repo.insert({ account_id: accountId, manager_id: managerId, cli, session_id: sessionId, ...values }); }
+      catch (error: any) {
+        if (await repo.findOne({ where: { manager_id: managerId, cli, session_id: sessionId } })) throw new AgentSessionError(409, 'session_settings_changed');
+        throw error;
+      }
+    }
+    return { account_id: accountId, ...execution };
   }
 
   private mergeConfig(managerId: string, cli: string, current: Record<string, string | boolean>, patch: unknown) {
@@ -952,11 +1055,15 @@ export class AgentSessionsService implements OnModuleDestroy {
     if (state && !agentSessionAcceptsPrompt(state.status)) {
       throw new AgentSessionError(409, 'session_busy', 'Wait for the session to stop before replacing its missing credential.');
     }
-    return this.restart(accountId, userId, managerId, cli, sessionId);
+    const { execution: current } = await this.sessionSettingsExecution(accountId, managerId, cli, sessionId);
+    return this.restart(accountId, userId, managerId, cli, sessionId, {
+      credential_id: await this.boundCredentialId(accountId, managerId, cli), expected_revision: this.executionRevision(current),
+    });
   }
 
   /**
-   * An explicit restart is where a session takes the owner's *current* CLI login.
+   * Unless the session has an explicit login choice, restart takes the owner's
+   * current CLI login. Session menu choices persist across ordinary restarts.
    *
    * Changing account defaults never touches a running session on its own, but the
    * operator who switches the Host credential (typically because the old one hit a
@@ -971,8 +1078,9 @@ export class AgentSessionsService implements OnModuleDestroy {
     managerId: string,
     cli: string,
     sessionId: string,
-    execution: { account_id: string; credential_id: string | null; runtime_profile: CliRuntimeProfile | null },
+    execution: { account_id: string; credential_id: string | null; credential_override?: boolean; runtime_profile: CliRuntimeProfile | null },
   ): Promise<string | null> {
+    if (execution.credential_override) return execution.credential_id;
     const credentialId = await this.boundCredentialId(execution.account_id, managerId, cli);
     if (credentialId === execution.credential_id) return credentialId;
     if (execution.runtime_profile?.credential_ref && execution.runtime_profile.credential_ref !== credentialId) {
@@ -1798,15 +1906,18 @@ export class AgentSessionsService implements OnModuleDestroy {
    * 서버가 대신 보내는 프롬프트가 끼어들지 않는다(agentSessionAcceptsPrompt). 화면의 턴 중 입력은
    * 그대로 매니저로 가고, 매니저가 재시작된 프로세스를 기다렸다가 넣는다.
    *
-   * 인증은 이때 소유 계정의 현재 CLI 설정으로 다시 묶는다(rebindCredentialForRestart) —
-   * usage limit 에 걸린 credential 을 호스트 설정에서 바꾸고 재시작하는 것이 정식 경로다.
+   * 세션 메뉴에서 인증을 직접 고르지 않았다면 소유 계정의 현재 CLI 설정으로 다시 묶는다.
+   * 직접 고른 인증은 일반 재시작에도 유지한다(rebindCredentialForRestart).
    */
-  async restart(accountId: string, userId: string, managerId: string, cli: string, sessionId: string): Promise<AgentSessionLiveSnapshot> {
+  async restart(accountId: string, userId: string, managerId: string, cli: string, sessionId: string, settingsInput?: unknown): Promise<AgentSessionLiveSnapshot> {
     const rec = this.requireHost(accountId, managerId, cli);
     this.assertSessionId(sessionId);
-    const execution = await this.executionFor(accountId, managerId, cli, sessionId);
+    if (settingsInput !== undefined && (!settingsInput || typeof settingsInput !== 'object' || Array.isArray(settingsInput))) throw new AgentSessionError(400, 'session_settings_invalid');
+    const changes = settingsInput && Object.keys(settingsInput).length ? settingsInput as Record<string, unknown> : null;
+    const execution = changes ? await this.changeSessionSettingsForRestart(accountId, managerId, cli, sessionId, changes)
+      : await this.executionFor(accountId, managerId, cli, sessionId);
     accountId = execution.account_id;
-    const credentialId = await this.rebindCredentialForRestart(userId, managerId, cli, sessionId, execution);
+    const credentialId = changes ? execution.credential_id : await this.rebindCredentialForRestart(userId, managerId, cli, sessionId, execution);
     const state = this.live.get(liveKey(managerId, cli, sessionId))
       ?? await this.seedState(rec, managerId, cli, sessionId, { cwd: '', title: '', status: 'starting', driver_user_id: userId });
     state.status = 'starting';

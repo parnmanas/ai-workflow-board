@@ -7183,5 +7183,10 @@
   "@team-member mentions are sent to the orchestrator for assignment.": "@team-member mentions are sent to the orchestrator for assignment.",
   "Team member": "Team member",
   "Additional answer (optional)": "Additional answer (optional)",
-  "Complete the required fields.": "Complete the required fields."
+  "Complete the required fields.": "Complete the required fields.",
+  "Process settings": "Process settings",
+  "Restart required": "Restart required",
+  "Yes, restart": "Yes, restart",
+  "Changes apply only to this session. Restart confirmation appears before applying.": "Changes apply only to this session. Restart confirmation appears before applying.",
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?"
 }

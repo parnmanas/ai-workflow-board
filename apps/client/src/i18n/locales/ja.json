@@ -7183,5 +7183,10 @@
   "@team-member mentions are sent to the orchestrator for assignment.": "@チームメンバーのメンションは、そのメンバーへの割り当て依頼としてオーケストレーターに送られます。",
   "Team member": "チームメンバー",
   "Additional answer (optional)": "追加回答（任意）",
-  "Complete the required fields.": "必須項目を入力してください。"
+  "Complete the required fields.": "必須項目を入力してください。",
+  "Process settings": "プロセス設定",
+  "Restart required": "再起動が必要です",
+  "Yes, restart": "はい、再起動",
+  "Changes apply only to this session. Restart confirmation appears before applying.": "変更はこのセッションにのみ適用されます。適用前に再起動を確認します。",
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "この設定を適用するにはセッションのプロセスを再起動する必要があります。会話履歴は保持されますが、進行中のターンは中断されます。今すぐ再起動しますか？"
 }
