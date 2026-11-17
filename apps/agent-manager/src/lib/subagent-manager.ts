@@ -2472,10 +2472,37 @@ export class SubagentManager implements SubagentManagerContract {
    */
   async stopForAgent(agentId: string): Promise<SubagentStopForAgentResult> {
     if (!agentId) return { count: 0, inflight: [] };
+    return this.#stopWhere((rec) => rec.agent_id === agentId, `stopForAgent: agent=${agentId.slice(0, 8)}`);
+  }
+
+  /**
+   * The one-shot twin of BaseSessionManager.stopForRoom (`stop_chat_session`):
+   * only the subagents `agentId` runs for `roomId` — a superseded
+   * orchestration-step attempt — while the identity's other work keeps running.
+   */
+  async stopForRoom(roomId: string, agentId: string, waitForExit = false): Promise<SubagentStopForAgentResult> {
+    if (!roomId || !agentId) return { count: 0, inflight: [] };
+    const pids = Array.from(this.#map.values()).filter((rec): rec is SubagentRecord => rec.kind !== 'reservation' && rec.room_id === roomId && rec.agent_id === agentId).map(rec => rec.pid);
+    const result = this.#stopWhere(
+      (rec) => rec.room_id === roomId && rec.agent_id === agentId,
+      `stopForRoom: room=${roomId.slice(0, 8)} agent=${agentId.slice(0, 8)}`,
+    );
+    if (waitForExit) {
+      const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      const deadline = Date.now() + STOP_GRACE_MS + 5000;
+      while (pids.some(alive)) {
+        if (Date.now() >= deadline) throw new Error('The previous chat process has not finished closing');
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    return result;
+  }
+
+  #stopWhere(match: (rec: SubagentRecord) => boolean, label: string): SubagentStopForAgentResult {
     const victims: SubagentRecord[] = [];
     for (const [pid, rec] of this.#map.entries()) {
       if (rec.kind === 'reservation') continue;
-      if (rec.agent_id !== agentId) continue;
+      if (!match(rec)) continue;
       victims.push(rec);
       this.#map.delete(pid);
     }
@@ -2488,9 +2515,7 @@ export class SubagentManager implements SubagentManagerContract {
         /* already dead */
       }
     }
-    log(
-      `SubagentManager stopForAgent: agent=${agentId.slice(0, 8)} signalled ${victims.length} one-shot subagent(s) — SIGTERM`,
-    );
+    log(`SubagentManager ${label} signalled ${victims.length} one-shot subagent(s) — SIGTERM`);
     setTimeout(() => {
       for (const rec of victims) {
         try {

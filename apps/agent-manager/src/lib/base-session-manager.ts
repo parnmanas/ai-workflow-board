@@ -132,6 +132,8 @@ export interface MonitorMeta {
 }
 
 export interface SpawnOpts {
+  /** Start the process without submitting a turn (chat settings restart). */
+  warmup?: boolean;
   onProgress?: (stage: string) => void;
   monitorMeta?: MonitorMeta;
   /**
@@ -301,6 +303,8 @@ export interface SessionRecord {
    *   - `'max_turns'`           — _maybeCloseForMaxTurns (turn cap hit, no
    *                               progress evidence)
    *   - `'credential_rotation'` — stopForAgent
+   *   - `'superseded'`          — stopForRoom (a newer attempt of the same
+   *                               orchestration step replaced this one)
    *   - `'lru_eviction'`        — #evictLru (_ensureCapacity reaping the
    *                               least-recently-touched session to make
    *                               room for a new spawn at maxConcurrent)
@@ -663,7 +667,7 @@ export class BaseSessionManager {
     sessionKey: string,
     rolePrompt: string,
     firstTurnText: string,
-    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt, approvalBridge }: SpawnOpts = {},
+    { onProgress, monitorMeta, agentContext, firstTurnImages, harness: rawHarness, runtimeProfile, effortPreset, envVars, chainAttempt: chainAttemptOpt, approvalBridge, warmup }: SpawnOpts = {},
   ): Promise<SessionRecord | null> {
     // ST-7: pick the adapter for this agent's CLI choice (claude/codex/antigravity)
     // and bind it to the session record so future turns formatTurn /
@@ -1171,9 +1175,11 @@ export class BaseSessionManager {
         `${this.#logTag} spawned new pid=${sess.pid} cli=${adapter.cliType} kind=${this.#kindLabel} ${this.#keyField}=${sessionKey}`,
       );
 
-      this.#startTurn(sess, onProgress);
-      this._writeTurn(sess, firstTurnText, firstTurnImages);
-      sess.turnCount = 1;
+      if (!warmup) {
+        this.#startTurn(sess, onProgress);
+        this._writeTurn(sess, firstTurnText, firstTurnImages);
+        sess.turnCount = 1;
+      }
       this._resetIdleTimer(sess);
       this._sessions.set(sessionKey, sess);
       this.#ensureHealthSweep();
@@ -2094,11 +2100,48 @@ export class BaseSessionManager {
   ): Promise<{ count: number; inflight: Array<{ ticketId: string; role: string }> }> {
     if (!agentId) return { count: 0, inflight: [] };
     const victims = Array.from(this._sessions.values()).filter((s) => s.agentId === agentId);
+    return this.#signalStop(victims, 'credential_rotation', `stopForAgent: agent=${agentId.slice(0, 8)}`);
+  }
+
+  /**
+   * Force-terminate the one session `agentId` holds in `roomId` — the session
+   * of a superseded orchestration-step attempt (`stop_chat_session`). Unlike
+   * stopForAgent this leaves every other session of the identity running: a
+   * runtime identity is (cli, folder, credential), so the orchestrator, sibling
+   * steps, tickets and other missions in the same project folder share it.
+   */
+  async stopForRoom(
+    roomId: string,
+    agentId: string,
+    waitForExit = false,
+  ): Promise<{ count: number; inflight: Array<{ ticketId: string; role: string }> }> {
+    if (!roomId || !agentId) return { count: 0, inflight: [] };
+    const victims = Array.from(this._sessions.values()).filter((s) => s.roomId === roomId && s.agentId === agentId);
+    const result = this.#signalStop(
+      victims,
+      'superseded',
+      `stopForRoom: room=${roomId.slice(0, 8)} agent=${agentId.slice(0, 8)}`,
+    );
+    if (waitForExit) {
+      const deadline = Date.now() + STOP_GRACE_MS + 5000;
+      while (victims.some(s => this._sessions.get(s[this.#keyField]) === s)) {
+        if (Date.now() >= deadline) throw new Error('The previous chat process has not finished closing');
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    return result;
+  }
+
+  #signalStop(
+    victims: SessionRecord[],
+    reason: string,
+    label: string,
+  ): { count: number; inflight: Array<{ ticketId: string; role: string }> } {
     if (victims.length === 0) return { count: 0, inflight: [] };
     for (const sess of victims) {
       // ticket b831b896 round 3: canonical bucket for a run-completion
       // backstop, set before signalling like every other kill site.
-      sess.stopReason = 'credential_rotation';
+      sess.stopReason = reason;
       if (sess.idleTimer) {
         clearTimeout(sess.idleTimer);
         sess.idleTimer = null;
@@ -2114,9 +2157,7 @@ export class BaseSessionManager {
         /* already dead */
       }
     }
-    log(
-      `${this.#logTag} stopForAgent: agent=${agentId.slice(0, 8)} signalled ${victims.length} session(s) — SIGTERM`,
-    );
+    log(`${this.#logTag} ${label} signalled ${victims.length} session(s) — SIGTERM`);
     setTimeout(() => {
       for (const sess of victims) {
         try {

@@ -8,6 +8,7 @@ import { t as translate } from '../../i18n/core';
 import { useLocale } from '../../i18n/react';
 import { tokens } from '../../tokens';
 import { Button, Input, Modal } from '../common';
+import ChatAgentSettingsModal from './ChatAgentSettingsModal';
 
 /** Mounted for one room at a time; all names come from the room's resolved roster. */
 export default function RoomParticipantsModal({ roomId, currentUserId, onClose, onChanged }: {
@@ -22,6 +23,7 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
   const [detail, setDetail] = useState<ChatRoomDetail | null>(null);
   const [selected, setSelected] = useState<ChatRoomParticipantInfo | null>(null);
   const [editing, setEditing] = useState<ChatRoomParticipantInfo | null>(null);
+  const [settingsAgent, setSettingsAgent] = useState<ChatRoomParticipantInfo | null>(null);
   const [nickname, setNickname] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -86,6 +88,10 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
     }
   };
 
+  if (settingsAgent && detail) return <ChatAgentSettingsModal key={settingsAgent.id} roomId={roomId} accountId={detail.account_id}
+    rowId={settingsAgent.id} name={settingsAgent.name} onClose={() => setSettingsAgent(null)}
+    onChanged={() => { setRevision(value => value + 1); onChanged(roomId); }} />;
+
   return (
     <Modal isOpen onClose={close} title={translate(editing ? 'Edit nickname' : selected ? 'Remove participant?' : 'Participants')} maxWidth={520}
       footer={editing ? <>
@@ -119,11 +125,13 @@ export default function RoomParticipantsModal({ roomId, currentUserId, onClose, 
         <ul className="awb-room-participant-list">
           {detail?.participants.map(p => {
             const self = p.participant_type === 'user' && p.participant_id === currentUserId;
-            return <li key={`${p.participant_type}:${p.participant_id}`}>
-              <div style={{ minWidth: 0, flex: 1, overflowWrap: 'anywhere' }}>
+            return <li key={`${p.participant_type}:${p.participant_id}`} style={{ flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: '1 1 160px', overflowWrap: 'anywhere' }}>
                 <strong style={{ color: tokens.colors.textPrimary }}>{p.name}</strong>
                 <div style={{ color: tokens.colors.textSecondary, fontSize: 11 }}>{self ? translate('나') : translate(p.participant_type === 'agent' ? 'Agent' : 'User')}</div>
               </div>
+              {detail.can_edit_agent_settings && hasPermission('chat.send') && p.has_runtime_settings && <Button variant="secondary" size="sm"
+                aria-label={translate('Settings for {0}', { 0: p.name })} onClick={() => setSettingsAgent(p)}>{translate('Settings')}</Button>}
               {canEdit && p.participant_type === 'agent' && p.nickname != null && <Button variant="secondary" size="sm"
                 aria-label={translate('Edit nickname for {0}', { 0: p.name })}
                 onClick={() => { setError(''); setEditing(p); setNickname(p.nickname || ''); }}>{translate('Edit nickname')}</Button>}

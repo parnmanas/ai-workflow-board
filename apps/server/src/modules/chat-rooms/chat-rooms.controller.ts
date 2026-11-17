@@ -26,6 +26,7 @@ import { TicketAttachment } from '../../entities/TicketAttachment';
 import { MAX_IMAGE_SIZE, MAX_IMAGES_PER_MESSAGE, ALLOWED_IMAGE_MIMETYPES, MAX_TICKET_ATTACHMENT_SIZE } from '../../common/constants/upload';
 import { approxBase64Size, projectChatAttachment, validateAttachmentMimetype } from '../mcp/shared/ticket-helpers';
 import { getChatRoomSessionStatus } from '../agent-api/chat-session-status.store';
+import { ChatAgentSettingsService } from './chat-agent-settings.service';
 
 @ApiBearerAuth('user-session')
 @ApiTags('chat-rooms')
@@ -38,6 +39,7 @@ export class ChatRoomsController {
     private readonly messaging: RoomMessagingService,
     @InjectRepository(TicketAttachment)
     private readonly attachmentRepo: Repository<TicketAttachment>,
+    private readonly agentSettings: ChatAgentSettingsService,
   ) {}
 
   @Get()
@@ -162,6 +164,24 @@ export class ChatRoomsController {
     } catch (err: any) {
       return res.status(err.status || 500).json({ error: err.message });
     }
+  }
+
+  @Get(':roomId/agents/:participantRowId/settings')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async getAgentSettings(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Param('participantRowId') rowId: string) {
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
+    try { return res.json(await this.agentSettings.get(roomId, accountId, (req as any).currentUser.id, rowId)); }
+    catch (err: any) { return res.status(err.status || 400).json({ error: err.message }); }
+  }
+
+  @Post(':roomId/agents/:participantRowId/restart')
+  @RequirePermission(PERMISSIONS.CHAT_SEND)
+  async restartAgent(@Req() req: Request, @Res() res: Response, @Param('roomId') roomId: string, @Param('participantRowId') rowId: string, @Body() body: unknown) {
+    const accountId = req.headers['x-account-id'] as string;
+    if (!accountId) return res.status(400).json({ error: 'Account ID required' });
+    try { return res.status(200).json(await this.agentSettings.restart(roomId, accountId, (req as any).currentUser.id, rowId, body)); }
+    catch (err: any) { return res.status(err.status || 400).json({ error: err.message }); }
   }
 
   @Get(':roomId/messages')

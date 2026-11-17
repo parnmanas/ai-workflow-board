@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatRoom } from '../../entities/ChatRoom';
 import { ChatRoomParticipant } from '../../entities/ChatRoomParticipant';
@@ -19,18 +19,24 @@ import { SharedServicesModule } from '../../services/shared-services.module';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { ArtifactRefsModule } from '../artifact-refs/artifact-refs.module';
+import { AgentManagerModule } from '../agent-manager/agent-manager.module';
+import { ChatAgentSettingsService } from './chat-agent-settings.service';
+import { AgentSessionsModule } from '../agent-sessions/agent-sessions.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([ChatRoom, ChatRoomParticipant, ChatRoomMessage, User, Ticket, UserMention, TicketAttachment, Account, OrchestrationMission]),
     SharedServicesModule,
     ArtifactRefsModule,
+    forwardRef(() => AgentManagerModule),
+    forwardRef(() => AgentSessionsModule),
   ],
   controllers: [ChatRoomsController],
   providers: [
     RoomCrudService,
     RoomMembershipService,
     RoomMessagingService,
+    ChatAgentSettingsService,
     AuthGuard,
     PermissionGuard,
   ],

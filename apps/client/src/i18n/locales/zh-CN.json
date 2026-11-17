@@ -7188,5 +7188,15 @@
   "Restart required": "需要重启",
   "Yes, restart": "是，重启",
   "Changes apply only to this session. Restart confirmation appears before applying.": "更改仅应用于此会话。应用前将确认是否重启。",
-  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "应用此设置需要重启会话进程。对话记录会保留，但正在进行的轮次将被中断。现在重启吗？"
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "应用此设置需要重启会话进程。对话记录会保留，但正在进行的轮次将被中断。现在重启吗？",
+  "Agent settings": "代理设置",
+  "Settings for {0}": "{0} 的设置",
+  "Changes apply only to this agent in this room.": "更改仅应用于此聊天室中的此代理。",
+  "Applying chat agent settings restarts this agent in this room. Conversation history is kept, but an active turn will be interrupted. Restart now?": "应用设置将重启此聊天室中的此代理。会话记录会保留，但正在进行的回复将被中断。现在重启吗？",
+  "Settings saved. The agent will start with them on the next message.": "设置已保存。代理将在下一条消息时使用新设置启动。",
+  "Agent settings applied and process restarted.": "代理设置已应用，进程已重启。",
+  "Runtime Host is offline": "Runtime Host 已离线",
+  "Update Agent Manager to change chat agent settings": "请更新 Agent Manager 以更改聊天代理设置",
+  "Settings applied and this chat session reopened.": "设置已应用，此聊天会话已重新打开。",
+  "Hermes profiles are shared across rooms and cannot be changed here.": "Hermes 配置由多个聊天室共享，无法在此更改。"
 }

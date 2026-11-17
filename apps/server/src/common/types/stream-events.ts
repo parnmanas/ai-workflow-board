@@ -804,6 +804,8 @@ export type AgentManagerCommand =
   // applyKeepAlive (inherited from BaseSessionManager).
   | 'extend_chat_keepalive'  // defer idle/maxTurns reap for a live chat session, up to the hard ceiling
   | 'release_chat_keepalive' // clear an active grant early
+  /** Room-scoped settings restart. args: room_id, agent_id, previous_agent_id, account_id, runtime, cli_runtime_profile, room_name. */
+  | 'restart_chat_session'
   // ticket b2e79108 — Codex/Claude CLI device-auth 자동 로그인. args:
   // { session_id, cli }. 매니저는 프로세스를 spawn한 직후 빠르게 "시작됨"만
   // ack한다 — 사람의 브라우저 승인을 기다리는 완료까지 기다리면 command-ledger

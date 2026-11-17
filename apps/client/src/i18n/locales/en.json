@@ -7188,5 +7188,15 @@
   "Restart required": "Restart required",
   "Yes, restart": "Yes, restart",
   "Changes apply only to this session. Restart confirmation appears before applying.": "Changes apply only to this session. Restart confirmation appears before applying.",
-  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?"
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?",
+  "Agent settings": "Agent settings",
+  "Settings for {0}": "Settings for {0}",
+  "Changes apply only to this agent in this room.": "Changes apply only to this agent in this room.",
+  "Applying chat agent settings restarts this agent in this room. Conversation history is kept, but an active turn will be interrupted. Restart now?": "Applying chat agent settings restarts this agent in this room. Conversation history is kept, but an active turn will be interrupted. Restart now?",
+  "Settings saved. The agent will start with them on the next message.": "Settings saved. The agent will start with them on the next message.",
+  "Agent settings applied and process restarted.": "Agent settings applied and process restarted.",
+  "Runtime Host is offline": "Runtime Host is offline",
+  "Update Agent Manager to change chat agent settings": "Update Agent Manager to change chat agent settings",
+  "Settings applied and this chat session reopened.": "Settings applied and this chat session reopened.",
+  "Hermes profiles are shared across rooms and cannot be changed here.": "Hermes profiles are shared across rooms and cannot be changed here."
 }

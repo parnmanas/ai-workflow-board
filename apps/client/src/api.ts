@@ -2,7 +2,7 @@ import { t as translate } from './i18n/core';
 import type { MailConnections, MailConnection, MailConnectionInput, MailList, MailReply, BusinessMailMessage, MailThreadList, BusinessMailWithThread, MailSendInput } from './business-mail.types';
 import { localizeBusinessConnector, localizeMailConnector, localizeSelfServiceAssessment, localizeTrademarkConnector } from './i18n/catalog';
 import type { AgentTemplate } from './types';
-import type { AgentSessionProcessSettings, AgentSessionRestartSettings } from './types';
+import type { AgentSessionProcessSettings, AgentSessionRestartSettings, ChatAgentSettings } from './types';
 import type { SelfServiceAssessment, Cashbook, CashEntry, CashEntryInput, CashPeriod } from './business.types';
 import type { BusinessTrademark, TrademarkInput, TrademarkList, TrademarkMail, TrademarkMailKind, TrademarkMailPayload, TrademarkMailReview } from './business.types';
 import type { TrademarkIntegrationsView, TrademarkIntegrationInput, TrademarkIntegration, TrademarkIntegrationAction } from './business.types';
@@ -2272,6 +2272,17 @@ export const api = {
   setChatAgentNickname: (roomId: string, accountId: string, participantId: string, nickname: string) =>
     request<{ ok: boolean }>(`/chat-rooms/${encodeURIComponent(roomId)}/participants/agent/${encodeURIComponent(participantId)}/nickname`, {
       method: 'PATCH', headers: { ...getAuthHeaders(), 'X-Account-Id': accountId }, body: JSON.stringify({ nickname }),
+    }),
+
+  getChatAgentSettings: (roomId: string, accountId: string, rowId: string) =>
+    request<ChatAgentSettings>(`/chat-rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(rowId)}/settings`, {
+      headers: { ...getAuthHeaders(), 'X-Account-Id': accountId },
+    }),
+
+  restartChatAgent: (roomId: string, accountId: string, rowId: string, expectedRevision: string, settings: Record<string, unknown>) =>
+    request<ChatAgentSettings>(`/chat-rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(rowId)}/restart`, {
+      method: 'POST', headers: { ...getAuthHeaders(), 'X-Account-Id': accountId },
+      body: JSON.stringify({ expected_revision: expectedRevision, settings }),
     }),
 
   removeChatRoomParticipant: (roomId: string, accountId: string, participantType: 'user' | 'agent', participantId: string) =>

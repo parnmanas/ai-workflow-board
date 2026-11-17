@@ -102,6 +102,7 @@ interface RuntimeConfigFieldsProps {
   availableRuntimeIds?: string[];
   disabled?: boolean;
   showRuntime?: boolean;
+  profileDisabled?: boolean;
   /**
    * 선택된 Runtime Host가 보고한 런타임별 권한 등급 표현력
    * (`runtime_capabilities[<runtime>].capabilities.permission_tiers`,
@@ -131,6 +132,7 @@ export default function RuntimeConfigFields({
   availableRuntimeIds,
   disabled = false,
   showRuntime = true,
+  profileDisabled = false,
   namedProfiles,
   permissionTiers,
   approveAvailable = true,
@@ -236,6 +238,7 @@ export default function RuntimeConfigFields({
               <div>
                 <Select
                   label={translate('{0} profile', { 0: runtimeName })}
+                  disabled={profileDisabled}
                   value={value.profile}
                   options={[
                     { value: '', label: translate('Default — no explicit profile') },
@@ -256,6 +259,7 @@ export default function RuntimeConfigFields({
             ) : (
               <Input
                 label={translate('{0} profile', { 0: runtimeName })}
+                disabled={profileDisabled}
                 value={value.profile}
                 placeholder={namedProfiles ? translate('optional — Host에 등록된 프로파일 없음') : translate('optional')}
                 onChange={(event) => onChange({ ...value, profile: event.target.value })}

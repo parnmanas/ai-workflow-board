@@ -1079,6 +1079,10 @@ async function runRuntime(
       .map((a) => a.cli);
 
   const commandHandler = new AgentManagerCommandHandler(config, {
+    restartChatSession: args => {
+      if (!eventStreamRef) return Promise.reject(new Error('Event stream is not ready'));
+      return eventStreamRef.restartChatSession(args);
+    },
     registry: managedAgents,
     contextRegistry: managedAgentContexts,
     chatSessionManager,

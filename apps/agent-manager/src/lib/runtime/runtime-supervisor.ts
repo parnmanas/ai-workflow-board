@@ -38,6 +38,8 @@ export class RuntimeDispatchError extends Error {
 }
 
 export interface RuntimeDispatchRequest {
+  /** Open the configured session without asking the agent to do any work. */
+  prepareOnly?: boolean;
   agentId: string;
   runId: string;
   leaseId: string;
@@ -199,6 +201,7 @@ export class RuntimeSupervisor {
       requestApproval: request.requestApproval,
     });
 
+    if (request.prepareOnly) return { sessionId: record.sessionId, stopReason: 'ready', usage: normalizedUsage() };
     const prompt = [
       request.systemContext?.trim()
         ? `AWB CONTROL CONTEXT\n${request.systemContext.trim()}`
@@ -257,6 +260,22 @@ export class RuntimeSupervisor {
 
   getSession(agentId: string, runId: string): HermesSessionRecord | null {
     return this.#runtime.getSession(agentId, runId);
+  }
+
+  /**
+   * Cancel and close the named runs of `agentId` (`stop_chat_session`), so a
+   * later dispatch under the same run id opens a new ACP session instead of
+   * restoring the old one. The agent's process and its other runs keep going.
+   */
+  async closeRuns(agentId: string, runIds: string[]): Promise<number> {
+    let closed = 0;
+    for (const runId of new Set(runIds.filter(Boolean))) {
+      if (!this.getSession(agentId, runId)) continue;
+      await this.cancel(agentId, runId).catch(() => undefined);
+      await this.close(agentId, runId);
+      closed += 1;
+    }
+    return closed;
   }
 
   async stopForAgent(agentId: string): Promise<{ count: number; inflight: [] }> {

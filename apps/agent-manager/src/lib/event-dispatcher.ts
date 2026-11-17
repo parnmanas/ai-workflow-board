@@ -764,11 +764,14 @@ export interface SubagentSpawnResult {
 }
 
 export interface SubagentManager {
+  stopForRoom?(roomId: string, agentId: string, waitForExit?: boolean): Promise<{ count: number }>;
   canSpawn(): boolean;
   spawn(args: SubagentSpawnArgs): Promise<SubagentSpawnResult>;
 }
 
 export interface ChatDispatchArgs {
+  /** Open an idle process; replay the room context when its first real message arrives. */
+  warmup?: boolean;
   roomId: string;
   /** Agent identity that should respond to this message. For self-handling
    *  this is the manager's own agent id; for managed-agent fan-out it is
@@ -841,6 +844,7 @@ export interface ChatDispatchResult {
 }
 
 export interface ChatSessionManager {
+  stopForRoom?(roomId: string, agentId: string, waitForExit?: boolean): Promise<{ count: number }>;
   dispatch(args: ChatDispatchArgs): Promise<ChatDispatchResult>;
   recordRoomMessage(payload: any): void;
 }
@@ -1185,6 +1189,7 @@ export interface EventDispatcherDeps {
 }
 
 export class EventDispatcher {
+  private readonly chatOperations = new Map<string, Promise<void>>();
   #config: AwbConfig;
   #subagentManager: SubagentManager | null;
   #chatSessionManager: ChatSessionManager | null;
@@ -1935,7 +1940,7 @@ export class EventDispatcher {
       extra_env: entry.extra_env,
       credential_provider: entry.credential_provider ?? null,
       credential_id: entry.credential_id ?? null,
-      model: spec.model ?? entry.model ?? null,
+      model: spec.model,
       runtime_config: (spec.runtime_config as AgentExecutionContext['runtime_config']) ?? entry.runtime_config ?? null,
     };
     if (!ctx.api_key || !ctx.cwd || !ctx.mcp_config_path) return undefined;
@@ -4216,7 +4221,73 @@ export class EventDispatcher {
     });
   }
 
+  private async withChatOperations<T>(keys: string[], work: () => Promise<T>): Promise<T> {
+    const unique = [...new Set(keys)];
+    const previous = unique.map(key => this.chatOperations.get(key)).filter(Boolean);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    for (const key of unique) this.chatOperations.set(key, gate);
+    try { await Promise.all(previous); return await work(); }
+    finally {
+      release();
+      for (const key of unique) if (this.chatOperations.get(key) === gate) this.chatOperations.delete(key);
+    }
+  }
+
+  /** Restart only this room's participant. A settings change never submits an agent turn. */
+  async restartChatSession(args: Record<string, any>): Promise<string> {
+    const runtime = parseTriggerRuntime(args.runtime);
+    const roomId = typeof args.room_id === 'string' ? args.room_id.trim() : '';
+    const oldId = typeof args.previous_agent_id === 'string' ? args.previous_agent_id.trim() : '';
+    const accountId = typeof args.account_id === 'string' ? args.account_id.trim() : '';
+    if (!runtime || !roomId || !oldId || !accountId || !this.#runtimeBelongsToThisHost(runtime)
+      || runtimeIdentityKey(runtime) !== args.agent_id || accountId !== this.#config.account_id) {
+      throw new Error('Invalid chat restart target');
+    }
+    const agentId = runtimeIdentityKey(runtime);
+    return this.withChatOperations([`${roomId}|${oldId}`, `${roomId}|${agentId}`], async () => {
+      // Prepare the credential before interrupting anything. A rejected credential leaves the old process alive.
+      await this.#materializeRuntime(runtime, accountId);
+      const context = await this.#resolveRuntimeContext(runtime, accountId);
+      if (!context || context.agent_id !== agentId) throw new Error('Chat runtime could not be prepared');
+      if (this.#chatSessionManager && !this.#chatSessionManager.stopForRoom) throw new Error('Room-scoped restart is unavailable');
+      if (this.#subagentManager && !this.#subagentManager.stopForRoom) throw new Error('Room-scoped restart is unavailable');
+      await this.#chatSessionManager?.stopForRoom?.(roomId, oldId, true);
+      await this.#subagentManager?.stopForRoom?.(roomId, oldId, true);
+      await this.#runtimeSupervisor?.closeRuns(oldId, [`chat:${roomId}:${oldId}`]);
+      if (isAcpRuntime(runtime.cli)) {
+        if (!this.#runtimeSupervisor) throw new Error('Runtime supervisor is unavailable');
+        await this.#runtimeSupervisor.dispatch({ agentId, runId: `chat:${roomId}:${agentId}`, leaseId: `chat:${context.cwd}`,
+          cwd: context.cwd, apiKey: context.api_key, runtimeId: runtime.cli, runtimeConfig: context.runtime_config,
+          model: runtime.model, task: '', prepareOnly: true });
+        return JSON.stringify({ application: 'session_reopened' });
+      }
+      const delegation = (this.#config as any).delegation ?? {};
+      const persistent = createRuntimeCliAdapter(runtime.cli).has(ADAPTER_CAPABILITIES.PERSISTENT_SESSION)
+        && delegation.enabled !== false && delegation.persistentChatSessions !== false;
+      if (persistent) {
+        if (!this.#chatSessionManager) throw new Error('Chat session manager is unavailable');
+        const result = await this.#chatSessionManager.dispatch({ roomId, agentId, senderId: '', senderName: '',
+          messageId: `settings:${roomId}:${Date.now()}`, createdAt: new Date().toISOString(), content: '',
+          rolePrompt: runtime.role_prompt, roomName: String(args.room_name || ''), agentContext: context,
+          runtimeProfile: resolveTriggerRuntimeProfile(args.cli_runtime_profile), warmup: true });
+        if (!result.dispatched) throw new Error(`Chat process could not restart: ${result.reason || 'spawn failed'}`);
+        return JSON.stringify({ application: 'restarted' });
+      }
+      // A one-shot CLI has no idle process to reopen. Its next user message starts a fresh process with this spec.
+      return JSON.stringify({ application: 'next_message' });
+    });
+  }
+
   async handleChatRequest(raw: string): Promise<void> {
+    let payload: any;
+    try { payload = JSON.parse(raw)?.payload; } catch { return this.dispatchChatRequest(raw); }
+    // ACP dispatch awaits the whole turn; closing its run must be able to interrupt that wait.
+    if (!payload?.room_id || !payload?.agent_id || isAcpRuntime(payload.runtime?.cli)) return this.dispatchChatRequest(raw);
+    return this.withChatOperations([`${payload.room_id}|${payload.agent_id}`], () => this.dispatchChatRequest(raw));
+  }
+
+  private async dispatchChatRequest(raw: string): Promise<void> {
     let ev: any;
     try {
       ev = JSON.parse(raw);
@@ -5086,6 +5157,17 @@ export class EventDispatcher {
   }
 
   async handleChatRoomMessage(raw: string): Promise<void> {
+    let payload: any;
+    try { const event = JSON.parse(raw); payload = event.payload || event; }
+    catch { return this.dispatchChatRoomMessage(raw); }
+    const members: string[] = Array.isArray(payload.agent_member_ids) ? payload.agent_member_ids : [];
+    if (!payload.room_id || members.some(id => isAcpRuntime(payload.agent_member_runtimes?.[id]?.cli))) {
+      return this.dispatchChatRoomMessage(raw);
+    }
+    return this.withChatOperations(members.map(id => `${payload.room_id}|${id}`), () => this.dispatchChatRoomMessage(raw));
+  }
+
+  private async dispatchChatRoomMessage(raw: string): Promise<void> {
     let ev: any;
     try {
       ev = JSON.parse(raw);

@@ -31,11 +31,13 @@ export function applyAgentTemplate(template: AgentTemplate): RuntimeSelectionVal
 }
 
 /** Shared by templates, sessions, board/chat declarations and team slots. */
-export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, idPrefix, modelConfigId, approveAvailable }: {
+export default function RuntimeSelectionFields({ value, onChange, hosts, disabled = false, showTemplates = true, session = false, idPrefix, modelConfigId, approveAvailable, lockHostAndCli = false, lockRuntimeProfile = false }: {
   value: RuntimeSelectionValue;
   onChange(value: RuntimeSelectionValue, source?: 'template' | 'host' | 'cli'): void;
   hosts: RuntimeSelectionHost[];
   disabled?: boolean;
+  lockHostAndCli?: boolean;
+  lockRuntimeProfile?: boolean;
   showTemplates?: boolean;
   session?: boolean;
   idPrefix?: string;
@@ -100,7 +102,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
           {' '}{translate('관리자는 Hosts → Agent 템플릿에서 템플릿을 등록할 수 있습니다.')}</p>}
       </div>}
       {error && <div role="alert">{error}</div>}
-      <Select id={`${controlId}-host`} label={"Runtime Host"} value={value.host_id} disabled={disabled} options={[
+      <Select id={`${controlId}-host`} label={"Runtime Host"} value={value.host_id} disabled={disabled || lockHostAndCli} options={[
         { value: '', label: translate('선택…') },
         ...(value.host_id && !host ? [{ value: value.host_id, label: translate('{0} (unavailable)', { 0: value.host_id }) }] : []),
         ...hosts.map((h) => ({ value: h.id, label: h.name })),
@@ -109,7 +111,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
         const cli = nextHost?.clis && !nextHost.clis.includes(value.cli) ? nextHost.clis[0] || '' : value.cli;
         onChange({ ...emptyRuntimeSelection(), host_id: e.target.value, cli }, 'host');
       }} />
-      <Select id={`${controlId}-cli`} label="CLI" aria-label="CLI" value={value.cli} disabled={disabled || !host} options={[
+      <Select id={`${controlId}-cli`} label="CLI" aria-label="CLI" value={value.cli} disabled={disabled || lockHostAndCli || !host} options={[
         { value: '', label: translate('선택…') },
         ...(host?.clis ?? runtimeOptions(catalog).map((option) => option.value)).map((cli) => ({ value: cli, label: cliLabel(cli) })),
         ...(value.cli && host?.clis && !host.clis.includes(value.cli)
@@ -117,6 +119,7 @@ export default function RuntimeSelectionFields({ value, onChange, hosts, disable
       ]} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange({ ...value, cli: e.target.value,
         runtime_config: emptyRuntimeSelection().runtime_config, model: null, effort: null }, 'cli')} />
       {!session && <RuntimeConfigFields showRuntime={false}
+        profileDisabled={lockRuntimeProfile}
         value={runtimeSelectionFromAgent(value.cli, value.runtime_config as any)} disabled={disabled || !value.host_id}
         approveAvailable={approveAvailable && value.cli ? approveAvailable(value.cli) : true}
         onChange={(selection) => {

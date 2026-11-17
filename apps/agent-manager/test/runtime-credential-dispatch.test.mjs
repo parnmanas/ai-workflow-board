@@ -47,6 +47,7 @@ beforeEach(() => {
     chatPosts: [],
     comments: [],
     acks: [],
+    commandAcks: [],
   };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
@@ -93,6 +94,10 @@ beforeEach(() => {
       server.acks.push(JSON.parse(init.body));
       return Response.json({});
     }
+    if (u.endsWith('/api/agent-manager/command/ack')) {
+      server.commandAcks.push(JSON.parse(init.body));
+      return Response.json({});
+    }
     if (u.includes('/api/agent/tickets/')) {
       return Response.json({ id: TICKET, title: 'Fix', account_id: ACCOUNT, status: 'in_progress', comments: [] });
     }
@@ -105,7 +110,7 @@ afterEach(async () => {
   await _drainTrustSeedLocksForTests();
 });
 
-function host() {
+function host({ persistent = true } = {}) {
   const contexts = new ManagedAgentContextRegistry();
   const registry = {
     upsert: () => ({ status: 'spawning' }),
@@ -113,18 +118,21 @@ function host() {
     markStopped() {},
     get() { return undefined; },
   };
-  const config = { account_id: ACCOUNT, url: 'http://awb.test', apiKey: 'manager-key', delegation: { enabled: true } };
+  const config = { account_id: ACCOUNT, url: 'http://awb.test', apiKey: 'manager-key', delegation: { enabled: true, persistentChatSessions: persistent } };
   const commands = new AgentManagerCommandHandler(config, {
     getInstanceId: () => 'instance-1',
     registry,
     contextRegistry: contexts,
+    restartChatSession: args => dispatcher.restartChatSession(args),
   });
   const spawns = [];
   const chatSpawns = [];
   const history = [];
+  const stops = [];
   const dispatcher = new EventDispatcher(config, {
     managedAgentContexts: contexts,
     chatSessionManager: {
+      async stopForRoom(room, agent, wait) { stops.push({ type: 'chat', room, agent, wait }); },
       recordRoomMessage(p) { history.push(p); },
       async dispatch(args) { chatSpawns.push(args); return { dispatched: true, pid: 4242 }; },
     },
@@ -144,13 +152,80 @@ function host() {
       async verifyPushReadiness() { return { ok: true }; },
     },
     subagentManager: {
+      async stopForRoom(room, agent, wait) { stops.push({ type: 'oneshot', room, agent, wait }); },
       canSpawn: () => true,
       // Keep the fake process alive until the test explicitly fires onExit.
       async spawn(args) { spawns.push(args); return { spawned: true, pid: process.pid }; },
     },
   });
-  return { commands, dispatcher, contexts, spawns, chatSpawns, history };
+  return { commands, dispatcher, contexts, spawns, chatSpawns, history, stops };
 }
+
+function restartArgs(runtime, previous = runtimeIdentityKey(runtime)) {
+  return { room_id: 'settings-room', account_id: ACCOUNT, previous_agent_id: previous, agent_id: runtimeIdentityKey(runtime), runtime };
+}
+
+test('the restart command returns the scoped application result through the normal acknowledgement', async () => {
+  const { commands, chatSpawns } = host();
+  await commands.handle(JSON.stringify({ command_id: 'chat-settings-command', command: 'restart_chat_session', args: restartArgs(spec('cred-1')) }));
+  assert.equal(chatSpawns.length, 1);
+  assert.equal(server.commandAcks[0].status, 'ok');
+  assert.deepEqual(JSON.parse(server.commandAcks[0].detail), { application: 'restarted' });
+});
+
+test('restart prepares a new credential, waits for only this room to stop, and opens without a user turn', async () => {
+  const { dispatcher, chatSpawns, stops } = host();
+  const runtime = { ...spec('cred-1'), role_prompt: 'New role' };
+  const oldId = runtimeIdentityKey(spec(null));
+  assert.deepEqual(JSON.parse(await dispatcher.restartChatSession(restartArgs(runtime, oldId))), { application: 'restarted' });
+  assert.deepEqual(stops, ['chat', 'oneshot'].map(type => ({ type, room: 'settings-room', agent: oldId, wait: true })));
+  assert.equal(chatSpawns.length, 1);
+  assert.equal(chatSpawns[0].warmup, true);
+  assert.equal(chatSpawns[0].content, '');
+  assert.equal(chatSpawns[0].rolePrompt, 'New role');
+  assert.equal(chatSpawns[0].agentContext.extra_env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-ticket');
+  assert.equal(server.chatPosts.length, 0, 'no synthetic task is sent to the room');
+});
+
+test('a rejected credential cannot interrupt the old chat process', async () => {
+  const { dispatcher, stops, chatSpawns } = host();
+  server.credential = { status: 503 };
+  await assert.rejects(dispatcher.restartChatSession(restartArgs(spec('rejected'))));
+  assert.equal(stops.length, 0);
+  assert.equal(chatSpawns.length, 0);
+});
+
+test('clearing the model uses the CLI default even when its cached identity has a pinned model', async () => {
+  const { dispatcher, chatSpawns } = host();
+  const runtime = spec('cred-1');
+  await dispatcher.restartChatSession(restartArgs(runtime));
+  await dispatcher.handleChatRequest(JSON.stringify({ payload: {
+    room_id: 'other-room', account_id: ACCOUNT, agent_id: runtimeIdentityKey(runtime), runtime: { ...runtime, model: null }, new_message: 'hello',
+  } }));
+  assert.equal(chatSpawns.at(-1).agentContext.model, null);
+});
+
+test('one-shot chat restart stops the old work and waits for the next actual message to spawn', async () => {
+  const { dispatcher, stops, spawns, chatSpawns } = host({ persistent: false });
+  assert.deepEqual(JSON.parse(await dispatcher.restartChatSession(restartArgs(spec('cred-1')))), { application: 'next_message' });
+  assert.equal(stops.length, 2);
+  assert.equal(spawns.length + chatSpawns.length, 0);
+});
+
+test('restart and a new direct or group message serialize their preparation and spawn', async () => {
+  for (const mode of ['direct', 'group']) {
+    const { dispatcher, chatSpawns } = host();
+    const runtime = spec('cred-1');
+    const restarting = dispatcher.restartChatSession(restartArgs(runtime));
+    const dispatching = mode === 'direct'
+      ? dispatcher.handleChatRequest(JSON.stringify({ payload: { room_id: 'settings-room', account_id: ACCOUNT, agent_id: runtimeIdentityKey(runtime), runtime, new_message: 'after restart' } }))
+      : dispatcher.handleChatRoomMessage(roomEvent([runtime], { room_id: 'settings-room', content: 'after restart' }));
+    await Promise.all([restarting, dispatching]);
+    assert.equal(chatSpawns.length, 2, mode);
+    assert.equal(chatSpawns[0].warmup, true, mode);
+    assert.equal(chatSpawns[1].warmup, undefined, mode);
+  }
+});
 
 function spec(credentialId) {
   return {

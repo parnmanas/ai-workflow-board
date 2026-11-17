@@ -113,6 +113,9 @@ export function feedSse(
 }
 
 export class EventStream {
+  restartChatSession(args: Record<string, any>): Promise<string> {
+    return this.#dispatcher.restartChatSession(args);
+  }
   #url: string;
   #retryDelay = RECONNECT_INITIAL_MS;
   #abortController: AbortController | null = null;

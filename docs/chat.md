@@ -20,6 +20,37 @@ Team mission conversations also offer `@` choices for team members. Those use
 means; the orchestrator assigns the work. Selecting a team member does not
 directly wake a separate member session.
 
+## Agent settings and restart
+
+Open **Participants → Settings** beside an agent in an ordinary DM or group.
+An active user participant with `chat.send` can change its credential, model,
+backend, runtime options and role prompt. Host, CLI and working folder stay fixed.
+**Save settings** asks before restarting; **Cancel** leaves both saved settings
+and the running process alone. **Restart process** also works without edits.
+
+These settings apply only to the selected participant in this room. Existing
+messages are kept; an active response is interrupted. Persistent CLIs reopen
+without submitting a task, and replay room context on the next real message.
+A CLI that runs once per message stops the current process and uses the new
+settings when the next message arrives. Mission, step, action and QA/security
+agents remain configured by their source rather than this room editor.
+Hermes reopens only this room's ACP session, keeping its shared process and
+other rooms alive. Its process-wide profile is read-only in this editor.
+
+The server validates account ownership, credential compatibility, backend and
+the settings revision before writing. It requires the host capability
+`chat_session_restart` and sends `restart_chat_session` through the command
+ledger. Only that room's previous runtime is stopped; other rooms and tickets
+sharing it remain running. A changed credential updates the runtime identity
+while retaining the old participant snapshot for historical messages.
+If the host fails after saving, the UI reports that failure and reloads the
+saved revision so **Restart process** can retry safely.
+
+API: `GET /api/chat-rooms/:roomId/agents/:participantRowId/settings` and
+`POST .../restart` with `{ expected_revision, settings }`, using the room's
+`X-Account-Id`. `participantRowId` is the stable membership row UUID, not the
+runtime key. The settings response includes only public credential metadata.
+
 ## Removing participants
 
 Open **Participants · N** above the conversation, or **Manage participants** in

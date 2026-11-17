@@ -11,11 +11,13 @@ interface ModalProps {
   footer?: React.ReactNode;
   maxWidth?: number;
   className?: string;
+  /** Keep the title and actions visible while a long form scrolls. */
+  scrollBody?: boolean;
 }
 
 let _modalIdCounter = 0;
 
-export function Modal({ isOpen, onClose, title, children, footer, maxWidth, className }: ModalProps) {
+export function Modal({ isOpen, onClose, title, children, footer, maxWidth, className, scrollBody = false }: ModalProps) {
   // Generate a stable id per instance for aria-labelledby
   const [titleId] = React.useState(() => `modal-title-${++_modalIdCounter}`);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -70,7 +72,8 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth, clas
           width: isMobile ? 'calc(100% - 32px)' : '90%',
           maxWidth: isMobile ? 'none' : (maxWidth || 480),
           maxHeight: isMobile ? '90dvh' : '85dvh',
-          overflowY: 'auto' as const,
+          overflowY: scrollBody ? 'hidden' : 'auto',
+          ...(scrollBody ? { display: 'flex', flexDirection: 'column' as const } : {}),
           boxShadow: tokens.shadows.modal,
           position: 'relative' as const,
         }}
@@ -84,12 +87,13 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth, clas
               color: tokens.colors.textPrimary,
               margin: 0,
               marginBottom: tokens.spacing.md,
+              flexShrink: 0,
             }}
           >
             {title}
           </h2>
         )}
-        <div>{children}</div>
+        <div style={scrollBody ? { minHeight: 0, overflowY: 'auto' } : undefined}>{children}</div>
         {footer && (
           <div
             style={{
@@ -98,6 +102,7 @@ export function Modal({ isOpen, onClose, title, children, footer, maxWidth, clas
               gap: tokens.spacing.sm,
               flexWrap: 'wrap',
               marginTop: tokens.spacing.md,
+              flexShrink: 0,
             }}
           >
             {footer}

@@ -60,6 +60,7 @@ test/business-trademark-integrations.test.mjs
 test/business-trademark.test.mjs
 test/business-workflow.test.mjs
 test/catalog-list-aggregation.test.mjs
+test/chat-agent-settings.test.mjs
 test/chat-attachments-guard.test.mjs
 test/chat-dm-promotion.test.mjs
 test/chat-messages-account-boundary.test.mjs

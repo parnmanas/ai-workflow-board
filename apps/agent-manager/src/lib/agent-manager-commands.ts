@@ -90,6 +90,7 @@ type CommandKind =
   // admin action. args: { agent_id, room_id, minutes?, reason? }.
   | 'extend_chat_keepalive'
   | 'release_chat_keepalive'
+  | 'restart_chat_session'
   // ticket b2e79108 — Codex CLI device-auth 자동 로그인. args:
   // { session_id, cli }. #startCliLogin은 프로세스 spawn 확인 즉시 ack하고,
   // 실제 진행/완료는 CliLoginManager가 postCliLoginProgress로 별도 릴레이한다.
@@ -133,6 +134,7 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set<CommandKind>([
   'restart_manager',
   'extend_chat_keepalive',
   'release_chat_keepalive',
+  'restart_chat_session',
   'cli_login_start',
   'cli_login_cancel',
   'refresh_available_models',
@@ -175,6 +177,8 @@ export interface RuntimeIdentityResult {
 }
 
 export interface CommandHandlerDeps {
+  /** Reconfigure one room's participant; the dispatcher owns the room's execution queue. */
+  restartChatSession?: (args: Record<string, any>) => Promise<string>;
   /** Function returning the heartbeating instance id at call time (it's
    * created lazily after pairing, so we can't capture it in the constructor). */
   getInstanceId(): string | null;
@@ -395,6 +399,9 @@ export class AgentManagerCommandHandler {
         return this.#applyChatKeepalive(payload, 'extend');
       case 'release_chat_keepalive':
         return this.#applyChatKeepalive(payload, 'release');
+      case 'restart_chat_session':
+        if (!this.#deps.restartChatSession) throw new Error('Chat settings restart is not available');
+        return this.#deps.restartChatSession(payload.args || {});
       case 'cli_login_start':
         return this.#startCliLogin(payload);
       case 'cli_login_cancel':

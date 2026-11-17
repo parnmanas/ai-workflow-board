@@ -321,8 +321,11 @@ export class ChatSessionManager
       const prepared = await prepareChatAttachments(this._config, spec.roomId, spec.attachments, {
         fetchImages: canEmitImages,
       });
-      const followupText = this.#followupTurnText(spec, prepared);
-      const images = canEmitImages ? this.#extractTurnImages(prepared) : undefined;
+      if (spec.warmup) return { dispatched: true, pid: sess.pid };
+      const followupText = [sess._chatRestartContext, this.#followupTurnText(spec, prepared)].filter(Boolean).join('\n\n');
+      const images = canEmitImages ? [...(sess._chatRestartImages || []), ...(this.#extractTurnImages(prepared) || [])] : undefined;
+      delete sess._chatRestartContext;
+      delete sess._chatRestartImages;
       // ticket e9d0e8bc: a run always gets a fresh room → a fresh session, so this
       // reuse branch is unreachable for runs; attach defensively anyway (guarded
       // by spec.onExit, which ordinary chat turns never set) so a hypothetical
@@ -444,6 +447,7 @@ export class ChatSessionManager
           // just never filled it in.
           runtimeProfile: spec.runtimeProfile ?? null,
           approvalBridge: spec.approvalBridge ?? null,
+          warmup: spec.warmup,
         },
       );
       // Stamp roomId / agentId on the record BEFORE clearing the inflight
@@ -455,6 +459,10 @@ export class ChatSessionManager
         spawned.roomId = spec.roomId;
         spawned.agentId = spec.agentId;
         spawned._effectiveApiKey = spec.agentContext?.api_key || this._config.apiKey;
+        if (spec.warmup) {
+          spawned._chatRestartContext = firstTurnText;
+          spawned._chatRestartImages = firstTurnImages;
+        }
         // ticket 89716f04 — mark one-shot QA/security run sessions so their
         // turn end is swept for orphaned background tasks.
         if (spec.run) spawned._run = spec.run;
@@ -721,7 +729,13 @@ export class ChatSessionManager
     this.#flushTicketRefs(sess);
     // Rotation hands the turn to a replacement child; its predecessor's exit
     // must not fail the run or publish an error from the revoked connection.
-    const sent = credentialRotated || this.#chatSent.has(sess.pid) || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount;
+    // A superseded step attempt is the same: its room is no longer the step's,
+    // and the new attempt already runs in a room of its own.
+    const sent = credentialRotated
+      || sess.turnCount === 0
+      || sess.stopReason === 'superseded'
+      || this.#chatSent.has(sess.pid)
+      || this.#reportedErrorTurn.get(sess.pid) === sess.turnCount;
     // Snapshot the buffered output BEFORE the base class clears it (the
     // base clears the ring after this hook returns).
     const body = sent ? '' : this._collectOutputTail(sess.pid, FALLBACK_MAX_CHARS);

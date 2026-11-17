@@ -418,6 +418,7 @@ export const MANAGER_CAPABILITY_CLI_MEMORY = 'cli_memory';
  *  `MANAGER_CAPABILITY_MISSION_APPROVALS`(modules/orchestration/orchestration-approval.ts)와 같아야 한다. */
 export const MANAGER_CAPABILITY_MISSION_APPROVALS = 'mission_approvals';
 export const MANAGER_CAPABILITIES: readonly string[] = [
+  'chat_session_restart',
   MANAGER_CAPABILITY_CONTEXT_WINDOW_CLAMP,
   MANAGER_CAPABILITY_ACP_ADAPTER_UPDATE,
   MANAGER_CAPABILITY_CLI_MEMORY,

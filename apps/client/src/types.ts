@@ -1529,6 +1529,7 @@ export interface ChatRoomDetail {
   is_participant?: boolean;
   can_remove_participants?: boolean;
   can_edit_agent_nicknames?: boolean;
+  can_edit_agent_settings?: boolean;
 }
 
 export interface ChatRoomParticipantInfo {
@@ -1537,8 +1538,22 @@ export interface ChatRoomParticipantInfo {
   participant_id: string;
   name: string;
   nickname?: string | null;
+  has_runtime_settings?: boolean;
   participant_name?: string;
   joined_at: string;
+}
+
+export interface ChatAgentSettings {
+  connection_settings: AgentSessionCliSettings | null;
+  participant_row_id: string;
+  participant_id: string;
+  runtime: import('./runtime/runtimeSpec').RuntimeSpecDraft;
+  revision: string;
+  host_name: string;
+  can_restart: boolean;
+  approve_available?: boolean;
+  unavailable_reason: string | null;
+  application?: 'restarted' | 'next_message' | 'session_reopened';
 }
 
 export interface ChatAttachment {

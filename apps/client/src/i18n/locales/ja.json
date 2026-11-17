@@ -7188,5 +7188,15 @@
   "Restart required": "再起動が必要です",
   "Yes, restart": "はい、再起動",
   "Changes apply only to this session. Restart confirmation appears before applying.": "変更はこのセッションにのみ適用されます。適用前に再起動を確認します。",
-  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "この設定を適用するにはセッションのプロセスを再起動する必要があります。会話履歴は保持されますが、進行中のターンは中断されます。今すぐ再起動しますか？"
+  "Applying this setting requires restarting the session process. Conversation history is kept, but an active turn will be interrupted. Restart now?": "この設定を適用するにはセッションのプロセスを再起動する必要があります。会話履歴は保持されますが、進行中のターンは中断されます。今すぐ再起動しますか？",
+  "Agent settings": "エージェント設定",
+  "Settings for {0}": "{0} の設定",
+  "Changes apply only to this agent in this room.": "変更はこのルームのこのエージェントにのみ適用されます。",
+  "Applying chat agent settings restarts this agent in this room. Conversation history is kept, but an active turn will be interrupted. Restart now?": "設定を適用するには、このルームのエージェントを再起動します。会話履歴は保持されますが、進行中の応答は中断されます。今すぐ再起動しますか？",
+  "Settings saved. The agent will start with them on the next message.": "設定を保存しました。次のメッセージから新しい設定で起動します。",
+  "Agent settings applied and process restarted.": "エージェント設定を適用し、プロセスを再起動しました。",
+  "Runtime Host is offline": "Runtime Host はオフラインです",
+  "Update Agent Manager to change chat agent settings": "チャットエージェントの設定を変更するには Agent Manager を更新してください",
+  "Settings applied and this chat session reopened.": "設定を適用し、このチャットセッションを開き直しました。",
+  "Hermes profiles are shared across rooms and cannot be changed here.": "Hermes プロファイルは複数のルームで共有されるため、ここでは変更できません。"
 }
