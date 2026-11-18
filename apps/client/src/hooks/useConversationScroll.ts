@@ -61,6 +61,9 @@ export interface ConversationScrollOptions {
    * 호출자 쪽 책임이다 — 그 상태는 호출자만 안다.
    */
   onLoadOlder?: () => void;
+  /** Async readers can capture just before committing their page with preserveScrollPosition instead.
+   * This avoids treating live arrivals during the request as prepended history. */
+  anchorOnLoadOlder?: boolean;
   /**
    * 추종을 잠시 멈춘다. 바닥 근접과는 다른 축의 래치가 필요한 화면을 위한 것 —
    * 미션 대화는 과거 이벤트 페이지를 보고 있는 동안(`eventWindowEdge==='history'`)
@@ -85,6 +88,7 @@ export function useConversationScroll({
   contentKey,
   ready,
   onLoadOlder,
+  anchorOnLoadOlder = true,
   followPaused = false,
 }: ConversationScrollOptions): ConversationScrollApi {
   const didInitialRef = useRef(false);
@@ -189,12 +193,12 @@ export function useConversationScroll({
       setNearBottom(el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX);
       if (!onLoadOlder) return;
       if (el.scrollTop > LOAD_OLDER_PX) return;
-      anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+      if (anchorOnLoadOlder) preserveScrollPosition();
       onLoadOlder();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
-  }, [scrollRef, onLoadOlder, setNearBottom, resetKey]);
+  }, [scrollRef, onLoadOlder, anchorOnLoadOlder, preserveScrollPosition, setNearBottom, resetKey]);
 
   return { atBottom, scrollToBottom, preserveScrollPosition };
 }

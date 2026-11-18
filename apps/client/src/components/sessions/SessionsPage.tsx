@@ -443,6 +443,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   const restartPendingRef = useRef(false);
   const [nextHistoryBefore, setNextHistoryBefore] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState<string | null>(null);
   const olderPendingRef = useRef(false);
   const historyGenerationRef = useRef(0);
   const historyLiveRef = useRef<AgentSessionEventRecord[] | null>(null);
@@ -536,6 +537,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
     historyLiveRef.current = [];
     olderPendingRef.current = false;
     setLoadingOlder(false);
+    setOlderError(null);
     setNextHistoryBefore(null);
     setLoading(true);
     try {
@@ -728,16 +730,20 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
     contentRef,
     resetKey: `${managerId}/${cli}/${sessionId}`,
     tailKey: blocks.at(-1)?.key ?? null,
-    contentKey: blocks.length,
+    contentKey: `${blocks.length}:${nextHistoryBefore ?? ''}:${loadingOlder}`,
     ready: !loading && blocks.length > 0,
+    onLoadOlder: nextHistoryBefore && !loading && !loadingOlder ? loadOlder : undefined,
+    // Live replies can arrive during the read; capture the reader's position when the page is ready.
+    anchorOnLoadOlder: false,
   });
 
-  const loadOlder = async () => {
+  async function loadOlder() {
     if (!nextHistoryBefore || olderPendingRef.current || loading) return;
     const generation = historyGenerationRef.current;
     const before = nextHistoryBefore;
     olderPendingRef.current = true;
     setLoadingOlder(true);
+    setOlderError(null);
     try {
       const detail = await api.getHostSession(managerId, cli, sessionId, before);
       if (generation !== historyGenerationRef.current) return;
@@ -749,14 +755,14 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
       setNextHistoryBefore(detail.next_before === before ? null : detail.next_before ?? null);
       setError(null);
     } catch (err: any) {
-      if (generation === historyGenerationRef.current) setError(err?.message || translate('Failed to load the session from the Runtime Host'));
+      if (generation === historyGenerationRef.current) setOlderError(err?.message || translate('Failed to load the session from the Runtime Host'));
     } finally {
       if (generation === historyGenerationRef.current) {
         olderPendingRef.current = false;
         setLoadingOlder(false);
       }
     }
-  };
+  }
 
   const busy = status === 'busy' || isWaitingStatus(status) || status === 'starting';
   const title = live?.title || summary?.title || '';
@@ -1206,6 +1212,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
       />
 
       <div className="awb-session-transcript" ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px' }}>
+        {olderError && <div role="alert" style={{ color: tokens.colors.dangerLight, fontSize: 12, marginBottom: 8 }}>{olderError}</div>}
         {nextHistoryBefore && (
           <Button variant="ghost" size="sm" disabled={loadingOlder || loading} onClick={() => void loadOlder()}>
             {loadingOlder ? translate('Loading…') : translate('이전 기록 더 보기')}

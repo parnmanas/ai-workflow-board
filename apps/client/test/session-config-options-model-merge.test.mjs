@@ -115,7 +115,7 @@ for (const [cli, initialChoices] of Object.entries(fixtures)) {
   });
 }
 
-test('paged history preserves live arrivals and prepends without a scroll jump', async (t) => {
+for (const trigger of ['button', 'scroll']) test(`paged history via ${trigger} preserves live arrivals and the reader's position`, async (t) => {
   const dom = setupDom();
   const previousStorage = globalThis.localStorage;
   globalThis.localStorage = window.localStorage;
@@ -145,21 +145,33 @@ test('paged history preserves live arrivals and prepends without a scroll jump',
   const transcript = view.container.querySelector('.awb-session-transcript');
   assert.match(transcript.textContent, /Recent answer/);
   assert.match(transcript.textContent, /Arrived during initial load/);
+  Object.defineProperty(transcript, 'scrollHeight', { configurable: true, get: () => 1000
+    + (transcript.textContent.includes('Earlier answer') ? 200 : 0)
+    + (transcript.textContent.includes('Arrived during older load') ? 100 : 0) });
+  Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 300 });
+  const scroll = (top) => act(() => {
+    transcript.scrollTop = top;
+    transcript.dispatchEvent(new window.Event('scroll'));
+  });
+  scroll(350);
+  assert.equal(reads.length, 1, 'reading the middle of the page must not fetch older history');
   const older = button('이전 기록 더 보기');
-  click(older); click(older);
-  assert.equal(reads.length, 2, 'two clicks must not create two page requests');
+  if (trigger === 'button') { click(older); click(older); scroll(10); }
+  else { scroll(10); scroll(5); scroll(10); }
+  assert.equal(reads.length, 2, 'scrolling near the top loads once, even with repeated events or clicks');
   assert.equal(reads[1].before, '3');
   emit(event('5', 'Arrived during older load'));
   await settle();
-  Object.defineProperty(transcript, 'scrollHeight', { configurable: true, get: () => transcript.textContent.includes('Earlier answer') ? 1200 : 1000 });
-  Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 300 });
-  transcript.scrollTop = 10;
+  assert.equal(transcript.scrollTop, 10, 'live text arriving below must not be mistaken for a prepended page');
+  scroll(50);
   await act(async () => reads[1].resolve({ session: null, live, events: [event('1', 'Earlier answer'), latest], next_before: null }));
   await settle();
   assert.equal((transcript.textContent.match(/Recent answer/g) ?? []).length, 1);
   assert.match(transcript.textContent, /Earlier answer[\s\S]*Recent answer[\s\S]*Arrived during initial load[\s\S]*Arrived during older load/);
-  assert.equal(transcript.scrollTop, 210, 'prepend preserves the content the reader was looking at');
+  assert.equal(transcript.scrollTop, 250, 'prepend preserves the position at response time, including scrolling while waiting');
   assert.equal(button('이전 기록 더 보기'), undefined);
+  scroll(0);
+  assert.equal(reads.length, 2, 'the final page stops automatic history requests');
 });
 
 for (const choice of [
