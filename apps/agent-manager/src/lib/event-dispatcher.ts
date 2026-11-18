@@ -4299,6 +4299,9 @@ export class EventDispatcher {
     // chat_request envelope-native: fields under ev.payload.* (asymmetric vs
     // agent_trigger which is flatten-on-emit).
     const payload = ev.payload || {};
+    // Older servers stamp the account on the envelope only. dispatch()
+    // has already checked every supplied account against this host's owner.
+    const accountId = ev.scope?.account_id ?? ev.account_id ?? payload.account_id;
     // P3a 관측: trigger 경로와 동일 — 파싱만 하고 spawn은 그대로 agent_id.
     const chatRuntime = parseTriggerRuntime(payload.runtime);
     if (chatRuntime && !this.#runtimeBelongsToThisHost(chatRuntime)) return;
@@ -4314,7 +4317,7 @@ export class EventDispatcher {
     if (chatRuntime) {
       let rtCtx: AgentExecutionContext | undefined;
       try {
-        rtCtx = await this.#resolveRuntimeContext(chatRuntime, payload.account_id);
+        rtCtx = await this.#resolveRuntimeContext(chatRuntime, accountId);
       } catch (err) {
         if (!(err instanceof RuntimeContextRefusedError)) throw err;
         await this.#noticeRuntimeRefused(err, { roomId: payload.room_id, agentId: payload.agent_id });
@@ -4330,7 +4333,7 @@ export class EventDispatcher {
         agentContext = rtCtx;
       }
     }
-    agentContext = await this.#scopeAgentContext(agentContext, payload.account_id);
+    agentContext = await this.#scopeAgentContext(agentContext, accountId);
 
     // ticket c0c0b1e4 (리뷰 지적 #1): a registered-but-not-bootstrapped miss must
     // be reported HERE, before any fallback dispatch is attempted — the hermes /

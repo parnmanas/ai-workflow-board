@@ -474,6 +474,7 @@ export const EVENT_TYPES: EventDefinition[] = [
     map(event: any) {
       const payload: ChatRequestPayload = {
         agent_id: event.agent_id,
+        account_id: event.account_id,
         // P2b additive: 대상 agent의 RuntimeSpec 스냅샷. 없으면 생략해서 wire
         // shape를 byte-for-byte 유지한다 (cli_runtime_profile 관례와 동일).
         runtime: event.runtime ?? undefined,
@@ -507,7 +508,7 @@ export const EVENT_TYPES: EventDefinition[] = [
       };
       return {
         payload,
-        scope: { agent_id: event.agent_id },
+        scope: { agent_id: event.agent_id, account_id: payload.account_id },
         timestamp: event.timestamp,
       };
     },

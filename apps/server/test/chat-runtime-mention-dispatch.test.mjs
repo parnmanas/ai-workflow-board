@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MentionService } from '../dist/services/mention.service.js';
+import { EVENT_TYPES } from '../dist/modules/events/event-registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.resolve(__dirname, '..', 'dist');
@@ -174,7 +175,7 @@ test('ticket room @rt-mention emits chat_request from the assignee spec (no Agen
 
 test('ticket-less room @rt-mention emits chat_request from the participant snapshot', async () => {
   const room = { id: 'room-2', type: 'group', name: '', action_id: null, orchestration_mission_id: null, run_kind: null, account_id: 'ws-1', ticket_id: null };
-  const svc = makeSvc({ room, ticket: null, participantSpec: { ...SPEC } });
+  const svc = makeSvc({ room, ticket: null, participantSpec: { ...SPEC, credential_id: 'room-credential' } });
   const chatRequest = captureOnce('chat_request');
   try {
     await svc.sendMessage('room-2', 'ws-1', 'user', 'user-1', 'Alice', 'hey @[agent:' + RT + '] look');
@@ -185,6 +186,10 @@ test('ticket-less room @rt-mention emits chat_request from the participant snaps
   assert.ok(evt, 'chat_request must be emitted for an rt- mention via participant snapshot');
   assert.equal(evt.agent_id, RT);
   assert.equal(evt.runtime.working_dir, '/tmp/wt');
+  const { payload, scope } = await EVENT_TYPES.find(def => def.eventType === 'chat_request').map(evt);
+  assert.equal(scope.account_id, room.account_id);
+  assert.equal(payload.account_id, room.account_id);
+  assert.equal(payload.runtime.credential_id, 'room-credential');
 });
 
 // ─── Session-to-session: agent senders ─────────────────────────────────────
@@ -232,6 +237,7 @@ test('agent sender @rt-mention with snapshot emits chat_request + dispatch marke
   }
   const evt = chatRequest.get();
   assert.ok(evt, 'agent-authored rt- mention must emit chat_request');
+  assert.equal(evt.account_id, 'ws-1');
   assert.equal(evt.agent_id, RT);
   assert.equal(evt.runtime.working_dir, '/tmp/wt');
   assert.equal(evt.room_id, 'room-a1');
@@ -350,6 +356,7 @@ test('agent sender DM message auto-routes to the peer agent', async () => {
   }
   const evt = chatRequest.get();
   assert.ok(evt, 'DM peer must be woken even without an explicit mention');
+  assert.equal(evt.account_id, room.account_id);
   assert.equal(evt.agent_id, RT_PEER);
   assert.equal(evt.runtime.working_dir, '/tmp/wt');
   assert.deepEqual(ret.warnings, []);

@@ -343,28 +343,42 @@ test('Agent Sessions and runtime identities refuse the same incomplete credentia
 });
 
 function roomEvent(runtimes, overrides = {}) {
-  return JSON.stringify({ payload: {
+  return JSON.stringify({
     room_id: 'room-1', account_id: ACCOUNT, sender_type: 'user', sender_id: 'user-1', content: 'hello',
     agent_member_ids: runtimes.map(runtimeIdentityKey),
     agent_member_runtimes: Object.fromEntries(runtimes.map((r) => [runtimeIdentityKey(r), r])),
     ...overrides,
-  } });
+  });
 }
 
-for (const mode of ['direct', 'group']) {
+for (const mode of ['targeted', 'group']) {
   test(`${mode} chat applies the selected credential before its first turn`, async () => {
     const { dispatcher, chatSpawns } = host();
-    const runtime = spec('cred-1');
-    if (mode === 'direct') {
-      await dispatcher.handleChatRequest(JSON.stringify({ payload: {
-        room_id: 'room-1', account_id: ACCOUNT, agent_id: runtimeIdentityKey(runtime), runtime, content: 'hello',
-      } }));
+    const workingDir = await fsp.mkdtemp(join(process.env.AWB_AGENT_MANAGER_HOME, 'cold-chat-'));
+    const runtime = { ...spec('cred-1'), working_dir: workingDir };
+    if (mode === 'targeted') {
+      const agentId = runtimeIdentityKey(runtime);
+      // Deployed servers stamp ownership on the SSE envelope. Mentions and DMs
+      // can arrive before the host has ever prepared this participant.
+      await dispatcher.dispatch('chat_request', JSON.stringify({
+        event_type: 'chat_request', account_id: ACCOUNT, scope: { account_id: ACCOUNT, agent_id: agentId },
+        payload: { room_id: 'room-1', agent_id: agentId, runtime, new_message: 'hello', message_id: 'first' },
+      }));
+      // The group also receives this same message for history, including a
+      // different participant on this host that was not mentioned.
+      const sibling = spec('sibling-credential');
+      await dispatcher.dispatch('chat_room_message', roomEvent([sibling, runtime], {
+        message_id: 'first', dispatch_agent_ids: [agentId],
+      }));
     } else {
       await dispatcher.handleChatRoomMessage(roomEvent([runtime]));
     }
     assert.equal(chatSpawns.length, 1);
     assert.equal(chatSpawns[0].agentContext.extra_env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat-ticket');
+    assert.equal(chatSpawns[0].agentId, runtimeIdentityKey(runtime));
+    assert.deepEqual(server.provisions, [{ key: runtimeIdentityKey(runtime), account_id: ACCOUNT }]);
     assert.equal(server.credentialFetches, 1);
+    assert.equal(server.chatPosts.length, 0);
   });
 }
 

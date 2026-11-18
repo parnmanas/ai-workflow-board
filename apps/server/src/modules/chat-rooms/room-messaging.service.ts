@@ -1579,6 +1579,7 @@ export class RoomMessagingService {
         if (knownUuid) {
           activityEvents.emit('chat_request', {
             agent_id: m.id,
+            account_id: accountId,
             user_id: senderId,
             message_id: savedMessage.id,
             ticket_id: ticket?.id ?? null,
@@ -1613,6 +1614,7 @@ export class RoomMessagingService {
         if (blocked) continue;
         activityEvents.emit('chat_request', {
           agent_id: m.id,
+          account_id: accountId,
           runtime: target.rtRuntime,
           user_id: senderId,
           message_id: savedMessage.id,
@@ -1645,6 +1647,7 @@ export class RoomMessagingService {
       }
       activityEvents.emit('chat_request', {
         agent_id: m.id,
+        account_id: accountId,
         user_id: senderId,
         message_id: savedMessage.id,
         ticket_id: ticket?.id ?? null,
@@ -1732,6 +1735,7 @@ export class RoomMessagingService {
           if (blocked) continue;
           activityEvents.emit('chat_request', {
             agent_id: m.id,
+            account_id: accountId,
             runtime: rtRuntime,
             user_id: senderId,
             message_id: savedMessage.id,
@@ -1778,6 +1782,7 @@ export class RoomMessagingService {
         }
         activityEvents.emit('chat_request', {
           agent_id: legacy.agentId,
+          account_id: accountId,
           ...(legacy.runtime ? { runtime: { ...legacy.runtime } } : {}),
           user_id: senderId,
           message_id: savedMessage.id,
@@ -1904,6 +1909,7 @@ export class RoomMessagingService {
       const rtName = ((rtSpec.label || '').trim() || otherParticipant.participant_id.slice(0, 11)) as string;
       activityEvents.emit('chat_request', {
         agent_id: otherParticipant.participant_id,
+        account_id: accountId,
         runtime: { ...rtSpec },
         user_id: senderId,
         message_id: savedMessage.id,
@@ -1942,6 +1948,7 @@ export class RoomMessagingService {
     }
     activityEvents.emit('chat_request', {
       agent_id: otherParticipant.participant_id,
+      account_id: accountId,
       ...(participantSpec ? { runtime: { ...participantSpec } } : {}),
       user_id: senderId,
       message_id: savedMessage.id,

@@ -294,6 +294,8 @@ export interface ChatRequestHistoryEntry {
 
 export interface ChatRequestPayload {
   agent_id: string;
+  // Owning account of the room, used to prepare the target runtime's credentials.
+  account_id: string;
   // P2b additive: 대상 agent의 RuntimeSpec 스냅샷. agent_id와 함께 동봉되며,
   // 매니저는 당분간 agent_id를 읽고 P3에서 이쪽으로 전환한다.
   runtime?: RuntimeSpec | null;

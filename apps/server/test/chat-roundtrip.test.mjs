@@ -27,7 +27,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootApp } from './helpers/boot.mjs';
-import { createAccount, createAgent, createApiKey, createUser, createTicket } from './helpers/fixtures.mjs';
+import { createAccount, createAgent, createApiKey, createUser, createTicket, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { openSseStream } from './helpers/sse-listener.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
 import { RoomMessagingService } from '../dist/modules/chat-rooms/room-messaging.service.js';
@@ -88,6 +88,8 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   // User SSE stream (recipient under the participant-scoped chat_room_message
   // filter) + the agent's MCP client (the reply transport).
   const userStream = await openSseStream(port, userToken);
+  const hostStream = await openSseStream(port, runtimeHostKeyForAgent(responder.id));
+  t.after(() => hostStream.close());
   const agentMcp = new McpClient({ baseUrl: base, apiKey: responderKey.raw_key });
   // 소형 컨텍스트 Claude backend profile이 실제로 여는 MCP 세션과 같은
   // compact 헤더를 쓰는 클라이언트는 최종 채팅 응답에만 사용한다. 복합
@@ -139,6 +141,9 @@ test('chat round-trip: user REST POST → SSE echo → agent MCP reply → SSE',
   );
   assert.ok(echoFrame, 'participant user must receive the SSE echo of their own message');
   assert.equal(rawChatRequests.length, 1, 'a user-to-agent DM emits one canonical chat_request');
+  const request = await hostStream.waitFor('chat_request', frame => frame.payload?.message_id === postedMessage.id, 4000);
+  assert.equal(request.data.scope.account_id, ws.id);
+  assert.equal(request.data.payload.account_id, ws.id, 'the first DM carries the account used to prepare the runtime');
   assert.equal(
     rawChatRequests[0].message_id,
     postedMessage.id,
