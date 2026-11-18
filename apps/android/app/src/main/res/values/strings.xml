@@ -9,12 +9,32 @@
     <string name="retry">다시 시도</string>
     <string name="cancel">취소</string>
     <string name="close">닫기</string>
-    <string name="servers">서버 목록</string>
-    <string name="servers_title">AWB 서버</string>
-    <string name="servers_message">누르면 그 서버로 전환합니다. 로그인은 서버마다 따로 유지되고, 상시 음성은 지금 서버를 듣습니다.</string>
+    <string name="servers">서버 · 웹 페이지</string>
+    <string name="servers_title">서버 · 웹 페이지</string>
+    <string name="servers_message">서버별 로그인은 유지됩니다. 아래에 자주 쓰는 대시보드와 웹 페이지를 추가하세요.</string>
     <string name="add_server">+ 서버 추가</string>
     <string name="server_name_hint">이름 (선택) — 예: 집, 회사</string>
     <string name="server_current">현재</string>
     <string name="server_manage">서버 관리</string>
     <string name="offline_title">서버에 연결할 수 없습니다</string>
+    <string name="switch_destination">서버 · 웹 페이지 전환</string>
+    <string name="awb_servers">AWB 서버</string>
+    <string name="web_pages">커스텀 웹 페이지</string>
+    <string name="add_web_page">+ 웹 페이지 추가</string>
+    <string name="add_page_title">웹 페이지 추가</string>
+    <string name="edit_page_title">웹 페이지 수정</string>
+    <string name="page_message">이름과 URL을 저장하면 앱 안에서 바로 열 수 있습니다.</string>
+    <string name="page_url_hint">https://dashboard.example.com/view</string>
+    <string name="page_name_hint">이름 (선택) — 예: 운영 대시보드</string>
+    <string name="save">저장</string>
+    <string name="open_browser">브라우저에서 열기</string>
+    <string name="page_home">등록한 URL로 이동</string>
+    <string name="page_manage">웹 페이지 관리</string>
+    <string name="page_offline">웹 페이지를 열 수 없습니다</string>
+    <string name="refresh">새로고침</string>
+    <string name="page_empty">대시보드 등 자주 쓰는 URL을 추가하세요.</string>
+    <string name="server_empty">AWB 서버를 추가해 로그인하세요.</string>
+    <string name="navigation_menu_icon" translatable="false">☰</string>
+    <string name="navigation_refresh_icon" translatable="false">↻</string>
+    <string name="navigation_more_icon" translatable="false">⋯</string>
 </resources>

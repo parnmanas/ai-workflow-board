@@ -33,8 +33,9 @@ public final class Servers {
   private static final String SESSION_TOKEN = "session_token";
   private static final String VOICE_ENABLED = "voice_enabled";
   private static final String VOICE_ASKED = "voice_asked";
+  private static final String LAST_PATH = "last_path";
   private static final String[] FIELDS = {
-      URL, NAME, DEVICE_ID, DEVICE_TOKEN, DEVICE_USER_ID, USER_LABEL, SESSION_TOKEN, VOICE_ENABLED, VOICE_ASKED };
+      URL, NAME, DEVICE_ID, DEVICE_TOKEN, DEVICE_USER_ID, USER_LABEL, SESSION_TOKEN, VOICE_ENABLED, VOICE_ASKED, LAST_PATH };
 
   /** ≤ 2.1 은 서버가 하나였다 — 이 최상위 키들을 처음 열 때 서버 하나로 옮기고 지운다. */
   private static final String LEGACY_URL = "server_url";
@@ -114,6 +115,14 @@ public final class Servers {
 
   public static void rename(Context c, String id, String name) {
     write(c, id, e -> e.putString(k(id, NAME), name == null ? "" : name.trim()));
+  }
+
+  public static String lastPath(Context c, String id) {
+    return p(c).getString(k(id, LAST_PATH), "/");
+  }
+
+  public static void rememberPath(Context c, String id, String path) {
+    if (!path.equals(lastPath(c, id))) write(c, id, e -> e.putString(k(id, LAST_PATH), path));
   }
 
   /**

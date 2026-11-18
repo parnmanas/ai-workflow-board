@@ -1,9 +1,105 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/surface">
+    android:background="@color/surface"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/navigation_button"
+            android:layout_width="48dp"
+            android:layout_height="match_parent"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/switch_destination"
+            android:gravity="center"
+            android:text="@string/navigation_menu_icon"
+            android:textColor="@color/text_primary"
+            android:textSize="24sp" />
+
+        <LinearLayout
+            android:id="@+id/navigation_heading"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:orientation="vertical">
+            <TextView
+                android:id="@+id/navigation_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="@string/app_name"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+            <TextView
+                android:id="@+id/navigation_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="@string/switch_destination"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/navigation_refresh"
+            android:layout_width="48dp"
+            android:layout_height="match_parent"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/refresh"
+            android:gravity="center"
+            android:text="@string/navigation_refresh_icon"
+            android:textColor="@color/text_secondary"
+            android:textSize="26sp" />
+
+        <TextView
+            android:id="@+id/navigation_more"
+            android:layout_width="48dp"
+            android:layout_height="match_parent"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/page_manage"
+            android:gravity="center"
+            android:text="@string/navigation_more_icon"
+            android:textColor="@color/text_secondary"
+            android:textSize="24sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+
+    <ScrollView
+        android:id="@+id/navigation_rail"
+        android:layout_width="64dp"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+        <LinearLayout
+            android:id="@+id/navigation_items"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="4dp" />
+    </ScrollView>
+
+    <FrameLayout
+        android:id="@+id/content"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
 
     <WebView
         android:id="@+id/web"
@@ -17,6 +113,12 @@
         android:layout_width="match_parent"
         android:layout_height="3dp"
         android:indeterminate="true"
+        android:visibility="gone" />
+
+    <FrameLayout
+        android:id="@+id/custom_page_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
         android:visibility="gone" />
 
     <!-- 서버 목록 · 서버 추가 · 오프라인 — WebView 위에 덮는 네이티브 화면 -->
@@ -34,17 +136,17 @@
             android:layout_gravity="center"
             android:gravity="center_horizontal"
             android:orientation="vertical"
-            android:padding="28dp">
+            android:padding="20dp">
 
             <TextView
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:layout_marginBottom="16dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginBottom="8dp"
                 android:background="@drawable/logo_badge"
                 android:gravity="center"
                 android:text="W"
                 android:textColor="#ffffff"
-                android:textSize="28sp"
+                android:textSize="22sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -130,4 +232,6 @@
                 android:visibility="gone" />
         </LinearLayout>
     </ScrollView>
-</FrameLayout>
+    </FrameLayout>
+    </LinearLayout>
+</LinearLayout>

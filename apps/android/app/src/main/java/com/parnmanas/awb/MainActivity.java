@@ -11,6 +11,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Insets;
 import android.graphics.drawable.Icon;
@@ -24,6 +25,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputFilter;
 import android.view.View;
+import android.view.Gravity;
 import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -71,7 +73,7 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * 웹 빌드를 앱에 묶지 않는다: 화면은 서버 배포를 그대로 따라가고, 앱은 웹이 못 하는 것
  * (백그라운드 상시 음성 · 끊기지 않는 로그인 · 구글 로그인 왕복 · 알림 · 서버 목록)만 맡는다. 같은 오리진이라
- * CORS 도 필요 없다. 다른 사이트로 가는 링크는 Custom Tab 으로 연다 — 앱 화면이 외부 페이지로 바뀌지 않는다.
+ * CORS 도 필요 없다. 등록한 커스텀 페이지는 브릿지가 없는 별도 WebView 로 연다.
  *
  * 서버는 여러 개 둘 수 있다(Servers). 화면에는 "지금 서버" 하나를 띄우고, 전환하면 그 서버의 화면을 새로 연다 —
  * 서버마다 로그인이 따로 남아 있어 다시 로그인하지 않는다. 상시 음성도 지금 서버를 따라 옮겨 간다.
@@ -85,7 +87,7 @@ public class MainActivity extends Activity {
   private static final int MAX_SHORTCUTS = 4;
   private static final int PING_TIMEOUT_MS = 8000;
 
-  private enum Panel { NONE, SERVERS, ADD, OFFLINE }
+  private enum Panel { NONE, SERVERS, ADD, ADD_PAGE, OFFLINE }
 
   private WebView web;
   private ScrollView panel;
@@ -98,6 +100,13 @@ public class MainActivity extends Activity {
   private Button primaryButton;
   private Button secondaryButton;
   private Panel panelMode = Panel.NONE;
+  private LinearLayout navigationItems;
+  private TextView navigationTitle;
+  private TextView navigationSubtitle;
+  private FrameLayout customContainer;
+  private WebPageView customPage;
+  private String selectedPageId = "";
+  private String editingPageId;
 
   private WebBridge bridge;
   private String bridgedOrigin = "";
@@ -145,6 +154,17 @@ public class MainActivity extends Activity {
     nameInput = findViewById(R.id.name_input);
     primaryButton = findViewById(R.id.primary_button);
     secondaryButton = findViewById(R.id.secondary_button);
+    navigationItems = findViewById(R.id.navigation_items);
+    navigationTitle = findViewById(R.id.navigation_title);
+    navigationSubtitle = findViewById(R.id.navigation_subtitle);
+    customContainer = findViewById(R.id.custom_page_container);
+    findViewById(R.id.navigation_button).setOnClickListener(v -> showServers());
+    findViewById(R.id.navigation_heading).setOnClickListener(v -> showServers());
+    findViewById(R.id.navigation_refresh).setOnClickListener(v -> {
+      if (!selectedPageId.isEmpty() && customPage != null) customPage.reload();
+      else if (Servers.active(this) != null) loadApp(lastPath);
+    });
+    findViewById(R.id.navigation_more).setOnClickListener(v -> showPageActions(selectedPageId));
 
     applyInsets(root);
     bridge = new WebBridge(this);
@@ -155,6 +175,7 @@ public class MainActivity extends Activity {
     primaryButton.setOnClickListener(v -> {
       if (panelMode == Panel.SERVERS) showAddServer();
       else if (panelMode == Panel.ADD) submitAddServer();
+      else if (panelMode == Panel.ADD_PAGE) submitPage();
       else loadApp(lastPath);
     });
     secondaryButton.setOnClickListener(v -> {
@@ -162,16 +183,21 @@ public class MainActivity extends Activity {
       else showServers();
     });
     nameInput.setOnEditorActionListener((v, actionId, event) -> {
-      if (actionId != EditorInfo.IME_ACTION_GO || panelMode != Panel.ADD) return false;
-      submitAddServer();
+      if (actionId != EditorInfo.IME_ACTION_GO) return false;
+      if (panelMode == Panel.ADD) submitAddServer();
+      else if (panelMode == Panel.ADD_PAGE) submitPage();
+      else return false;
       return true;
     });
 
-    if (Servers.active(this) == null) {
-      showAddServer();
-    } else if (!handleIntent(getIntent())) {
-      loadApp("/");
+    if (!handleIntent(getIntent())) {
+      WebPage selected = WebPages.selected(this);
+      Server active = Servers.active(this);
+      if (selected != null) showWebPage(selected.id);
+      else if (active != null) loadApp(Servers.lastPath(this, active.id));
+      else showServers();
     }
+    renderNavigation();
     publishShortcuts();
   }
 
@@ -193,6 +219,7 @@ public class MainActivity extends Activity {
   protected void onResume() {
     super.onResume();
     resumed = true;
+    syncVisibleSurface();
     Uri link = pendingLink;
     pendingLink = null;
     if (link != null) main.postDelayed(() -> handleAwbUri(link), 300);
@@ -201,14 +228,13 @@ public class MainActivity extends Activity {
   @Override
   protected void onPause() {
     resumed = false;
+    syncVisibleSurface();
     super.onPause();
   }
 
   @Override
   protected void onStart() {
     super.onStart();
-    AppState.setForeground(true);
-    web.onResume();
     web.resumeTimers();
     // 상시 음성은 켜 둔 동안 늘 살아 있어야 한다 — OS 가 죽였거나 재부팅 뒤라면 여기서 되살린다
     // (마이크를 쓰는 포그라운드 서비스는 앱이 보이는 동안에만 시작할 수 있다).
@@ -220,9 +246,11 @@ public class MainActivity extends Activity {
     // 숨은 동안 웹은 쉰다(소리 · 마이크는 서비스가 맡는다). 페이지는 hidden 이 된다.
     AppState.setForeground(false);
     web.onPause();
+    if (customPage != null) customPage.pause();
     // 숨는 순간의 visibilitychange 처리(마이크 놓기 · presence)가 돌 틈을 준 뒤 타이머를 세운다.
     main.postDelayed(() -> {
-      if (!AppState.isForeground()) web.pauseTimers();
+      // pauseTimers affects every WebView, including the visible custom page.
+      if (!resumed) web.pauseTimers();
     }, 1500);
     super.onStop();
   }
@@ -237,7 +265,26 @@ public class MainActivity extends Activity {
       getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
     }
     web.destroy();
+    if (customPage != null) customPage.destroy();
     super.onDestroy();
+  }
+
+  @Override
+  public void onConfigurationChanged(Configuration configuration) {
+    super.onConfigurationChanged(configuration);
+    renderNavigation();
+  }
+
+  /** Only a visible AWB document owns voice; the service takes over while a dashboard is open. */
+  private void syncVisibleSurface() {
+    boolean awbVisible = resumed && selectedPageId.isEmpty() && panelMode == Panel.NONE;
+    AppState.setForeground(awbVisible);
+    if (awbVisible) web.onResume();
+    else web.onPause();
+    if (customPage != null) {
+      if (resumed && !selectedPageId.isEmpty() && panelMode == Panel.NONE) customPage.resume();
+      else customPage.pause();
+    }
   }
 
   // ─── 화면 ────────────────────────────────────────────────────────────────
@@ -297,13 +344,13 @@ public class MainActivity extends Activity {
         Uri u = Uri.parse(url);
         // about:blank(서버를 지웠을 때) · 바꾸기 전 서버의 늦은 끝은 지금 서버의 화면이 아니다.
         if (pageFailed || !isBridged(u)) return;
-        lastPath = pathOf(u);
+        rememberPath(u);
         webReady = true;
         if (clearHistoryOnLoad) {
           clearHistoryOnLoad = false;
           view.clearHistory();
         }
-        if (revealOnLoad) {
+        if (revealOnLoad && selectedPageId.isEmpty()) {
           revealOnLoad = false;
           hidePanel();
           web.setVisibility(View.VISIBLE);
@@ -314,7 +361,7 @@ public class MainActivity extends Activity {
       public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
         // 화면 안 이동(pushState)도 따라간다 — 다시 시도 · 서버 재시작 · 서버 전환 뒤에 같은 화면으로 돌아오게.
         Uri u = Uri.parse(url);
-        if (isBridged(u)) lastPath = pathOf(u);
+        if (isBridged(u)) rememberPath(u);
       }
 
       @Override
@@ -322,7 +369,9 @@ public class MainActivity extends Activity {
         if (!request.isForMainFrame() || !isBridged(request.getUrl())) return;
         pageFailed = true;
         webReady = false;
-        showOffline(String.valueOf(error.getDescription()));
+        if (selectedPageId.isEmpty() && (revealOnLoad || panelMode == Panel.NONE)) {
+          showOffline(String.valueOf(error.getDescription()));
+        }
       }
 
       @Override
@@ -331,6 +380,7 @@ public class MainActivity extends Activity {
         if (!request.isForMainFrame() || response.getStatusCode() < 500 || !isBridged(request.getUrl())) return;
         pageFailed = true;
         webReady = false;
+        if (!selectedPageId.isEmpty() || (!revealOnLoad && panelMode != Panel.NONE)) return;
         showOffline("서버가 응답하지 않습니다 (HTTP " + response.getStatusCode() + ")");
         main.postDelayed(() -> {
           if (panelMode == Panel.OFFLINE) loadApp(lastPath);
@@ -374,7 +424,23 @@ public class MainActivity extends Activity {
 
   private static String pathOf(Uri u) {
     String path = u.getEncodedPath() == null || u.getEncodedPath().isEmpty() ? "/" : u.getEncodedPath();
-    return path + (u.getEncodedQuery() == null ? "" : "?" + u.getEncodedQuery());
+    return path + (u.getEncodedQuery() == null ? "" : "?" + u.getEncodedQuery())
+        + (u.getEncodedFragment() == null ? "" : "#" + u.getEncodedFragment());
+  }
+
+  private void rememberPath(Uri uri) {
+    Server server = bridgedServer();
+    if (server == null) return;
+    String basePath = Uri.parse(server.url).getEncodedPath();
+    String path = pathOf(uri);
+    if (basePath != null && !basePath.isEmpty()
+        && (path.equals(basePath) || path.startsWith(basePath + "/")
+            || path.startsWith(basePath + "?") || path.startsWith(basePath + "#"))) {
+      path = path.substring(basePath.length());
+    }
+    lastPath = path.startsWith("/") ? path : "/" + path;
+    lastPaths.put(server.id, lastPath);
+    Servers.rememberPath(this, server.id, lastPath);
   }
 
   /** 화면에 붙어 있는 서버 — 브릿지 요청 · 내려받기의 인증은 이 서버의 것이다. */
@@ -399,10 +465,12 @@ public class MainActivity extends Activity {
   }
 
   private void goBack() {
-    if (panelMode == Panel.ADD && !Servers.list(this).isEmpty()) {
+    if (panelMode == Panel.ADD || panelMode == Panel.ADD_PAGE) {
       showServers();
-    } else if (panelMode == Panel.SERVERS && Servers.active(this) != null) {
+    } else if (panelMode == Panel.SERVERS && (Servers.active(this) != null || !selectedPageId.isEmpty())) {
       closePanel();
+    } else if (panelMode == Panel.NONE && !selectedPageId.isEmpty()) {
+      if (customPage == null || !customPage.goBack()) showServers();
     } else if (panelMode == Panel.NONE && canGoBackWithinServer()) {
       web.goBack();
     } else {
@@ -468,9 +536,10 @@ public class MainActivity extends Activity {
   void loadApp(String path) {
     Server s = Servers.active(this);
     if (s == null) {
-      showAddServer();
+      showServers();
       return;
     }
+    leaveWebPage();
     String origin = s.origin();
     if (!origin.equals(bridgedOrigin)) {
       if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
@@ -485,6 +554,7 @@ public class MainActivity extends Activity {
     webReady = false;
     revealOnLoad = true;
     web.loadUrl(s.url + lastPath);
+    renderNavigation();
   }
 
   /** 지운 서버의 화면을 내린다 — 남은 서버는 사용자가 목록에서 고른다. */
@@ -509,12 +579,17 @@ public class MainActivity extends Activity {
       showServers();
       return;
     }
-    if (isShowing(target)) {
+    if (selectedPageId.isEmpty() && isShowing(target)) {
       if (path != null) openPath(path);
       else closePanel();
       return;
     }
-    String to = path != null ? path : lastPaths.get(serverId);
+    String to = path != null ? path : lastPaths.getOrDefault(serverId, Servers.lastPath(this, serverId));
+    if (isShowing(target) && path == null && webReady) {
+      leaveWebPage();
+      closePanel();
+      return;
+    }
     activate(target, to == null ? "/" : to);
     Toast.makeText(this, "서버 전환: " + target.label(), Toast.LENGTH_SHORT).show();
   }
@@ -536,6 +611,7 @@ public class MainActivity extends Activity {
 
   /** 지금 서버의 화면 안에서 그 경로로 — 떠 있으면 페이지를 다시 읽지 않고 웹이 옮겨 간다. */
   private void openPath(String path) {
+    leaveWebPage();
     if (webReady && bridge.connected()) {
       bridge.emit(Http.obj("event", "navigate", "path", path));
       hidePanel();
@@ -547,9 +623,14 @@ public class MainActivity extends Activity {
 
   /** 네이티브 화면을 닫고 지금 서버의 화면으로 돌아간다. */
   private void closePanel() {
+    if (!selectedPageId.isEmpty() && WebPages.get(this, selectedPageId) != null) {
+      hidePanel();
+      customContainer.setVisibility(View.VISIBLE);
+      return;
+    }
     Server s = Servers.active(this);
     if (s == null) {
-      showAddServer();
+      showServers();
       return;
     }
     if (webReady && s.origin().equals(bridgedOrigin)) {
@@ -558,26 +639,21 @@ public class MainActivity extends Activity {
     } else if (s.origin().equals(bridgedOrigin)) {
       loadApp(lastPath);
     } else {
-      String to = lastPaths.get(s.id);
+      String to = lastPaths.getOrDefault(s.id, Servers.lastPath(this, s.id));
       loadApp(to == null ? "/" : to);
     }
   }
 
   void showServers() {
-    if (Servers.list(this).isEmpty()) {
-      showAddServer();
-      return;
-    }
     panelMode = Panel.SERVERS;
     panelTitle.setText(R.string.servers_title);
     panelMessage.setText(R.string.servers_message);
     serverList.setVisibility(View.VISIBLE);
     serverInput.setVisibility(View.GONE);
     nameInput.setVisibility(View.GONE);
-    primaryButton.setText(R.string.add_server);
-    primaryButton.setEnabled(true);
+    primaryButton.setVisibility(View.GONE);
     secondaryButton.setText(R.string.close);
-    secondaryButton.setVisibility(View.VISIBLE);
+    secondaryButton.setVisibility(Servers.active(this) != null || !selectedPageId.isEmpty() ? View.VISIBLE : View.GONE);
     renderServers();
     showPanel();
     checkReachability();
@@ -585,10 +661,11 @@ public class MainActivity extends Activity {
 
   private void renderServers() {
     serverList.removeAllViews();
+    addSection(serverList, getString(R.string.awb_servers));
     Server active = Servers.active(this);
     for (Server s : Servers.list(this)) {
       View row = getLayoutInflater().inflate(R.layout.item_server, serverList, false);
-      boolean current = active != null && active.id.equals(s.id);
+      boolean current = selectedPageId.isEmpty() && active != null && active.id.equals(s.id);
       row.setTag(s.id);
       row.setBackgroundResource(current ? R.drawable.server_row_active_bg : R.drawable.server_row_bg);
       ((TextView) row.findViewById(R.id.server_name)).setText(s.label());
@@ -604,6 +681,206 @@ public class MainActivity extends Activity {
       row.findViewById(R.id.server_more).setOnClickListener(v -> showServerActions(id));
       serverList.addView(row);
     }
+    if (Servers.list(this).isEmpty()) addHint(R.string.server_empty);
+    addListButton(R.string.add_server, this::showAddServer);
+    addSection(serverList, getString(R.string.web_pages));
+    for (WebPage page : WebPages.list(this)) {
+      View row = getLayoutInflater().inflate(R.layout.item_server, serverList, false);
+      boolean current = page.id.equals(selectedPageId);
+      row.setBackgroundResource(current ? R.drawable.server_row_active_bg : R.drawable.server_row_bg);
+      ((TextView) row.findViewById(R.id.server_name)).setText(page.label());
+      ((TextView) row.findViewById(R.id.server_url)).setText(page.url);
+      row.findViewById(R.id.server_status).setVisibility(View.GONE);
+      row.findViewById(R.id.server_dot).setBackgroundTintList(ColorStateList.valueOf(getColor(R.color.accent_light)));
+      row.findViewById(R.id.server_badge).setVisibility(current ? View.VISIBLE : View.GONE);
+      row.findViewById(R.id.server_more).setContentDescription(getString(R.string.page_manage) + ": " + page.label());
+      row.findViewById(R.id.server_more).setOnClickListener(v -> showPageActions(page.id));
+      row.setOnClickListener(v -> showWebPage(page.id));
+      row.setOnLongClickListener(v -> { showPageActions(page.id); return true; });
+      serverList.addView(row);
+    }
+    if (WebPages.list(this).isEmpty()) addHint(R.string.page_empty);
+    addListButton(R.string.add_web_page, () -> showPageEditor(null));
+    renderNavigation();
+  }
+
+  private void addSection(LinearLayout into, String label) {
+    TextView heading = new TextView(this);
+    heading.setText(label);
+    heading.setTextSize(12);
+    heading.setTextColor(getColor(R.color.text_secondary));
+    heading.setPadding(dp(4), dp(16), dp(4), dp(10));
+    into.addView(heading);
+  }
+
+  private void addHint(int text) {
+    TextView hint = new TextView(this);
+    hint.setText(text);
+    hint.setTextColor(getColor(R.color.text_secondary));
+    hint.setTextSize(13);
+    hint.setPadding(dp(4), dp(6), dp(4), dp(6));
+    serverList.addView(hint);
+  }
+
+  private void addListButton(int text, Runnable action) {
+    Button button = new Button(this);
+    button.setText(text);
+    button.setAllCaps(false);
+    button.setTextColor(getColor(R.color.accent_light));
+    button.setBackgroundResource(R.drawable.server_row_bg);
+    button.setMinimumHeight(dp(48));
+    button.setOnClickListener(v -> action.run());
+    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+    params.bottomMargin = dp(8);
+    serverList.addView(button, params);
+  }
+
+  /** A persistent rail on wide screens; the same grouped list fits phones without shrinking web content. */
+  private void renderNavigation() {
+    WebPage page = WebPages.get(this, selectedPageId);
+    Server server = Servers.active(this);
+    navigationTitle.setText(page != null ? page.label() : server != null ? server.label() : "AWB");
+    String address = page != null && customPage != null ? customPage.location() : server != null ? server.url : "";
+    navigationSubtitle.setText(address.isEmpty() ? getString(R.string.switch_destination)
+        : (page != null ? "웹 · " : "AWB · ") + ServerUrls.originOf(address));
+    findViewById(R.id.navigation_more).setVisibility(page == null ? View.GONE : View.VISIBLE);
+    findViewById(R.id.navigation_refresh).setEnabled(panelMode == Panel.NONE && (page != null || server != null));
+    boolean wide = getResources().getConfiguration().screenWidthDp >= 600;
+    findViewById(R.id.navigation_rail).setVisibility(wide ? View.VISIBLE : View.GONE);
+    navigationItems.removeAllViews();
+    if (!wide) return;
+    addSection(navigationItems, "AWB");
+    for (Server item : Servers.list(this)) {
+      addRailItem(item.label(), selectedPageId.isEmpty() && server != null && server.id.equals(item.id),
+          () -> switchTo(item.id, null), () -> showServerActions(item.id));
+    }
+    addRailItem("+", getString(R.string.add_server), false, this::showAddServer, null);
+    addSection(navigationItems, "WEB");
+    for (WebPage item : WebPages.list(this)) {
+      addRailItem(item.label(), item.id.equals(selectedPageId), () -> showWebPage(item.id), () -> showPageActions(item.id));
+    }
+    addRailItem("+", getString(R.string.add_web_page), false, () -> showPageEditor(null), null);
+  }
+
+  private void addRailItem(String label, boolean selected, Runnable action, Runnable manage) {
+    String[] words = label.split("[\\s._-]+", -1);
+    String first = words[0];
+    String last = words[words.length - 1];
+    String initials;
+    if (words.length > 1 && !first.isEmpty() && !last.isEmpty()) {
+      initials = first.substring(0, first.offsetByCodePoints(0, 1)) + last.substring(0, last.offsetByCodePoints(0, 1));
+    } else {
+      initials = label.substring(0, label.offsetByCodePoints(0, Math.min(2, label.codePointCount(0, label.length()))));
+    }
+    addRailItem(initials, label, selected, action, manage);
+  }
+
+  private void addRailItem(String initials, String label, boolean selected, Runnable action, Runnable manage) {
+    TextView item = new TextView(this);
+    item.setText(initials);
+    item.setTextSize(16);
+    item.setTextColor(getColor(selected ? R.color.text_primary : R.color.text_secondary));
+    item.setGravity(Gravity.CENTER);
+    item.setBackgroundResource(selected ? R.drawable.server_row_active_bg : R.drawable.server_row_bg);
+    item.setContentDescription(label + (selected ? " · " + getString(R.string.server_current) : ""));
+    item.setTooltipText(label);
+    item.setSelected(selected);
+    item.setOnClickListener(v -> action.run());
+    if (manage != null) item.setOnLongClickListener(v -> { manage.run(); return true; });
+    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(48), dp(48));
+    params.bottomMargin = dp(8);
+    navigationItems.addView(item, params);
+  }
+
+  private void showWebPage(String id) {
+    WebPage page = WebPages.get(this, id);
+    if (page == null) { showServers(); return; }
+    selectedPageId = id;
+    WebPages.select(this, id);
+    revealOnLoad = false;
+    if (customPage == null) {
+      customPage = new WebPageView(this, this::openExternal, location -> {
+        if (!selectedPageId.isEmpty()) navigationSubtitle.setText("웹 · " + ServerUrls.originOf(location));
+      });
+      customContainer.addView(customPage, new FrameLayout.LayoutParams(-1, -1));
+    }
+    customPage.show(page);
+    hidePanel();
+    web.setVisibility(View.INVISIBLE);
+    customContainer.setVisibility(View.VISIBLE);
+    renderNavigation();
+  }
+
+  private void leaveWebPage() {
+    selectedPageId = "";
+    WebPages.select(this, null);
+    customContainer.setVisibility(View.GONE);
+    if (customPage != null) customPage.pause();
+    syncVisibleSurface();
+    renderNavigation();
+  }
+
+  private void showPageEditor(String id) {
+    WebPage page = id == null ? null : WebPages.get(this, id);
+    if (id != null && page == null) return;
+    editingPageId = id;
+    panelMode = Panel.ADD_PAGE;
+    panelTitle.setText(page == null ? R.string.add_page_title : R.string.edit_page_title);
+    panelMessage.setText(R.string.page_message);
+    serverList.setVisibility(View.GONE);
+    serverInput.setHint(R.string.page_url_hint);
+    serverInput.setText(page == null ? "" : page.url);
+    serverInput.setVisibility(View.VISIBLE);
+    nameInput.setHint(R.string.page_name_hint);
+    nameInput.setText(page == null ? "" : page.name);
+    nameInput.setVisibility(View.VISIBLE);
+    primaryButton.setText(R.string.save);
+    primaryButton.setVisibility(View.VISIBLE);
+    primaryButton.setEnabled(true);
+    secondaryButton.setText(R.string.cancel);
+    secondaryButton.setVisibility(View.VISIBLE);
+    showPanel();
+    serverInput.requestFocus();
+  }
+
+  private void submitPage() {
+    try {
+      WebPage saved = WebPages.save(this, editingPageId, serverInput.getText().toString(), nameInput.getText().toString());
+      showWebPage(saved.id);
+    } catch (IllegalArgumentException error) {
+      panelMessage.setText(error.getMessage());
+    }
+  }
+
+  private void showPageActions(String id) {
+    WebPage page = WebPages.get(this, id);
+    if (page == null) return;
+    List<String> labels = new ArrayList<>();
+    List<Runnable> actions = new ArrayList<>();
+    labels.add(getString(R.string.page_home));
+    actions.add(() -> { showWebPage(id); customPage.home(); });
+    labels.add(getString(R.string.edit_page_title));
+    actions.add(() -> showPageEditor(id));
+    labels.add(getString(R.string.open_browser));
+    actions.add(() -> openExternal(Uri.parse(id.equals(selectedPageId) && customPage != null ? customPage.location() : page.url)));
+    labels.add("목록에서 삭제");
+    actions.add(() -> new AlertDialog.Builder(this)
+        .setTitle(page.label() + " 삭제")
+        .setMessage("이 단말의 웹 페이지 목록에서 삭제합니다.")
+        .setNegativeButton(R.string.cancel, null)
+        .setPositiveButton("삭제", (dialog, which) -> {
+          WebPages.remove(this, id);
+          if (id.equals(selectedPageId)) {
+            leaveWebPage();
+            customContainer.removeAllViews();
+            customPage.destroy();
+            customPage = null;
+          }
+          showServers();
+        }).show());
+    new AlertDialog.Builder(this).setTitle(page.label())
+        .setItems(labels.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
+        .setNegativeButton(R.string.cancel, null).show();
   }
 
   /** 응답 점 · 상태 줄 — 응답 확인이 끝날 때마다 그 줄만 다시 칠한다. */
@@ -692,6 +969,7 @@ public class MainActivity extends Activity {
         .setPositiveButton("저장", (d, w) -> {
           Servers.rename(this, id, input.getText().toString());
           if (panelMode == Panel.SERVERS) renderServers();
+          renderNavigation();
           publishShortcuts();
         })
         .setNegativeButton(R.string.cancel, null)
@@ -717,9 +995,11 @@ public class MainActivity extends Activity {
       Auth.signOut(this, id);
       main.post(() -> {
         // 화면은 아직 끝난 세션을 들고 있다 — 다음에 열 때 새로 읽어 로그인 화면이 되게 한다.
-        if (current) webReady = false;
+        Server signedOut = Servers.get(this, id);
+        boolean displayed = signedOut != null && signedOut.origin().equals(bridgedOrigin);
+        if (displayed) webReady = false;
         if (panelMode == Panel.SERVERS) renderServers();
-        else if (current) loadApp("/");
+        else if (displayed && selectedPageId.isEmpty()) loadApp("/");
         Toast.makeText(this, "로그아웃했습니다", Toast.LENGTH_SHORT).show();
       });
     });
@@ -771,13 +1051,16 @@ public class MainActivity extends Activity {
     panelMessage.setText(first ? R.string.connect_message : R.string.add_message);
     serverList.setVisibility(View.GONE);
     serverInput.setText(first ? BuildConfig.DEFAULT_SERVER_URL : "");
+    serverInput.setHint("https://awb.example.com");
     serverInput.setVisibility(View.VISIBLE);
     nameInput.setText("");
+    nameInput.setHint(R.string.server_name_hint);
     nameInput.setVisibility(View.VISIBLE);
     primaryButton.setText(R.string.connect);
+    primaryButton.setVisibility(View.VISIBLE);
     primaryButton.setEnabled(true);
     secondaryButton.setText(R.string.cancel);
-    secondaryButton.setVisibility(first ? View.GONE : View.VISIBLE);
+    secondaryButton.setVisibility(View.VISIBLE);
     showPanel();
     if (!first) serverInput.requestFocus();
   }
@@ -792,6 +1075,7 @@ public class MainActivity extends Activity {
     serverInput.setVisibility(View.GONE);
     nameInput.setVisibility(View.GONE);
     primaryButton.setText(R.string.retry);
+    primaryButton.setVisibility(View.VISIBLE);
     primaryButton.setEnabled(true);
     secondaryButton.setText(R.string.servers);
     secondaryButton.setVisibility(View.VISIBLE);
@@ -799,14 +1083,20 @@ public class MainActivity extends Activity {
   }
 
   private void showPanel() {
+    revealOnLoad = false;
     panel.setVisibility(View.VISIBLE);
     panel.scrollTo(0, 0);
     web.setVisibility(View.INVISIBLE);
+    customContainer.setVisibility(View.INVISIBLE);
+    syncVisibleSurface();
+    renderNavigation();
   }
 
   private void hidePanel() {
     panelMode = Panel.NONE;
     panel.setVisibility(View.GONE);
+    syncVisibleSurface();
+    renderNavigation();
     InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
     if (imm != null) imm.hideSoftInputFromWindow(panel.getWindowToken(), 0);
   }
