@@ -1028,6 +1028,7 @@ export interface AgentSessionRequestPayload {
   image_ref?: string;
   /** local_image · local_video — 에이전트가 답에 적은 미리보기 파일 경로. 매니저가 그 장비에서 읽는다(이미지·html·md·영상). */
   image_path?: string;
+  web_preview?: { protocol: 'http:' | 'https:'; host: 'localhost' | '127.0.0.1' | '[::1]'; port: number; path: string; method: 'GET' | 'HEAD' };
   /** local_video — 읽을 조각의 시작 바이트와 최대 길이. 길이가 없거나 크면 매니저가 조각 상한(8MiB)으로 자른다. */
   offset?: number;
   length?: number;

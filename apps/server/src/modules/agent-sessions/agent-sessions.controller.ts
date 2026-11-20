@@ -1,11 +1,13 @@
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
+import { WebPreviewService } from './web-preview.service';
+import { requestOrigin } from '../../common/public-url';
 
 /**
  * `Range: bytes=START-[END]` 하나만 받는다 — 화면이 쓰는 모양이 그것뿐이다. 여러 구간과 끝에서 세는
@@ -31,7 +33,7 @@ export function parseByteRange(header: string | undefined): { start: number; len
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.USE_AGENT_SESSIONS)
 export class AgentSessionsController {
-  constructor(private readonly sessions: AgentSessionsService) {}
+  constructor(private readonly sessions: AgentSessionsService, private readonly previews: WebPreviewService) {}
 
   private accountId(req: Request, res: Response): string | null {
     const raw = req.headers['x-account-id'];
@@ -45,6 +47,28 @@ export class AgentSessionsController {
 
   private userId(req: Request): string {
     return (req as any).currentUser.id as string;
+  }
+
+  private previewSession(req: Request) {
+    const { managerId, cli, sessionId } = req.params;
+    return { managerId: String(managerId), cli: String(cli), sessionId: String(sessionId), accountId: (req as any).currentAccountId, userId: this.userId(req) };
+  }
+
+  @Get('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
+  previewOptions(@Req() req: Request, @Res() res: Response) {
+    res.set('Cache-Control', 'no-store');
+    return this.run(res, 200, () => this.previews.options(this.previewSession(req), requestOrigin(req)));
+  }
+
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
+  openPreview(@Req() req: Request, @Body() body: any, @Res() res: Response) {
+    res.set('Cache-Control', 'no-store');
+    return this.run(res, 201, () => this.previews.open(this.previewSession(req), req.headers.authorization!.slice(7).trim(), body?.url, requestOrigin(req)));
+  }
+
+  @Delete('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
+  closePreviews(@Req() req: Request, @Res() res: Response) {
+    return res.json(this.previews.close(this.previewSession(req)));
   }
 
   private async run(res: Response, status: number, fn: () => Promise<unknown>) {

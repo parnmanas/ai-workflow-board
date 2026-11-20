@@ -315,6 +315,10 @@ const mailApproval = (mail: TrademarkMail) => ({ revision: mail.revision, payloa
 const integrationPath = (companyId: string, trademarkId: string, ...parts: string[]) => trademarkPath(companyId, trademarkId, 'integrations', ...parts);
 const actionApproval = (action: TrademarkIntegrationAction) => ({ revision: action.revision, payload_digest: action.payload_digest, confirm: true });
 
+function webPreviewPath(managerId: string, cli: string, sessionId: string) {
+  return `/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/web-preview`;
+}
+
 export const api = {
   resolveArtifactRefs: (
     accountId: string,
@@ -1843,6 +1847,12 @@ export const api = {
     }),
   getHostSessionUsageLimits: (managerId: string, cli: string, sessionId: string) =>
     request<{ events: AgentSessionEventRecord[] }>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/usage-limits`),
+  getWebPreview: (managerId: string, cli: string, sessionId: string) =>
+    request<{ configured: boolean; ports: number[] | null; active: number }>(webPreviewPath(managerId, cli, sessionId)),
+  openWebPreview: (managerId: string, cli: string, sessionId: string, url: string) =>
+    request<{ action: string; ticket: string }>(webPreviewPath(managerId, cli, sessionId), { method: 'POST', body: JSON.stringify({ url }) }),
+  closeWebPreviews: (managerId: string, cli: string, sessionId: string) =>
+    request<{ active: number }>(webPreviewPath(managerId, cli, sessionId), { method: 'DELETE' }),
   getHostSession: (managerId: string, cli: string, sessionId: string, before?: string) =>
     sessionRead<AgentSessionDetail>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}${before ? `?before=${encodeURIComponent(before)}` : ''}`),
   /**

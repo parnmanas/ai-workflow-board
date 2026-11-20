@@ -73,7 +73,8 @@ export class AgentSessionsAgentController {
   async rpc(@Param('requestId') requestId: string, @Body() body: any, @Req() req: Request, @Res() res: Response) {
     const caller = this.callerId(req);
     if (!caller) return res.status(401).json({ error: 'manager_identity_required' });
-    const outcome = this.sessions.resolveRpc(requestId, caller, body ?? {});
+    const hostKeyAccount = (req as any).currentHostId === caller && !(req as any).currentRuntimeKey ? (req as any).currentAccountId : undefined;
+    const outcome = this.sessions.resolveRpc(requestId, caller, body ?? {}, hostKeyAccount);
     if (!outcome.ok) return res.status(404).json({ error: outcome.reason });
     return res.status(200).json({ ok: true });
   }

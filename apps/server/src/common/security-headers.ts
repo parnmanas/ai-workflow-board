@@ -11,7 +11,11 @@
  * `useDefaults: true` 위에 얹히므로 여기 적지 않은 지시어(default-src, script-src,
  * style-src 등)는 helmet 기본값 그대로다.
  */
+import { previewDomain } from './web-preview-domain';
+
+const previewHost = previewDomain();
 export const CSP_DIRECTIVES: Record<string, string[]> = {
+  formAction: previewHost ? ["'self'", 'https://*.' + previewHost] : ["'self'"],
   /*
    * `'wasm-unsafe-eval'` — 브라우저가 WebAssembly 를 컴파일하도록 허락한다. 음성 대화 모드·이름 부르기의
    * 말소리 감지(Silero VAD, onnxruntime-web)가 WASM 이다. helmet 기본값 `script-src 'self'` 만 두면

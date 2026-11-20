@@ -1390,6 +1390,7 @@ export const EVENT_TYPES: EventDefinition[] = [
         mode_id: event.mode_id,
         image_ref: event.image_ref,
         image_path: event.image_path,
+        web_preview: event.web_preview,
         offset: event.offset,
         length: event.length,
         config_id: event.config_id,

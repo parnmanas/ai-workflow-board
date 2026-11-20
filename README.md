@@ -181,6 +181,8 @@ For a new session, AWB uses the applicable account/host/CLI defaults. The first 
 
 Without an AWB credential binding, sessions use the host's CLI login. With a binding, the manager prepares a separate CLI home; it does not overwrite the operator's login files. History remains on the host. See [Agent Sessions](docs/agent-sessions.md).
 
+Open **Local web preview** in a session to view a web app running on that host from another device. The host operator allows individual ports and AWB serves each preview on a temporary HTTPS origin. [Local web preview setup](docs/agent-sessions.md#호스트의-localhost-웹페이지-열기)
+
 ## Automate work with tickets and projects
 
 Use tickets for work with a clear outcome, queue position, and durable result.

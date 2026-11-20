@@ -30,6 +30,7 @@ const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPag
 const ChatFirstHome = lazy(() => import('./components/ChatFirstHome'));
 // Agent Session(CLI 직접 세션) — Chat 과 나란한 별개 표면이자 기본 랜딩.
 const SessionsPage = lazy(() => import('./components/sessions/SessionsPage'));
+const WebPreviewPage = lazy(() => import('./components/sessions/WebPreviewPage'));
 const HostsPage = lazy(() => import('./components/HostsPage'));
 const TerminalsPage = lazy(() => import('./components/terminals/TerminalsPage'));
 // CLI Memory — Runtime Host 의 LLM CLI 메모리 파일(docs/cli-memory.md).
@@ -211,6 +212,7 @@ function AppContent() {
             <Route path="sessions" element={<SessionsPage />} />
             <Route path="sessions/:managerId" element={<SessionsPage />} />
             <Route path="sessions/:managerId/:cli/:sessionId" element={<SessionsPage />} />
+            <Route path="sessions/:managerId/:cli/:sessionId/web-preview" element={<WebPreviewPage />} />
             <Route path="terminals" element={<TerminalsPage />} />
             <Route path="terminals/:managerId" element={<TerminalsPage />} />
             <Route path="terminals/:managerId/:terminalId" element={<TerminalsPage />} />

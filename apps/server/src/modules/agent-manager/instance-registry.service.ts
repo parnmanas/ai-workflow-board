@@ -271,6 +271,7 @@ export interface InstanceRecord {
   // (claude / codex / hermes 중 실제로 실행 파일이 잡히는 것). 구버전 매니저는
   // undefined — 그때는 cli_adapters ∩ ACP_SESSION_CLIS 로 추정한다.
   acp_session_clis?: string[];
+  web_preview_ports?: number[];
   session_launch_options?: Record<string, AgentSessionConfigOption[]>;
   // 이 장비가 쓰는 ACP 어댑터와 그 버전. **어댑터 버전이 세션의 모델 목록·capability 를
   // 정한다**(어댑터가 모델 id 를 자기 번들에 하드코딩한다) — CLI 버전만 보고는 왜 새 모델이

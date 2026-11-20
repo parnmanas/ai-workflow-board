@@ -428,6 +428,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   const navigate = useNavigate();
   const { showToast } = useToast();
   const confirm = useConfirm();
+  const webPreviewPath = `/sessions/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/${encodeURIComponent(sessionId)}/web-preview`;
   const [summary, setSummary] = useState<AgentSessionSummary | null>(null);
   const [live, setLiveRaw] = useState<AgentSessionLiveSnapshot | null>(null);
   // **과거가 현재를 덮지 못하게** 모든 갱신을 한 규칙으로 모은다. 상태는 지연이 서로 다른
@@ -1132,6 +1133,10 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
                     </SessionMenuSection>
                   )}
                   <SessionMenuSection title={translate('Actions')}>
+                    <SessionMenuItem icon="↗" label={translate('Local web preview')} onSelect={() => {
+                      closeMenu();
+                      window.open(webPreviewPath, '_blank', 'noopener,noreferrer');
+                    }} />
                     {/* 프로세스만 다시 띄운다. CLI 를 올린 뒤 새 모델·기능이 보이지 않을 때 쓰는
                         정식 경로다 — 살아 있는 프로세스는 기동 시점의 CLI 를 계속 물고 있다.
                         여는 중(starting)에만 잠근다: 턴 중이라도 운영자가 일부러 죽이려는 것일 수
@@ -1234,6 +1239,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
             loadLocalImage={loadLocalImage}
             loadLocalVideo={loadLocalVideo}
             loadLocalVideoPreview={loadLocalVideoPreview}
+            webPreviewPath={webPreviewPath}
           />
           </div>
         )}

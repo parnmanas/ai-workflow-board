@@ -208,6 +208,7 @@ export interface PendingSessionInteraction {
 
 interface PendingRpc {
   manager_id: string;
+  account_id: string;
   op: string;
   created_at: number;
   resolve: (body: RpcResponseBody) => void;
@@ -246,9 +247,12 @@ const RPC_ERROR_STATUS: Record<string, number> = {
   // local_video — 영상 파일이 아니거나(415), 조각 시작이 파일 밖이다(416).
   not_video: 415,
   bad_range: 416,
+  preview_port_denied: 403,
+  preview_invalid: 400,
+  preview_busy: 429,
 };
 // local_video 는 조각 하나(최대 8MiB)를 매니저 장비의 업링크로 올리는 시간까지 기다린다.
-const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, info: 20_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000, local_video: 60_000 } as const;
+const RPC_TIMEOUT_MS = { list: 20_000, history: 40_000, info: 20_000, usage_limits: 20_000, open: 120_000, image: 30_000, local_image: 30_000, local_video: 60_000, web_preview: 30_000 } as const;
 /**
  * 매니저 스트림이 없는 동안 보낸 요청 중 **다시 보내도 안전한 것**(읽기 전용). `open` 은 빠진다 —
  * 첫 요청이 실제로는 닿았을 수 있어 두 번 열면 세션 프로세스가 둘이 된다.
@@ -1156,7 +1160,7 @@ export class AgentSessionsService implements OnModuleDestroy {
     const timeoutMs = RPC_TIMEOUT_MS[op];
     const promise = new Promise<RpcResponseBody>((resolve) => {
       const timer = this.armRpcTimer(requestId, op, managerId, cli, timeoutMs);
-      this.pending.set(requestId, { manager_id: managerId, op, created_at: Date.now(), resolve, timer });
+      this.pending.set(requestId, { manager_id: managerId, account_id: args.account_id, op, created_at: Date.now(), resolve, timer });
     });
     const request = { manager_id: managerId, cli, op, request_id: requestId, driver_user_id: driverUserId, ...args };
     // 스트림이 없는 매니저에게 보낸 이벤트는 사라진다 — 붙으면 다시 보내도록 표시해 둔다(onManagerReachable).
@@ -1186,10 +1190,13 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   /** 매니저 → 서버. request_id 소유 매니저만 풀 수 있다. */
-  resolveRpc(requestId: string, managerId: string, body: RpcResponseBody): { ok: boolean; reason?: string } {
+  resolveRpc(requestId: string, managerId: string, body: RpcResponseBody, hostKeyAccount?: string): { ok: boolean; reason?: string } {
     const entry = this.pending.get(requestId);
     if (!entry) return { ok: false, reason: 'Unknown or expired request_id' };
     if (entry.manager_id !== managerId) return { ok: false, reason: 'request_id belongs to a different Runtime Host' };
+    if (entry.op === 'web_preview' && (!hostKeyAccount || entry.account_id !== hostKeyAccount)) {
+      return { ok: false, reason: 'Preview replies require the owning Runtime Host key' };
+    }
     clearTimeout(entry.timer);
     this.pending.delete(requestId);
     entry.resolve({ ok: body?.ok === true, result: body?.result, error: body?.error, code: body?.code });
@@ -1369,6 +1376,24 @@ export class AgentSessionsService implements OnModuleDestroy {
   }
 
   // ─── 사용자 쓰기 ───────────────────────────────────────────────────────
+
+  async webPreviewPorts(accountId: string, managerId: string, cli: string, sessionId: string) {
+    this.assertSessionId(sessionId);
+    await this.requireManagerAgent(accountId, managerId);
+    const pinned = await this.dataSource.getRepository(AgentSessionExecution).findOne({
+      where: { manager_id: managerId, cli, session_id: sessionId }, select: ['account_id'],
+    });
+    if (pinned && pinned.account_id !== accountId) throw new AgentSessionError(403, 'account_access_denied');
+    return this.requireHost(accountId, managerId, cli).web_preview_ports;
+  }
+
+  async readWebPreview(accountId: string, userId: string, managerId: string, cli: string, sessionId: string, target: NonNullable<AgentSessionRequestPayload['web_preview']>) {
+    const ports = await this.webPreviewPorts(accountId, managerId, cli, sessionId);
+    if (!ports?.includes(target.port)) throw new AgentSessionError(403, 'preview_port_denied');
+    return this.rpc<{ status: number; mime_type?: string; base64?: string; location?: string }>(
+      managerId, cli, 'web_preview', { account_id: accountId, session_id: sessionId, web_preview: target }, userId,
+    );
+  }
 
   /**
    * 세션이 내보낸 이미지 한 장의 바이트.

@@ -43,6 +43,7 @@ export interface SessionTranscriptProps {
   loadLocalVideo?: LocalVideoLoader;
   /** 같은 영상의 앞부분만(썸네일 한 장면용) — 바이트와 파일 전체 크기. */
   loadLocalVideoPreview?: LocalVideoPreviewLoader;
+  webPreviewPath?: string;
 }
 
 export type LocalVideoLoader = (
@@ -289,14 +290,18 @@ function AutomaticPromptBlock({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, registerMedia, openMedia }: { text: string; loadLocalImage?: (path: string, signal?: AbortSignal) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; loadLocalVideoPreview?: LocalVideoPreviewLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void }) {
+function AssistantBlock({ text, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, registerMedia, openMedia, webPreviewPath }: { text: string; loadLocalImage?: (path: string, signal?: AbortSignal) => Promise<Blob>; loadLocalVideo?: LocalVideoLoader; loadLocalVideoPreview?: LocalVideoPreviewLoader; registerMedia?: (key: string, item: MediaLightboxItem) => void; openMedia?: (key: string) => void; webPreviewPath?: string }) {
   useLocale();
   // 원격 영상 링크(맨 URL 포함)는 글 안에 둔 채 바로 아래에 썸네일을 붙인다 — 링크를 카드로 떼면 목록이 끊긴다.
   const renderLink = useCallback<MarkdownLinkRenderer>(
-    (href, children) => (isRemoteVideoUrl(href)
-      ? <VideoLink href={href} registerMedia={registerMedia} openMedia={openMedia}>{children}</VideoLink>
-      : undefined),
-    [registerMedia, openMedia],
+    (href, children) => {
+      if (webPreviewPath && /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[/?#]|$)/i.test(href)) {
+        return <a href={webPreviewPath + '#' + encodeURIComponent(href)} target="_blank" rel="noopener noreferrer"
+          title={translate('Local web preview')} style={{ color: tokens.colors.accent }}>{children}</a>;
+      }
+      if (isRemoteVideoUrl(href)) return <VideoLink href={href} registerMedia={registerMedia} openMedia={openMedia}>{children}</VideoLink>;
+    },
+    [webPreviewPath, registerMedia, openMedia],
   );
   // 인증된 이미지·파일·영상 미리보기 자리를 먼저 떼고, 나머지는 세션 Markdown으로 그린다.
   // 이미지와 로컬 html/md 는 같은 통(`local_image` RPC)으로 받으므로 로더도 하나를 공유한다.
@@ -1619,7 +1624,7 @@ function VideoLink({
   );
 }
 
-export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage, loadLocalVideo, loadLocalVideoPreview }: SessionTranscriptProps) {
+export default function SessionTranscript({ blocks, decidingRequestId, onDecidePermission, onAnswerElicitation, permissionsEnabled, loadImage, loadLocalImage, loadLocalVideo, loadLocalVideoPreview, webPreviewPath }: SessionTranscriptProps) {
   useLocale();
   // A question tool also emits an elicitation form. Show one card and retain
   // the linked tool's input/result in its details, regardless of arrival order.
@@ -1679,7 +1684,7 @@ export default function SessionTranscript({ blocks, decidingRequestId, onDecideP
           case 'automatic_prompt':
             return <AutomaticPromptBlock key={block.key} text={block.text} />;
           case 'assistant':
-            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} loadLocalVideo={loadLocalVideo} loadLocalVideoPreview={loadLocalVideoPreview} registerMedia={registerMedia} openMedia={openMedia} />;
+            return <AssistantBlock key={block.key} text={block.text} loadLocalImage={loadLocalImage} loadLocalVideo={loadLocalVideo} loadLocalVideoPreview={loadLocalVideoPreview} registerMedia={registerMedia} openMedia={openMedia} webPreviewPath={webPreviewPath} />;
           case 'reasoning':
             return <ReasoningBlock key={block.key} text={block.text} />;
           case 'tool':

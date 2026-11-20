@@ -110,6 +110,7 @@ export const AGENT_SESSION_REQUEST_OPS = [
   // 경로 규칙은 local_image 와 같고(영상 확장자 + 매직 바이트) 한 편 200MB 까지. 한 편이 RPC 응답
   // 하나의 상한을 넘기 쉬우므로 화면이 offset 을 옮겨 가며 조각(최대 8MiB)을 모은다.
   'local_video',
+  'web_preview',
 ] as const;
 export type AgentSessionRequestOp = (typeof AGENT_SESSION_REQUEST_OPS)[number];
 

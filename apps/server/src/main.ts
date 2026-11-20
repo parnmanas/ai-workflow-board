@@ -20,6 +20,7 @@ import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
 import { applySpaFallback } from './common/spa-fallback';
+import { applyWebPreview } from './modules/agent-sessions/web-preview-http';
 
 async function bootstrap() {
   // Runs BEFORE NestFactory so TypeORM's auto-synchronize doesn't trip on
@@ -52,6 +53,7 @@ async function bootstrap() {
   // on a graceful stop (ticket d5a8594a — dev sql.js autoSave is off); also lets
   // every sweep service clear its timers cleanly. No-op effect on prod backends.
   app.enableShutdownHooks();
+  applyWebPreview(app);
 
   // 보안 응답 헤더(M1) — nosniff/frameguard/HSTS 등은 helmet 기본값 그대로 전
   // 라우트에 적용한다. CSP는 별도 미들웨어로 분리해 /api-docs(Swagger UI, 인라인

@@ -66,6 +66,7 @@ import type {
   AcpPermissionRequest,
 } from './runtime/acp/acp-types.js';
 import type { RuntimeEvent } from './runtime/runtime-events.js';
+import { readLocalWebPage, type LocalWebRequest } from './local-web-preview.js';
 
 /** 서버 payload (apps/server/src/common/types/stream-events.ts AgentSessionRequestPayload). */
 export interface AgentSessionRequest {
@@ -75,7 +76,8 @@ export interface AgentSessionRequest {
   /** 서버의 `AGENT_SESSION_REQUEST_OPS`(apps/server/src/common/types/agent-sessions.ts)를
    *  그대로 비춘다. agent-manager 는 별도 패키지라 그 타입을 import 할 수 없어 사본이
    *  불가피하다 — op 를 추가할 때는 **양쪽을 같은 PR 로** 고칠 것. */
-  op: 'list' | 'history' | 'info' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image' | 'local_video';
+  op: 'list' | 'history' | 'info' | 'usage_limits' | 'open' | 'prompt' | 'permission' | 'elicitation' | 'cancel' | 'set_mode' | 'set_config_option' | 'close' | 'restart' | 'image' | 'local_image' | 'local_video' | 'web_preview';
+  web_preview?: LocalWebRequest;
   request_id?: string;
   session_id?: string | null;
   cwd?: string;
@@ -780,6 +782,15 @@ export class AgentSessionRunner {
             return;
           }
           await this.#reply(requestId, op, { ok: true, result: { base64: stored.base64 } });
+          return;
+        }
+        case 'web_preview': {
+          if (!request.account_id || request.account_id !== this.#config.account_id
+              || request.manager_id !== this.#options.getManagerId()) {
+            throw Object.assign(new Error('Web preview owner mismatch.'), { code: 'account_access_denied' });
+          }
+          const result = await readLocalWebPage(request.web_preview, this.#config.web_preview_ports);
+          await this.#reply(requestId, op, { ok: true, result });
           return;
         }
         case 'local_image': {

@@ -17,6 +17,7 @@
 
 import { hostname } from 'node:os';
 import { sessionLaunchOptions } from './session-launch-options.js';
+import { webPreviewPorts } from './local-web-preview.js';
 import { randomUUID } from 'node:crypto';
 import { HEARTBEAT_INTERVAL_MS, REQUEST_TIMEOUT_MS, DEFAULT_CLI_ID } from './constants.js';
 import { log } from './logging.js';
@@ -321,6 +322,7 @@ export interface InstanceHeartbeatPayload {
   plugin_version: string;
   cli: string;
   cli_adapters: string[];
+  web_preview_ports: number[];
   runtime_capabilities?: RuntimeCapabilityReport;
   // ticket c3b767c6 — dispatch-gated feature flags this build supports (see
   // InstanceMeta.managerCapabilities doc comment above). Omitted (rather than
@@ -668,6 +670,7 @@ export class InstanceHeartbeat {
           : {}),
         ...(cliInstalls && cliInstalls.length ? { cli_installs: cliInstalls } : {}),
         ...(meta?.acpSessionClis?.length ? { acp_session_clis: meta.acpSessionClis } : {}),
+        web_preview_ports: webPreviewPorts(this.#config.web_preview_ports),
         session_launch_options: Object.fromEntries((meta?.acpSessionClis ?? []).map((cli) => [cli, sessionLaunchOptions(cli)])),
         ...(acpAdaptersNow?.length ? { acp_adapters: acpAdaptersNow } : {}),
         ...(acpAdapterLatest && Object.keys(acpAdapterLatest).length

@@ -11,6 +11,7 @@ import { AgentSessionsController } from './agent-sessions.controller';
 import { AgentSessionsAgentController } from './agent-sessions-agent.controller';
 import { AgentSessionsService } from './agent-sessions.service';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
+import { WebPreviewService } from './web-preview.service';
 
 /**
  * Agent Session(CLI 직접 세션) — 상태 없는 중계 모듈. 엔티티가 없다: 세션 목록과
@@ -25,7 +26,7 @@ import { AgentManagerModule } from '../agent-manager/agent-manager.module';
     forwardRef(() => AgentManagerModule),
   ],
   controllers: [AgentSessionsController, AgentSessionsAgentController],
-  providers: [AgentSessionsService, AuthGuard, PermissionGuard, AgentAuthGuard],
+  providers: [AgentSessionsService, WebPreviewService, AuthGuard, PermissionGuard, AgentAuthGuard],
   exports: [AgentSessionsService],
 })
 export class AgentSessionsModule {}

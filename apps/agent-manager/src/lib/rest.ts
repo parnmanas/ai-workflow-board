@@ -8,6 +8,8 @@ export interface AwbConfig {
   url: string;
   apiKey: string;
   account_id?: string;
+  /** Loopback web services the local operator allows the AWB session viewer to read. */
+  web_preview_ports?: number[];
   agent_id?: string;
   cli?: string;
   /** Override for `hasAuditTrailSince`'s grace delay (ticket 2fd06686).

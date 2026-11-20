@@ -73,6 +73,8 @@ export function recordEvent(eventType: string, raw: string): void {
   } catch {
     ev = { _parse_error: true };
   }
+  // The browser's paths and query strings can contain private application data.
+  if (eventType === 'agent_session_request' && (ev?.payload ?? ev)?.op === 'web_preview') return;
 
   const occurredAt =
     typeof ev.timestamp === 'string' && ev.timestamp

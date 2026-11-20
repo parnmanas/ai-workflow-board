@@ -853,6 +853,9 @@ export class AgentManagerController {
       runtime_capabilities,
       manager_capabilities,
       acp_session_clis,
+      web_preview_ports: Array.isArray(body?.web_preview_ports)
+        ? [...new Set<number>(body.web_preview_ports.slice(0, 32).filter((p: unknown) => typeof p === 'number' && Number.isInteger(p) && p >= 1 && p <= 65535))]
+        : undefined,
       session_launch_options: sanitizeSessionLaunchOptions(body?.session_launch_options),
       acp_adapters,
       acp_adapter_latest_versions,

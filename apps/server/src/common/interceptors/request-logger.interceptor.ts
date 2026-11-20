@@ -116,7 +116,9 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // providers, so never capture either body for this route, even when an
     // operator temporarily enables HTTP body logging.
     const credentialWrite = ['POST', 'PATCH'].includes(method) && /^\/api\/credentials(?:\/|$)/.test(req.path);
-    const captureBodies = !credentialWrite && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_PRIVATE_PATH.test(req.path);
+    // Only record HTTP metadata for preview handoffs and manager replies carrying private host content.
+    const sessionContent = /\/web-preview\/?$/i.test(req.path) || /^\/api\/agent\/sessions\/rpc\//i.test(req.path);
+    const captureBodies = !credentialWrite && !sessionContent && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_PRIVATE_PATH.test(req.path);
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
     // capPayload runs JSON.stringify on the entire body before truncating —
