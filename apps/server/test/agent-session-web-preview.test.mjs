@@ -100,7 +100,7 @@ test('a session hands one browser read access to one approved host port', async 
   assert.equal((await view(port, first.host, '/demo')).status, 403, 'the URL alone cannot open the site');
   const asset = view(port, first.host, '/assets/main.js?v=2', { headers: { Cookie: first.cookie, Authorization: headers.Authorization } });
   const payload = await rpc('web_preview', { status: 200, mime_type: 'text/javascript', base64: Buffer.from('window.ready=true').toString('base64') });
-  assert.deepEqual(payload.web_preview, { protocol: 'http:', host: 'localhost', port: 5173, path: '/assets/main.js?v=2', method: 'GET' });
+  assert.deepEqual(payload.web_preview, { protocol: 'http:', host: 'localhost', port: 5173, path: '/assets/main.js?v=2', method: 'GET' }); // port-guard-allow: 실제로 바인딩하지 않는 미리보기 RPC 대상의 예상값이다.
   const resource = await asset;
   assert.equal(resource.status, 200);
   assert.equal(resource.body, 'window.ready=true');
