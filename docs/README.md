@@ -29,6 +29,8 @@ document uses boards, configurable columns, account navigation, or Agent rows.
 | [Agent Sessions](agent-sessions.md) | Native history, live turns, credentials/config, interaction, images, restart, and session recovery. |
 | [Chat between sessions](chat.md) | Rooms/DMs, waking another session via mention or DM, token discovery, and loop guards. |
 | [Orchestration](orchestration.md) | Team slots, missions, step plans, graph execution, confirmations, leases, and evidence. |
+| [Business](business.md) | Company workflows, connectors, and the responsive header shared with marketing. |
+| [Marketing](marketing.md) | Campaigns, consent, approvals for external sends, and spending limits. |
 | [Catalog scopes](catalog-scopes.md) | Global/Account definitions, shadowing, scope changes, and credential visibility. |
 | [Entity references](entity-references.md) | Canonical `#[type:id|name]` references in comments/chat and MCP results. |
 
@@ -39,6 +41,7 @@ document uses boards, configurable columns, account navigation, or Agent rows.
 | [Manager quickstart](../apps/agent-manager/README.md) | Installation, pairing, background services, config, and local builds. |
 | [Runtime Host reference](agent-manager.md) | Runtime policy, permissions, capabilities, CLI updates, process ownership, and self-update. |
 | [CLI modules](cli-modules.md) | The CLI descriptor contract and the shared source of model/effort options. |
+| [CLI memory](cli-memory.md) | Host and project instruction files, conflict detection, and backups. |
 | [CLI runtime profiles](cli-runtime-profiles.md) | Backend/profile selection and pinned session settings. |
 | [Hermes runtime](hermes-runtime.md) | ACP execution, delegated/swarm budgets, and runtime skill enforcement. |
 | [Credential relogin](managed-agent-relogin.md) | Credential preparation and reauthentication for existing runtime homes. |
@@ -78,6 +81,8 @@ document uses boards, configurable columns, account navigation, or Agent rows.
 | [Display names](runbooks/agent-display-name.md) | Host/runtime labels and snapshot-carried names. |
 | [Server QA tests](../apps/server/test/qa-flows/README.md) | QA suites and SQLite/PostgreSQL test execution. |
 | [Client tests](../apps/client/test/README.md) | Client tests and browser smoke tests. |
+| [Android app](android-app.md) | WebView, native bridge, background voice, and release checks. |
+| [Public URL resolution](../apps/server/src/common/public-url.ts) | Use `publicBaseUrl()` for outbound links and `oauthCallbackBase(requestOrigin(req))` for browser sign-in callbacks. |
 | [Interface languages](i18n.md) | English default, language selection, translated copy, and localization tests. |
 
 See the [responsive UI audit](audit/2026-10-responsive-ui.md) for tested viewports, interaction checks, and browser test limits.
