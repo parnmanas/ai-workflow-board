@@ -1,4 +1,5 @@
 {
+  "Open {0}": "{0} を開く",
   "Local web preview": "ローカル Web プレビュー",
   "Web address on the Runtime Host": "ランタイムホストの Web アドレス",
   "Configure a separate HTTPS site with AWB_PREVIEW_DOMAIN on the AWB server.": "AWB サーバーの AWB_PREVIEW_DOMAIN に専用の HTTPS サイトを設定してください。",

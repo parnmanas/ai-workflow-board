@@ -1848,7 +1848,13 @@ export const api = {
   getHostSessionUsageLimits: (managerId: string, cli: string, sessionId: string) =>
     request<{ events: AgentSessionEventRecord[] }>(`/agent-sessions/hosts/${encodeURIComponent(managerId)}/${encodeURIComponent(cli)}/sessions/${encodeURIComponent(sessionId)}/usage-limits`),
   getWebPreview: (managerId: string, cli: string, sessionId: string) =>
-    request<{ configured: boolean; ports: number[] | null; active: number }>(webPreviewPath(managerId, cli, sessionId)),
+    request<{ configured: boolean; ports: number[] | null; active: number; apps?: { id: string; name: string }[] }>(webPreviewPath(managerId, cli, sessionId)),
+  openSessionWebApp: (managerId: string, cli: string, sessionId: string, id: string) =>
+    request<{ grant: string; html: string; name: string }>(webPreviewPath(managerId, cli, sessionId) + '/apps/' + encodeURIComponent(id) + '/open', { method: 'POST' }),
+  sessionWebAppRequest: (managerId: string, cli: string, sessionId: string, id: string, input: { grant: string; path: string; body: string }, signal: AbortSignal) =>
+    request<{ status: number; body: string }>(webPreviewPath(managerId, cli, sessionId) + '/apps/' + encodeURIComponent(id) + '/request', { method: 'POST', body: JSON.stringify(input), signal }),
+  closeSessionWebApp: (managerId: string, cli: string, sessionId: string, id: string, grant: string) =>
+    request<{ closed: boolean }>(webPreviewPath(managerId, cli, sessionId) + '/apps/' + encodeURIComponent(id), { method: 'DELETE', body: JSON.stringify({ grant }), keepalive: true }),
   openWebPreview: (managerId: string, cli: string, sessionId: string, url: string) =>
     request<{ action: string; ticket: string }>(webPreviewPath(managerId, cli, sessionId), { method: 'POST', body: JSON.stringify({ url }) }),
   closeWebPreviews: (managerId: string, cli: string, sessionId: string) =>

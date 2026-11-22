@@ -11,6 +11,8 @@ import { AgentSessionsController } from './agent-sessions.controller';
 import { AgentSessionsAgentController } from './agent-sessions-agent.controller';
 import { AgentSessionsService } from './agent-sessions.service';
 import { AgentManagerModule } from '../agent-manager/agent-manager.module';
+import { SessionWebAppsService } from './session-web-apps.service';
+import { WebAppFrameController } from './web-app-frame.controller';
 import { WebPreviewService } from './web-preview.service';
 
 /**
@@ -25,8 +27,8 @@ import { WebPreviewService } from './web-preview.service';
     // 넣으면 이 모듈만의 인스턴스가 생겨 세션이 관측한 모델이 다른 화면에 전달되지 않는다.
     forwardRef(() => AgentManagerModule),
   ],
-  controllers: [AgentSessionsController, AgentSessionsAgentController],
-  providers: [AgentSessionsService, WebPreviewService, AuthGuard, PermissionGuard, AgentAuthGuard],
+  controllers: [AgentSessionsController, AgentSessionsAgentController, WebAppFrameController],
+  providers: [AgentSessionsService, WebPreviewService, SessionWebAppsService, AuthGuard, PermissionGuard, AgentAuthGuard],
   exports: [AgentSessionsService],
 })
 export class AgentSessionsModule {}

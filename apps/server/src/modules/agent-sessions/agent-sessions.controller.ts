@@ -6,6 +6,7 @@ import { PermissionGuard } from '../../common/guards/permission.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { PERMISSIONS } from '../../common/types/permissions';
 import { AgentSessionError, AgentSessionsService } from './agent-sessions.service';
+import { SessionWebAppsService } from './session-web-apps.service';
 import { WebPreviewService } from './web-preview.service';
 import { requestOrigin } from '../../common/public-url';
 
@@ -33,7 +34,11 @@ export function parseByteRange(header: string | undefined): { start: number; len
 @UseGuards(AuthGuard, PermissionGuard)
 @RequirePermission(PERMISSIONS.USE_AGENT_SESSIONS)
 export class AgentSessionsController {
-  constructor(private readonly sessions: AgentSessionsService, private readonly previews: WebPreviewService) {}
+  constructor(
+    private readonly sessions: AgentSessionsService,
+    private readonly previews: WebPreviewService,
+    private readonly webApps: SessionWebAppsService,
+  ) {}
 
   private accountId(req: Request, res: Response): string | null {
     const raw = req.headers['x-account-id'];
@@ -57,7 +62,12 @@ export class AgentSessionsController {
   @Get('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
   previewOptions(@Req() req: Request, @Res() res: Response) {
     res.set('Cache-Control', 'no-store');
-    return this.run(res, 200, () => this.previews.options(this.previewSession(req), requestOrigin(req)));
+    return this.run(res, 200, async () => {
+      const session = this.previewSession(req);
+      const preview = await this.previews.options(session, requestOrigin(req));
+      const { apps, active } = await this.webApps.options(session);
+      return { ...preview, ...(apps.length ? { apps } : {}), active: preview.active + active };
+    });
   }
 
   @Post('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
@@ -68,7 +78,34 @@ export class AgentSessionsController {
 
   @Delete('hosts/:managerId/:cli/sessions/:sessionId/web-preview')
   closePreviews(@Req() req: Request, @Res() res: Response) {
-    return res.json(this.previews.close(this.previewSession(req)));
+    const session = this.previewSession(req);
+    this.webApps.close(session);
+    return res.json(this.previews.close(session));
+  }
+
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/web-preview/apps/:appId/open')
+  openWebApp(@Param('appId') id: string, @Req() req: Request, @Res() res: Response) {
+    res.set('Cache-Control', 'no-store');
+    return this.run(res, 201, () => this.webApps.open(this.previewSession(req), req.headers.authorization!.slice(7).trim(), id));
+  }
+
+  @Post('hosts/:managerId/:cli/sessions/:sessionId/web-preview/apps/:appId/request')
+  webAppRequest(@Param('appId') id: string, @Req() req: Request, @Body() body: any, @Res() res: Response) {
+    res.set('Cache-Control', 'no-store');
+    return this.run(res, 200, async () => {
+      const { status, body: reply, cookie } = await this.webApps.request(this.previewSession(req), req.headers.authorization!.slice(7).trim(), id, body, req.headers.cookie || '');
+      if (cookie) res.cookie(cookie.name, cookie.value, {
+        path: req.originalUrl.split('?')[0].replace(/\/request$/, '/'), maxAge: cookie.maxAge, httpOnly: true,
+        sameSite: 'strict', secure: requestOrigin(req).startsWith('https://'),
+      });
+      return { status, body: reply };
+    });
+  }
+
+  @Delete('hosts/:managerId/:cli/sessions/:sessionId/web-preview/apps/:appId')
+  closeWebApp(@Req() req: Request, @Body() body: any, @Res() res: Response) {
+    if (typeof body?.grant === 'string') this.webApps.close(this.previewSession(req), body.grant);
+    return res.json({ closed: true });
   }
 
   private async run(res: Response, status: number, fn: () => Promise<unknown>) {

@@ -62,10 +62,18 @@ test('a session hands one browser read access to one approved host port', async 
     return data.payload;
   };
 
+  const frame = await fetch(base + '/api/agent-sessions/web-app-frame');
+  assert.equal(frame.status, 200);
+  const policy = frame.headers.get('content-security-policy');
+  assert.match(policy, /sandbox allow-scripts;/);
+  assert.match(policy, /connect-src 'none'/);
+  assert.equal(frame.headers.get('x-frame-options'), 'SAMEORIGIN');
+  assert.equal((await fetch(endpoint + '/apps/game/open', { method: 'POST' })).status, 401);
   assert.equal((await fetch(endpoint)).status, 401);
   const foreign = { Authorization: 'Bearer ' + auth.createSession(stranger.id), 'X-Account-Id': account.id };
   assert.equal((await fetch(endpoint, { headers: foreign })).status, 403);
   assert.equal((await fetch(endpoint, { method: 'POST', headers: foreign })).status, 403);
+  assert.equal((await fetch(endpoint + '/apps/game/open', { method: 'POST', headers: foreign })).status, 403);
   assert.deepEqual(await (await fetch(endpoint, { headers })).json(), { configured: true, active: 0, ports: [5173] });
   const ask = url => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ url }) });
   assert.equal((await ask('http://localhost:3000')).status, 403);
@@ -178,4 +186,81 @@ test('parallel module loads queue and closing a preview also discards unfinished
   release();
   assert.equal((await results).filter(r => r.status === 'rejected' && r.reason.code === 'preview_closed').length, resources.length);
   assert.equal(reads, maximum, 'queued work never reached the host after revocation');
+});
+
+test('registered session apps keep writes and persistent cookies within the enrolled session and routes', async t => {
+  const { createServer } = await import('node:http');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { SessionWebAppsService } = await import('../dist/modules/agent-sessions/session-web-apps.service.js');
+  const dir = await mkdtemp(join(tmpdir(), 'awb-registered-app-'));
+  const registry = join(dir, 'apps.json');
+  const oldFile = process.env.AWB_SESSION_WEB_APPS_FILE;
+  const oldDataDir = process.env.AWB_DATA_DIR;
+  process.env.AWB_DATA_DIR = dir;
+  process.env.AWB_SESSION_WEB_APPS_FILE = registry;
+  t.after(async () => {
+    if (oldDataDir === undefined) delete process.env.AWB_DATA_DIR;
+    else process.env.AWB_DATA_DIR = oldDataDir;
+    if (oldFile === undefined) delete process.env.AWB_SESSION_WEB_APPS_FILE;
+    else process.env.AWB_SESSION_WEB_APPS_FILE = oldFile;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const received = [];
+  let redirect = false;
+  const upstream = createServer((req, res) => {
+    received.push({ method: req.method, path: req.url, headers: req.headers });
+    if (redirect) return res.writeHead(302, { Location: '/unlisted' }).end();
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Set-Cookie': ['ignored=other-secret', 'resident=local-only-token; HttpOnly; SameSite=Strict; Max-Age=600'],
+    }).end(JSON.stringify({ ok: true }));
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => { upstream.closeAllConnections(); return new Promise(resolve => upstream.close(resolve)); });
+  const session = { userId: 'owner', accountId: 'account', managerId: 'host', cli: 'codex', sessionId: 'session' };
+  const app = {
+    id: 'harbor', name: 'Harbor', account_id: 'account', manager_id: 'host', cli: 'codex', session_id: 'session',
+    origin: 'http://127.0.0.1:' + upstream.address().port, routes: ['/join', '/pulse'], cookie: 'resident', document: 'game.html',
+  };
+  const writeRegistry = entry => writeFile(registry, JSON.stringify({ apps: [entry] }));
+  await writeFile(join(dir, app.document), '<!doctype html><title>Harbor</title>');
+  await writeRegistry(app);
+  let loggedIn = true;
+  const service = new SessionWebAppsService({
+    webPreviewPorts: async () => undefined,
+    readSessionInfo: async () => ({ session: { session_id: 'session' } }),
+  }, { validateSession: () => loggedIn ? { userId: 'owner' } : null });
+  t.after(() => service.onModuleDestroy());
+  assert.deepEqual((await service.options(session)).apps, [{ id: 'harbor', name: 'Harbor' }]);
+  assert.deepEqual((await service.options({ ...session, accountId: 'foreign' })).apps, []);
+  const issue = () => service.open(session, 'login', app.id);
+  const first = await issue();
+  assert.ok(first.html.includes('<title>Harbor</title>'));
+  const call = (grant, path, cookies, scope = session) => service.request(scope, 'login', app.id, { grant, path, body: '{}' }, cookies);
+  await assert.rejects(call(first.grant, '/pulse', '', { ...session, sessionId: 'other' }), { status: 403 });
+  await assert.rejects(call(first.grant, '/unlisted', ''), { status: 403 });
+  assert.equal(received.length, 0);
+  const joined = await call(first.grant, '/join', 'awb_user=secret; resident=forged');
+  assert.equal(joined.body, '{"ok":true}');
+  assert.equal(joined.cookie.maxAge, 600000);
+  assert.ok(!joined.cookie.value.includes('local-only-token'));
+  assert.deepEqual([received[0].method, received[0].path, received[0].headers.authorization, received[0].headers.cookie], ['POST', '/join', undefined, undefined]);
+  const cookie = joined.cookie.name + '=' + joined.cookie.value;
+  service.close(session, first.grant);
+  await assert.rejects(call(first.grant, '/pulse', cookie), { status: 403 });
+  const second = await issue();
+  await call(second.grant, '/pulse', cookie + '; login=awb-secret');
+  assert.equal(received.at(-1).headers.cookie, 'resident=local-only-token');
+  redirect = true;
+  await assert.rejects(call(second.grant, '/pulse', cookie), { status: 503 });
+  assert.ok(received.every(r => r.path !== '/unlisted'));
+  await writeRegistry({ ...app, routes: ['/join'] });
+  await assert.rejects(call(second.grant, '/join', cookie), { status: 403 });
+  await writeRegistry(app);
+  loggedIn = false;
+  await assert.rejects(call(second.grant, '/pulse', cookie), { status: 403 });
+  await writeRegistry({ ...app, origin: 'https://example.org' });
+  await assert.rejects(issue(), { status: 503 });
 });

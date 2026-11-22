@@ -1,4 +1,5 @@
 {
+  "Open {0}": "Open {0}",
   "Local web preview": "Local web preview",
   "Web address on the Runtime Host": "Web address on the Runtime Host",
   "Configure a separate HTTPS site with AWB_PREVIEW_DOMAIN on the AWB server.": "Configure a separate HTTPS site with AWB_PREVIEW_DOMAIN on the AWB server.",

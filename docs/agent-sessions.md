@@ -682,6 +682,26 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
 
 매니저는 선택한 루프백 포트로 HTTP(S) GET·HEAD만 보낸다. 로컬 HTTPS 서버는 해당 호스트명과 일치하고 매니저가 신뢰하는 인증서가 필요하다. 브라우저의 인증 헤더·쿠키, 로컬 앱의 응답 쿠키를 전달하지 않는다. 상대 경로와 루트 기준 경로는 그대로 쓰고, 로컬 서버의 같은 출처 리디렉션은 미리보기 주소로 바꾼다. 리소스는 건당 최대 8 MiB이며 외부 출처의 리소스, 쓰기 API, WebSocket/HMR, 서비스 워커를 사용하는 기능은 지원하지 않는다. 변경된 페이지는 새로고침해서 확인한다.
 
+#### 상호작용이 필요한 내부 웹앱
+
+AWB 서버와 같은 장비에서 구동하는 앱은 운영자가 특정 네이티브 세션에 등록할 수 있다. 해당 세션의 **로컬 웹 미리보기**에서 앱 이름이 붙은 **열기** 버튼을 누른다. 외부 기기에서는 AWB의 기존 HTTPS 주소를 사용한다.
+
+운영자는 서버의 `$AWB_DATA_DIR/session-web-apps.json`에 등록 내용을 저장한다. 다른 경로는 `AWB_SESSION_WEB_APPS_FILE`로 지정한다. `document`는 등록 파일 디렉터리 아래의 단일 HTML 파일이며 스크립트, 스타일, 그림과 글꼴을 포함한다. `origin`에는 AWB 서버 장비에 바인딩된 숫자 IP 주소와 서비스 포트를 적는다. 아래 ID는 해당 Account, Runtime Host, 네이티브 세션의 실제 값으로 채운다.
+
+```json
+{
+  "apps": [{
+    "id": "harbor", "name": "잔향항",
+    "account_id": "<account-id>", "manager_id": "<host-id>", "cli": "codex", "session_id": "<session-id>",
+    "origin": "http://127.0.0.1:7712", "document": "web-apps/harbor.html",
+    "routes": ["/api/harbor/join", "/api/harbor/profile", "/api/harbor/pulse", "/api/harbor/command"],
+    "cookie": "echo_harbor_crew"
+  }]
+}
+```
+
+앱은 독립된 브라우저 샌드박스에서 실행된다. 같은 앱 경로에 보내는 JSON `fetch` POST 중 `routes`에 등록한 경로만 서버로 전달한다. 선택 항목인 `cookie`는 앱이 발급한 쿠키 하나를 지정한다. AWB는 이를 사용자·세션·앱별로 암호화해 브라우저에 HttpOnly 쿠키로 보관하므로, 같은 브라우저로 다시 들어가면 기존 게임 주민으로 이어진다. 로그인과 세션 권한은 매 요청마다 확인한다. 앱을 닫거나 15분 동안 요청이 없으면 다시 열어야 한다. 등록에서 앱을 제거하면 이후 요청은 차단된다.
+
 ### 답에 경로로 적은 미리보기 파일 (`local_image` RPC)
 
 위 세 출처와 달리 바이트가 **아예 오지 않는** 경우다. Codex 는 그림을 보여 줄 때 답 텍스트에

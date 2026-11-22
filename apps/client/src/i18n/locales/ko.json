@@ -1,4 +1,5 @@
 {
+  "Open {0}": "{0} 열기",
   "Local web preview": "로컬 웹 미리보기",
   "Web address on the Runtime Host": "런타임 호스트의 웹 주소",
   "Configure a separate HTTPS site with AWB_PREVIEW_DOMAIN on the AWB server.": "AWB 서버의 AWB_PREVIEW_DOMAIN에 미리보기 전용 HTTPS 도메인을 설정하세요.",

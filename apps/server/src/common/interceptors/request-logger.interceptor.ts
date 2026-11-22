@@ -117,7 +117,7 @@ export class RequestLoggerInterceptor implements NestInterceptor {
     // operator temporarily enables HTTP body logging.
     const credentialWrite = ['POST', 'PATCH'].includes(method) && /^\/api\/credentials(?:\/|$)/.test(req.path);
     // Only record HTTP metadata for preview handoffs and manager replies carrying private host content.
-    const sessionContent = /\/web-preview\/?$/i.test(req.path) || /^\/api\/agent\/sessions\/rpc\//i.test(req.path);
+    const sessionContent = /\/web-preview(?:\/|$)/i.test(req.path) || /^\/api\/agent\/sessions\/rpc\//i.test(req.path);
     const captureBodies = !credentialWrite && !sessionContent && CAPTURE_BODIES && !CREDENTIAL_REVEAL_PATH.test(req.path) && !BUSINESS_PRIVATE_PATH.test(req.path);
 
     const reqHeaders = sanitizeHeaders(req.headers as any);
@@ -128,8 +128,10 @@ export class RequestLoggerInterceptor implements NestInterceptor {
 
     return next.handle().pipe(
       tap((responseBody) => {
-        const duration = Date.now() - start;
         const status = res.statusCode;
+        // Interactive apps poll several times per second. Keep opens, closes and errors in the HTTP log.
+        if (status < 400 && sessionContent && /\/web-preview\/apps\/[^/]+\/request\/?$/.test(req.path)) return;
+        const duration = Date.now() - start;
         const resHeaders = sanitizeHeaders(res.getHeaders() as any);
         const resBody = captureBodies ? capPayload(responseBody) : undefined;
         this.logService.info('HTTP', `${method} ${url} → ${status} (${duration}ms)`, {

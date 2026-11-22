@@ -1,4 +1,5 @@
 {
+  "Open {0}": "打开{0}",
   "Local web preview": "本地网页预览",
   "Web address on the Runtime Host": "运行主机上的网址",
   "Configure a separate HTTPS site with AWB_PREVIEW_DOMAIN on the AWB server.": "请在 AWB 服务器上通过 AWB_PREVIEW_DOMAIN 配置独立的 HTTPS 站点。",
