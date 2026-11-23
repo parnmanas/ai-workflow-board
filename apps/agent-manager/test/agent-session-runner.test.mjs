@@ -1145,7 +1145,7 @@ test('repeated ACP question requests share one form and the same answer, includi
   }
 });
 
-for (const first of ['adapter', 'watcher']) test(`Codex native ACP and rollout produce one question (${first} first)`, { timeout: 30_000 }, async (t) => {
+for (const first of ['adapter', 'watcher']) for (const answerStatus of ['busy', 'ready']) test(`Codex native ACP and rollout produce one question (${first} first, answer when ${answerStatus})`, { timeout: 30_000 }, async (t) => {
   const { root, cwd, store, server, runner } = await harness(t, { permissionTimeoutMs: 60_000 });
   const path = join(root, 'native.jsonl');
   await writeFile(path, '');
@@ -1181,12 +1181,20 @@ for (const first of ['adapter', 'watcher']) test(`Codex native ACP and rollout p
   await watcher.poll();
   await waitFor(() => forms().length === 2, 'a different native call');
 
+  if (answerStatus === 'ready') {
+    await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: false }));
+    await turn;
+    assert.equal(server.states(sid).at(-1).status, 'ready');
+    await runner.handle(request('history', { request_id: 'ready-history', session_id: sid }));
+    assert.ok(server.rpc('ready-history').result.events.some(e => e.type === 'elicitation_request' && e.payload.elicitation_id === 'call-async-question'), 'reloading after turn end still replays the pending question');
+  }
   const answer = request('elicitation', { session_id: sid, elicitation_id: 'call-async-question', elicitation_action: 'accept', elicitation_content: { q_1: '짧게' } });
   await runner.handle(answer);
   await runner.handle(answer);
   await waitFor(() => server.events(sid).some(e => e.type === 'user_prompt' && e.payload.text.includes('짧게')), 'answer event flushed');
   assert.equal(server.events(sid).filter(e => e.type === 'user_prompt' && e.payload.text.includes('짧게')).length, 1, 'one answer delivery even if the browser repeats the submit');
-  await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: false }));
+  assert.equal(server.events(sid).find(e => e.type === 'user_prompt').payload.queued, answerStatus === 'busy');
+  if (answerStatus === 'busy') await runner.handle(request('set_config_option', { session_id: sid, config_id: 'fast_mode', config_value: false }));
   await waitFor(() => server.events(sid).some(e => e.type === 'permission_request'), 'queued answer reaches the CLI');
   const permission = server.events(sid).find(e => e.type === 'permission_request');
   await runner.handle(request('permission', { session_id: sid, permission_request_id: permission.payload.request_id, option_id: 'allow-once' }));

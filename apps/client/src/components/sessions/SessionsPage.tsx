@@ -648,6 +648,8 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
   // 실어 보내고, 매니저에 프로세스가 없으면 서버가 idle 로 되돌리므로 한 번 다시 읽으면
   // 둘 중 하나로 정리된다. 같은 상태 스냅샷에 대해 한 번만 시도한다(무한 재조회 방지).
   const status = live?.status || 'idle';
+  // `ready` keeps the CLI process alive; unanswered async questions survive the turn.
+  const canAnswerRequests = status === 'ready' || status === 'busy' || isWaitingStatus(status);
   const reconciledForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isWaitingStatus(status) || pending || loading) return;
@@ -1234,7 +1236,7 @@ export function SessionView({ accountId, managerId, cli, sessionId, host, onNew 
             decidingRequestId={decidingRequestId}
             onDecidePermission={(requestId, optionId) => void decide(requestId, optionId)}
             onAnswerElicitation={(elicitationId, action, content) => void answerElicitation(elicitationId, action, content)}
-            permissionsEnabled={isWaitingStatus(status) || status === 'busy'}
+            permissionsEnabled={canAnswerRequests}
             loadImage={loadImage}
             loadLocalImage={loadLocalImage}
             loadLocalVideo={loadLocalVideo}

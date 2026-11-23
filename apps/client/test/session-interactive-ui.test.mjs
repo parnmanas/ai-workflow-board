@@ -13,8 +13,81 @@ import { MentionTextarea } from '../src/components/common/MentionTextarea.tsx';
 import SessionTranscript from '../src/components/sessions/SessionTranscript.tsx';
 import { buildTranscript } from '../src/components/sessions/sessionTranscript.logic.ts';
 import { codexAsyncQuestion } from '../../agent-manager/src/lib/clis/codex/async-questions.ts';
+import { MemoryRouter } from 'react-router-dom';
+import { AuthProvider } from '../src/contexts/AuthContext.tsx';
+import { BoardStreamProvider } from '../src/contexts/BoardStreamContext.tsx';
+import { installFakeEventSource } from './helpers/boardStream.mjs';
+import { SessionView } from '../src/components/sessions/SessionsPage.tsx';
+import { api } from '../src/api.ts';
 
 const h = React.createElement;
+
+for (const timing of ['ready history', 'choose after turn end', 'choose before turn end']) {
+  test(`session page keeps an unanswered async question usable: ${timing}`, async (t) => {
+    const dom = setupDom();
+    const previousStorage = globalThis.localStorage;
+    globalThis.localStorage = window.localStorage;
+    localStorage.setItem('auth_token', 'question-test');
+    const { FakeEventSource, uninstall } = installFakeEventSource();
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    };
+    const stamp = Date.now();
+    const live = { manager_id: 'host', manager_name: 'Host', cli: 'codex', session_id: 'question-session',
+      cwd: '/repo', title: 'Question session', status: timing === 'ready history' ? 'ready' : 'busy',
+      config_options: [], available_modes: [], available_commands: [], current_mode: null,
+      updated_at: new Date(stamp).toISOString() };
+    const question = codexAsyncQuestion({ type: 'event_msg', payload: { type: 'item_completed', item: {
+      type: 'AgentMessage', id: 'call-question', delivery: 'async', questions: [{ title: '요약 방식?', options: ['짧게', '자세히'] }],
+    } } });
+    const event = { id: 'question', seq: 1, turn_id: 'asking-turn', type: 'elicitation_request', created_at: live.updated_at,
+      payload: { elicitation_id: question.id, tool_call_id: question.toolCallId, async: true, mode: 'form', message: question.message, schema: question.schema } };
+    t.mock.method(api, 'getMe', async () => ({ id: 'u', status: 'active', role: 'admin', resolved_permissions: [], accounts: [{ id: 'account', name: 'Account' }] }));
+    t.mock.method(api, 'getVoiceConfig', async () => null);
+    t.mock.method(api, 'listSessionProposals', async () => ({ proposals: [] }));
+    t.mock.method(api, 'getHostSessionUsageLimits', async () => ({ events: [] }));
+    t.mock.method(api, 'getHostSession', async () => ({ session: live, live, events: [event] }));
+    let resolveAnswer;
+    const answer = t.mock.method(api, 'answerHostSessionElicitation', () => new Promise(resolve => { resolveAnswer = resolve; }));
+    const view = mount(h(MemoryRouter, null, h(AuthProvider, null, h(BoardStreamProvider, null,
+      h(SessionView, { accountId: 'account', managerId: 'host', cli: 'codex', sessionId: live.session_id, host: null, onNew() {} })))));
+    t.after(() => { view.unmount(); uninstall(); dom.cleanup(); globalThis.localStorage = previousStorage; });
+    await settle();
+    const card = view.container.querySelector('[data-block="elicitation"]');
+    const select = card.querySelector('select');
+    const submit = card.querySelector('button[type="submit"]');
+    const choose = () => {
+      assert.equal(select.disabled, false, 'a live ready session must allow choosing an answer');
+      change(select, '짧게');
+      assert.equal(submit.disabled, false);
+    };
+    if (timing === 'choose before turn end') choose();
+    if (timing !== 'ready history') {
+      act(() => FakeEventSource.instances.at(-1).emit('agent_session_update', { session: { ...live, status: 'ready', updated_at: new Date(stamp + 1000).toISOString() } }));
+      await settle();
+    }
+    if (timing !== 'choose before turn end') choose();
+    assert.equal(select.disabled, false, 'finishing a turn does not disconnect the session');
+    assert.equal(select.value, '짧게', 'a state update must preserve an answer already selected');
+    assert.equal(submit.disabled, false);
+    click(submit);
+    assert.equal(answer.mock.callCount(), 1);
+    assert.deepEqual(answer.mock.calls[0].arguments, ['host', 'codex', live.session_id, question.id, 'accept', { q_1: '짧게' }]);
+    assert.equal(select.disabled, true, 'lock only while the answer request is in flight');
+    assert.equal(submit.disabled, true);
+    click(submit);
+    assert.equal(answer.mock.callCount(), 1, 'double-clicking cannot send the answer twice');
+    await act(async () => resolveAnswer({ ...live, status: 'busy', updated_at: new Date(stamp + 2000).toISOString() }));
+    act(() => FakeEventSource.instances.at(-1).emit('agent_session_event', {
+      manager_id: 'host', cli: 'codex', session_id: live.session_id,
+      event: { ...event, id: 'decision', seq: 2, type: 'elicitation_decision', payload: { elicitation_id: question.id, action: 'accept', content: { q_1: '짧게' }, decided_by: 'user' } },
+    }));
+    await settle();
+    assert.equal(view.container.querySelectorAll('[data-block="elicitation"]').length, 1);
+    assert.equal(Boolean(card.querySelector('form')), false, 'the decision replaces the form with the submitted answer');
+    assert.match(card.textContent, /짧게/);
+  });
+}
 
 test('Cancel and Send stay adjacent; Cancel stops a running turn without clearing the draft', async () => {
   const dom = setupDom({ width: 390 });
