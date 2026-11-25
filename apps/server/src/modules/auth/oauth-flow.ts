@@ -18,7 +18,7 @@ export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 export const APP_CODE_TTL_MS = 2 * 60 * 1000;
 export const APP_REDIRECT = 'awb://oauth';
 
-export type OAuthClient = { kind: 'web' } | { kind: 'app'; challenge: string };
+export type OAuthClient = { kind: 'web' } | { kind: 'mcp'; requestId: string; redirectUri: string } | { kind: 'app'; challenge: string };
 
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/;

@@ -30,7 +30,8 @@ export interface McpAgentContext {
   agentName?: string;
   accountId?: string;
   scope?: string;
-  source: 'db' | 'env' | 'dev-mode';
+  source: 'db' | 'env' | 'dev-mode' | 'oauth';
+  keyId?: string;
   // P4c-2b: runtime-tuple identity (`rt-<hex16>`) for host-bound keys that
   // carry no Agent row. agentId for such sessions is the HOST uuid (stable,
   // uuid-shaped so Postgres uuid-column lookups degrade to null instead of
@@ -63,7 +64,7 @@ export interface McpAgentContext {
   // Undefined/'full' = unchanged behavior (every pre-existing client).
   // Stamped once at session init and never changes for the session's
   // lifetime — see shared/tool-profiles.ts for what 'compact' does.
-  toolProfile?: 'full' | 'compact';
+  toolProfile?: 'full' | 'compact' | 'account-read';
 }
 
 interface SessionEntry {

@@ -26,8 +26,11 @@ import { SessionOpenService } from '../agent-sessions/session-open.service';
 import { SessionMessagesService } from '../agent-sessions/session-messages.service';
 import { SessionDirectoryService } from '../agent-sessions/session-directory.service';
 
+import { McpOAuthModule } from '../mcp-oauth/mcp-oauth.module';
+
 @Module({
   imports: [
+    McpOAuthModule,
     TypeOrmModule.forFeature([ApiKey]),
     AgentsModule,
     McpServicesModule,

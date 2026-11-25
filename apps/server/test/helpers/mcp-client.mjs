@@ -3,8 +3,8 @@
 // Behavior that matters for AWB:
 //   - Sends Authorization: Bearer <api-key> (McpController.authenticate path).
 //   - Declares capabilities.experimental['awb/schemaVersion'] = { version: 2 }
-//     on initialize; otherwise McpController rejects non-internal clients with
-//     code -32000 "MCP proxy schemaVersion mismatch".
+//     on initialize for AWB Host proxies. Other account clients can negotiate
+//     with the standard MCP capabilities.
 //   - Captures mcp-session-id from initialize response and sends it back on
 //     every subsequent request (transport requires this for session reuse).
 //   - Accepts both application/json and text/event-stream responses because

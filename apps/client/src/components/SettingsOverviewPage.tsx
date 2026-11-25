@@ -57,6 +57,12 @@ export default function SettingsOverviewPage() {
       description: translate('Credentials and external connections used by agents and notifications.'),
       items: [
         {
+          title: translate('MCP connections'),
+          description: translate('Connect ChatGPT or Claude to AWB with Google.'),
+          path: '/settings/mcp',
+          icon: 'M',
+        },
+        {
           title: translate('Credentials'),
           description: translate('Global and account credentials used by resources and agents.'),
           path: `/settings/credentials`,

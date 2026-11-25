@@ -1,0 +1,14 @@
+.mcp-guide-page { display: flex; flex-direction: column; height: 100%; min-height: 0; color: var(--text-primary, #f1f5f9); }
+.mcp-guide-scroll { flex: 1; min-height: 0; overflow: auto; }
+.mcp-guide { display: grid; gap: 22px; max-width: 880px; padding: clamp(14px, 3vw, 28px); font-size: 14px; line-height: 1.6; }
+.mcp-guide section { min-width: 0; }
+.mcp-guide h2 { margin: 0 0 6px; font-size: 16px; line-height: 1.4; }
+.mcp-guide p, .mcp-guide ol { margin: 4px 0; }
+.mcp-guide ol { padding-inline-start: 1.5em; }
+.mcp-guide ol li { margin-bottom: 6px; }
+.mcp-guide-apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px; }
+.mcp-guide-apps section { padding: 16px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; }
+.mcp-guide a { color: #93c5fd; text-decoration: underline; text-underline-offset: 3px; }
+.mcp-guide ul { margin: 0; padding: 0; list-style: none; }
+.mcp-guide ul li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding-block: 6px; }
+.mcp-guide ul button, .mcp-guide [role=alert] button { font: inherit; padding: 4px 10px; cursor: pointer; border-radius: 5px; background: #1e293b; border: 1px solid #64748b; color: inherit; }

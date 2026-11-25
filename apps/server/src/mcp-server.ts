@@ -35,7 +35,7 @@ import { createStandaloneContext, type ToolContext } from './modules/mcp/tools';
 import { createMcpServerForContext } from './modules/mcp/internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './modules/mcp/internal/express-bridge';
 import { sessionStore } from './modules/mcp/internal/session-store';
-import { authenticateMcpRequest } from './modules/mcp/shared/mcp-http-auth';
+import { authenticateMcpRequest, sameMcpCredential } from './modules/mcp/shared/mcp-http-auth';
 import { mcpRequestPreview } from './modules/mcp/shared/request-preview';
 
 // ─── Helpers ───────────────────────────────────────────────
@@ -100,6 +100,11 @@ async function startHttp() {
       if (!mcpAuthInfo) return; // Response already sent
 
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const existing = sessionId && sessionStore.get(sessionId);
+      if (existing && !sameMcpCredential(existing.auth, mcpAuthInfo)) {
+        res.status(404).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Session not found. Please re-initialize.' }, id: null });
+        return;
+      }
 
       mcpLog(`${req.method} /mcp`, {
         sessionId: sessionId || '(none)',
@@ -159,6 +164,7 @@ async function startHttp() {
               agentName: mcpAuthInfo.agentName,
               accountId: mcpAuthInfo.accountId,
               scope: mcpAuthInfo.scope,
+              keyId: mcpAuthInfo.keyId,
               source: mcpAuthInfo.source,
               runtimeKey: mcpAuthInfo.runtimeKey,
             });

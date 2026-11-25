@@ -82,8 +82,8 @@ export function registerAllTools(server: McpServer, ctx: ToolContext, profile: T
   // for it), so the filter has to see each server.tool() call before authz
   // gets a chance to wrap it in its own gatedHandler. See
   // shared/tool-profiles.ts for the omit-vs-stub rationale.
-  if (profile === 'compact') {
-    installToolProfileGate(server);
+  if (profile !== 'full') {
+    installToolProfileGate(server, profile);
   }
   // Central authz gate — every server.tool() call made by every module
   // registered below (and any future *-tools.ts file discovered by name

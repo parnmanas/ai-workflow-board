@@ -197,6 +197,13 @@ export class AuthService {
     name: string,
     avatarUrl: string,
   ): Promise<{ token: string; user: any } | { error: string; status?: number }> {
+    const result = await this.resolveGoogleUser(googleId, email, name, avatarUrl);
+    if ('error' in result) return result;
+    return { ...result, token: this.createSession(result.user.id) };
+  }
+
+  async resolveGoogleUser(googleId: string, email: string, name: string, avatarUrl: string):
+    Promise<{ user: Omit<User, 'password_hash'> } | { error: string }> {
     // 1. google_id 로 기존 유저 조회
     let user = await this.userRepo.findOne({ where: { google_id: googleId } as any });
 
@@ -204,7 +211,8 @@ export class AuthService {
     if (!user && email) {
       user = await this.userRepo.findOne({ where: { email } });
       if (user) {
-        (user as any).google_id = googleId;
+        if (user.google_id && user.google_id !== googleId) return { error: 'Google account does not match the linked identity' };
+        user.google_id = googleId;
         if (!user.avatar_url && avatarUrl) user.avatar_url = avatarUrl;
         user = await this.userRepo.save(user);
       }
@@ -234,9 +242,8 @@ export class AuthService {
       return { error: 'Your account has been rejected' };
     }
 
-    const token = this.createSession(user.id);
     const { password_hash, ...safeUser } = user as any;
-    return { token, user: safeUser };
+    return { user: safeUser };
   }
 
   async getSessionUser(token: string): Promise<User | null> {

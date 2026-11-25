@@ -157,6 +157,8 @@ export async function bootApp({ port = 0, logger = false } = {}) {
   const { applyWebPreview } = await import('file://' + path.join(DIST_ROOT, 'modules/agent-sessions/web-preview-http.js'));
   applyWebPreview(app);
   applyHttpBodyParsers(app);
+  const { applyMcpOAuth } = await import('file://' + path.join(DIST_ROOT, 'modules/mcp-oauth/mcp-oauth-http.js'));
+  applyMcpOAuth(app);
   // Mirror main.ts's global exception filter so error-path contracts (e.g. an
   // oversize body → clean 413 via entity.too.large, not an opaque 404/500) are
   // exercised against the same mapping production uses (ticket 5e5959ef).

@@ -16,7 +16,8 @@ import { AgentManagerCommandService } from '../agent-manager/agent-manager-comma
 import { createMcpServerForContext } from './internal/create-mcp-server';
 import { expressToWebRequest, sendWebResponse } from './internal/express-bridge';
 import { sessionStore } from './internal/session-store';
-import { authenticateMcpRequest } from './shared/mcp-http-auth';
+import { McpOAuthService } from '../mcp-oauth/mcp-oauth.service';
+import { authenticateMcpRequest, sameMcpCredential } from './shared/mcp-http-auth';
 import { SystemSetting } from '../../entities/SystemSetting';
 import { ApiKeyService } from '../../services/api-key.service';
 import { LogService } from '../../services/log.service';
@@ -146,6 +147,7 @@ function captureToolsListBodyIfFirst(profile: ToolProfile, bodyStr: string): voi
 export class McpController implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly apiKeyService: ApiKeyService,
+    private readonly mcpOAuth: McpOAuthService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly _logService: LogService,
     private readonly agentConnectionService: AgentConnectionService,
@@ -353,25 +355,14 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
   @All('mcp')
   async handleMcp(@Req() req: Request, @Res() res: Response) {
     try {
-      const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError);
+      const mcpAuthInfo = await authenticateMcpRequest(req, res, this.apiKeyService, mcpLogError, this.mcpOAuth);
       if (!mcpAuthInfo) return; // Response already sent
 
       // Inject account_id from API key into request context for downstream use
       (req as any).currentAccountId = mcpAuthInfo.accountId ?? null;
 
-      // schemaVersion:2 validation for general MCP clients. Runtime children
-      // receive a Host-authenticated, run-scoped MCP configuration and bypass
-      // the AWB client-extension check because third-party runtimes do not
-      // advertise AWB-specific initialize capabilities. Supported headers:
-      //   - 'subagent'         : SubagentManager one-shots (Claude CLI native MCP)
-      //   - 'managed-subagent' : BaseSessionManager persistent chat / ticket
-      //                          sessions for managed agents (also Claude CLI
-      //                          native MCP).
-      //   - 'runtime-child'    : protocol runtimes such as Hermes ACP.
-      //   - 'agent-session'    : Agent Session(CLI 직접 세션) — 매니저가 codex-acp /
-      //                          claude-agent-acp 세션에 주입하는 AWB MCP 서버. CLI 의
-      //                          네이티브 MCP 클라이언트라 AWB 확장 capability 를 모른다.
-      //                          (빠져 있던 동안 세션마다 `mcp__awb__startup` 이 failed 로 떴다.)
+      // AWB Host proxies negotiate our extension; an ordinary account-scoped MCP client uses
+      // the standard handshake. Still reject an explicitly incompatible AWB capability.
       if (req.method === 'POST' && req.body?.method === 'initialize') {
         const clientName = req.body?.params?.clientInfo?.name;
         const clientTypeHeader = String(req.headers['x-awb-client-type'] || '').toLowerCase();
@@ -386,7 +377,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
           || clientTypeHeader === 'managed-subagent'
           || clientTypeHeader === 'runtime-child'
           || clientTypeHeader === 'agent-session';
-        if (schemaVer !== 2 && !isInternalClient && !isRuntimeChild) {
+        if ((mcpAuthInfo.agentId || schemaVerRaw !== undefined) && schemaVer !== 2 && !isInternalClient && !isRuntimeChild) {
           return res.status(200).json({
             jsonrpc: '2.0',
             id: req.body.id ?? null,
@@ -399,6 +390,11 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       }
 
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const existing = sessionId && sessionStore.get(sessionId);
+      if (existing && !sameMcpCredential(existing.auth, mcpAuthInfo)) {
+        res.status(404).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Session not found. Please re-initialize.' }, id: null });
+        return;
+      }
 
       mcpLog(`${req.method} /mcp`, {
         sessionId: sessionId || '(none)',
@@ -426,12 +422,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       if (sessionId && sessionStore.has(sessionId)) {
         const session = sessionStore.get(sessionId)!;
         sessionStore.touch(sessionId);
-        // Refresh persisted key context after migration without changing the host identity.
-        if (session.auth && session.auth.source === 'db' && session.auth.agentId === mcpAuthInfo.agentId
-          && session.auth.accountId !== mcpAuthInfo.accountId) {
-          session.auth.accountId = mcpAuthInfo.accountId;
-        }
-        const sessionToolProfile: ToolProfile = session.auth?.toolProfile === 'compact' ? 'compact' : 'full';
+        const sessionToolProfile: ToolProfile = session.auth?.toolProfile ?? 'full';
 
         // Cache hit: skip the SDK pipeline entirely for tools/list. The
         // result body is invariant across sessions OF THE SAME PROFILE, so
@@ -508,7 +499,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // resolves to 'full', so this can only ever narrow the tool surface,
       // never widen it — see shared/tool-profiles.ts's security note.
       const toolProfileRaw = String(req.headers['x-awb-tool-profile'] || '').toLowerCase().trim();
-      const toolProfile: ToolProfile = toolProfileRaw === 'compact' ? 'compact' : 'full';
+      const toolProfile: ToolProfile = mcpAuthInfo.source === 'oauth' ? 'account-read' : toolProfileRaw === 'compact' ? 'compact' : 'full';
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -522,6 +513,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
               agentName: mcpAuthInfo.agentName,
               accountId: mcpAuthInfo.accountId,
               scope: mcpAuthInfo.scope,
+              keyId: mcpAuthInfo.keyId,
               source: mcpAuthInfo.source,
               runtimeKey: mcpAuthInfo.runtimeKey,
               subagentRole: subagentRoleHeader,

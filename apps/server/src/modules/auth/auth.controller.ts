@@ -12,6 +12,8 @@ import { ensurePersonalAccount } from '../../common/personal-account';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { PERMISSION_LABELS, ROLE_PERMISSIONS, resolvePermissions } from '../../common/types/permissions';
 import { DeviceAuthService } from './device-auth.service';
+import { McpOAuthService } from '../mcp-oauth/mcp-oauth.service';
+import { oauthBase } from '../mcp-oauth/mcp-oauth-clients';
 import { OAuthFlowStore, appRedirect, isValidCodeChallenge, type OAuthClient } from './oauth-flow';
 
 @ApiTags('auth')
@@ -26,6 +28,7 @@ export class AuthController {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(Account) private readonly accountRepo: Repository<Account>,
     private readonly accountAccess: AccountAccessService,
+    private readonly mcpOAuth: McpOAuthService,
   ) {}
 
   private async _buildAccountsForUser(userId: string) {
@@ -213,7 +216,14 @@ export class AuthController {
       }
       client = { kind: 'app', challenge: codeChallenge };
     }
-    const redirectUri = this._buildRedirectUri(req);
+    const requestId = (req as any).query?.mcp_request;
+    if (requestId !== undefined) {
+      if (app || typeof requestId !== 'string') return res.status(400).json({ error: 'invalid_mcp_request' });
+      try { this.mcpOAuth.browserFlow(requestId, req); }
+      catch { return res.status(400).json({ error: 'expired_mcp_request' }); }
+      client = { kind: 'mcp', requestId, redirectUri: oauthBase() + '/api/auth/oauth/google/callback' };
+    }
+    const redirectUri = client.kind === 'mcp' ? client.redirectUri : this._buildRedirectUri(req);
     const authUrl = await this.googleOAuthService.getAuthUrl(redirectUri, this.oauthFlow.issueState(client));
     if (!authUrl) {
       return (res as any).status(503).json({ error: 'Google OAuth is not configured' });
@@ -235,7 +245,14 @@ export class AuthController {
     if (!client) {
       return expressRes.redirect('/?oauth_error=invalid_state');
     }
-    const fail = (reason: string) => client.kind === 'app'
+    if (client.kind === 'mcp') {
+      expressRes.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      try { this.mcpOAuth.browserFlow(client.requestId, req); }
+      catch { return expressRes.status(400).json({ error: 'expired_mcp_request' }); }
+    }
+    const fail = (reason: string) => client.kind === 'mcp'
+      ? expressRes.redirect(this.mcpOAuth.finish(client.requestId, req))
+      : client.kind === 'app'
       ? expressRes.redirect(appRedirect({ error: reason }))
       : expressRes.redirect(`/?oauth_error=${encodeURIComponent(reason)}`);
 
@@ -243,12 +260,18 @@ export class AuthController {
       return fail(oauthError || 'access_denied');
     }
 
-    const redirectUri = this._buildRedirectUri(req);
+    const redirectUri = client.kind === 'mcp' ? client.redirectUri : this._buildRedirectUri(req);
     const googleUser = await this.googleOAuthService.exchangeCodeForUser(code, redirectUri);
-    if (!googleUser) {
+    if (!googleUser || (client.kind === 'mcp' && (!googleUser.sub || !googleUser.email || googleUser.email_verified !== true))) {
       return fail('token_exchange_failed');
     }
 
+    if (client.kind === 'mcp') {
+      const result = await this.authService.resolveGoogleUser(googleUser.sub, googleUser.email, googleUser.name, googleUser.picture);
+      if ('error' in result) return fail(result.error);
+      this.mcpOAuth.identify(client.requestId, req, result.user.id, googleUser.email);
+      return expressRes.redirect(oauthBase() + '/api/mcp-oauth/consent/' + client.requestId);
+    }
     const result = await this.authService.loginOrCreateGoogleUser(
       googleUser.sub,
       googleUser.email,

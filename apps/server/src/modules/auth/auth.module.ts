@@ -8,8 +8,10 @@ import { AuthController } from './auth.controller';
 import { GoogleOAuthService } from '../../services/google-oauth.service';
 import { DeviceAuthService } from './device-auth.service';
 
+import { McpOAuthModule } from '../mcp-oauth/mcp-oauth.module';
+
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Account, SystemSetting, UserDevice])],
+  imports: [McpOAuthModule, TypeOrmModule.forFeature([User, Account, SystemSetting, UserDevice])],
   controllers: [AuthController],
   providers: [GoogleOAuthService, DeviceAuthService],
 })

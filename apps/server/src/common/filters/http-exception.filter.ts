@@ -46,7 +46,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     const method = request?.method || '?';
-    const url = request?.originalUrl || request?.url || '?';
+    const originalUrl = request?.originalUrl || request?.url || '?';
+    // OAuth callbacks can carry a Google code and state even on an upstream failure.
+    const url = /^\/api\/(auth\/oauth\/google|mcp-oauth)\//.test(originalUrl) ? originalUrl.split('?')[0] : originalUrl;
     const userId = request?.currentUser?.id || '-';
     const userName = request?.currentUser?.name || request?.currentUser?.email || '-';
 
@@ -65,8 +67,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // client probes — most notably MCP SDK's RFC 8414 OAuth Authorization
     // Server Metadata probe (`GET /mcp/.well-known/oauth-authorization-server`)
     // which every connecting Claude Code / Cursor / ChatGPT client fires
-    // to negotiate auth scheme; AWB is API-key based so the 404 is the
-    // correct response, but it's not an error. Same logic covers 401s
+    // to negotiate auth scheme. A probe for an unsupported metadata path
+    // can legitimately return 404. Same logic covers 401s
     // from agents booting with a stale credential, 404s from clients
     // hitting a non-existent ticket, etc — meaningful in the admin log
     // viewer, noise in `docker logs`.

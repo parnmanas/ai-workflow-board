@@ -24,6 +24,7 @@ const ChatPage = lazy(() => import('./components/ChatPage'));
 const UsersPage = lazy(() => import('./components/UsersPage'));
 const AccountChannelsPage = lazy(() => import('./components/AccountChannelsPage'));
 const AccountApiKeysPage = lazy(() => import('./components/AccountApiKeysPage'));
+const McpConnectionsPage = lazy(() => import('./components/McpConnectionsPage'));
 const AccountManagementPage = lazy(() => import('./components/AccountManagementPage'));
 const AccountSettingsPage = lazy(() => import('./components/AccountSettingsPage'));
 const SettingsOverviewPage = lazy(() => import('./components/SettingsOverviewPage'));
@@ -252,6 +253,7 @@ function AppContent() {
             <Route path="settings/credentials" element={<AccountManagementPage kind="credentials" />} />
             <Route path="settings/channels" element={<AccountChannelsPage />} />
             <Route path="settings/api-keys" element={<AccountApiKeysPage />} />
+            <Route path="settings/mcp" element={<McpConnectionsPage />} />
             <Route path="settings/claude-profiles" element={<AccountManagementPage kind="claude-backend-profiles" />} />
             <Route path="users" element={<GlobalRedirect to="settings/members" />} />
             <Route path="channels" element={<GlobalRedirect to="settings/channels" />} />

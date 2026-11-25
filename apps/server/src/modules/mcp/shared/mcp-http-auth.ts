@@ -11,6 +11,11 @@
  * standalone path previously had no authentication at all).
  */
 
+import { createHash } from 'node:crypto';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import type { McpOAuthService } from '../../mcp-oauth/mcp-oauth.service';
+import { oauthBase } from '../../mcp-oauth/mcp-oauth-clients';
+import type { McpAgentContext } from '../internal/session-store';
 import type { Request, Response } from 'express';
 import type { ApiKeyService } from '../../../services/api-key.service';
 
@@ -21,9 +26,15 @@ export interface McpAuthInfo {
   keyId?: string;
   scope?: string;
   accountId?: string;
-  source: 'db' | 'env' | 'dev-mode';
+  source: 'db' | 'env' | 'dev-mode' | 'oauth';
   /** P4c-2b: parsed from `runtime-provisioned:<rtKey>` key names (else undefined). */
   runtimeKey?: string;
+}
+
+/** Even cached discovery and DELETE must belong to this credential and its current authority. */
+export function sameMcpCredential(session: McpAgentContext | undefined, auth: McpAuthInfo) {
+  return !!session && session.source === auth.source && session.keyId === auth.keyId && session.scope === auth.scope
+    && session.accountId === auth.accountId && session.agentId === auth.agentId && session.runtimeKey === auth.runtimeKey;
 }
 
 interface EnvKeyEntry {
@@ -60,6 +71,7 @@ export async function authenticateMcpRequest(
   res: Response,
   apiKeyService: ApiKeyService,
   logError: (message: string, meta?: Record<string, any>) => void,
+  oauth?: McpOAuthService,
 ): Promise<McpAuthInfo | null> {
   const authHeader = req.headers['authorization'];
   let token: string | undefined;
@@ -68,6 +80,23 @@ export async function authenticateMcpRequest(
   }
   if (!token) token = req.headers['x-api-key'] as string | undefined;
 
+  const challenge = () => {
+    const base = oauth && oauthBase();
+    if (!base) return false;
+    res.setHeader('WWW-Authenticate', 'Bearer resource_metadata="' + base + '/.well-known/oauth-protected-resource/mcp", scope="awb.read offline_access"');
+    return true;
+  };
+  if (oauth && authHeader?.startsWith('Bearer awbo_') && token) {
+    try {
+      const info = await oauth.verifyAccessToken(token);
+      return { source: 'oauth', scope: 'read', keyHint: 'OAuth', keyId: info.extra.grantId, accountId: info.extra.accountId };
+    } catch (error) {
+      if (!(error instanceof InvalidTokenError)) throw error;
+      challenge();
+      res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Expired or revoked AWB connection.' }, id: null });
+      return null;
+    }
+  }
   if (token) {
     // DB validation
     try {
@@ -113,7 +142,7 @@ export async function authenticateMcpRequest(
     const envMatch = envKeys.find(k => k.key === token);
     const envAccountId = process.env.MCP_ACCOUNT_ID?.trim();
     if (envMatch && envAccountId) {
-      return { keyHint: maskMcpKey(envMatch.key), agentName: envMatch.agentName, scope: 'full', accountId: envAccountId, source: 'env' };
+      return { keyId: createHash('sha256').update(token).digest('hex'), keyHint: maskMcpKey(envMatch.key), agentName: envMatch.agentName, scope: 'full', accountId: envAccountId, source: 'env' };
     }
 
     res.status(403).json({ jsonrpc: '2.0', error: { code: -32002, message: 'Invalid API key.' }, id: null });
@@ -137,17 +166,16 @@ export async function authenticateMcpRequest(
     if (process.env.MCP_DEV_MODE === 'true' && process.env.NODE_ENV !== 'production') {
       return { keyHint: 'dev-mode', scope: 'full', source: 'dev-mode' };
     }
-    res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'No API keys configured. Create API keys or set MCP_DEV_MODE=true for development.' },
-      id: null,
-    });
-    return null;
   }
 
+  const message = challenge()
+    ? 'Authentication required. Connect with OAuth or supply an AWB API key.'
+    : envKeys.length === 0 && dbKeyCount === 0
+      ? 'No API keys configured. Create API keys or set MCP_DEV_MODE=true for development.'
+      : 'Authentication required. Provide Authorization: Bearer <api-key> header.';
   res.status(401).json({
     jsonrpc: '2.0',
-    error: { code: -32001, message: 'Authentication required. Provide Authorization: Bearer <api-key> header.' },
+    error: { code: -32001, message },
     id: null,
   });
   return null;

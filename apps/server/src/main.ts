@@ -20,6 +20,7 @@ import { preSyncPostgres } from './database/pre-sync-postgres';
 import { ensureSqljsDbHealthy, ensureOntologySqljsDbHealthy } from './db';
 import { applyHttpBodyParsers } from './common/http-body-parsers';
 import { applySpaFallback } from './common/spa-fallback';
+import { applyMcpOAuth } from './modules/mcp-oauth/mcp-oauth-http';
 import { applyWebPreview } from './modules/agent-sessions/web-preview-http';
 
 async function bootstrap() {
@@ -74,6 +75,7 @@ async function bootstrap() {
   // in-process test app parses bodies exactly like production. See ff3e7337
   // (base64→raw media upload) and 5e5959ef (test harness missing these parsers).
   applyHttpBodyParsers(app);
+  applyMcpOAuth(app);
 
   // Gzip everything over 1KB. The MCP tools/list response alone is ~59KB
   // uncompressed; compression cuts it ~10x and stacks on top of the

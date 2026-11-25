@@ -685,6 +685,14 @@ export const api = {
   testMyChannel: (id: string) =>
     request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
+  getMcpConnections: (accountId: string) =>
+    request<{ endpoint: string | null; connections: { id: string; client_name: string; expires_at: string }[] }>(
+      '/mcp-oauth/connections', { headers: { ...getAuthHeaders(), 'X-Account-Id': accountId } }),
+  disconnectMcp: (id: string, accountId: string) =>
+    request<{ disconnected: boolean }>(`/mcp-oauth/connections/${id}`, {
+      method: 'DELETE', headers: { ...getAuthHeaders(), 'X-Account-Id': accountId },
+    }),
+
   // ─── API Keys ──────────────────────────────────────────
   // accountId overrides the ambient X-Account-Id header for this one call —
   // see getChannels above for why callers reacting to a accountId prop change

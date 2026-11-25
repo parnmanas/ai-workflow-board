@@ -228,7 +228,9 @@ Ownership follows the selected account-owned team/project. Global-team standalon
 
 ## Connect an external MCP client
 
-For browser-launched managed work, agent-manager prepares the MCP connection. You can also connect an existing MCP client directly for tool access.
+**ChatGPT and Claude** can read projects and tickets with your AWB Google login. Open **Settings → MCP connections**, copy the public server URL, and register AWB as a custom MCP server using OAuth and automatic client registration. In AWB, choose an account and approve read access. You can disconnect each app on the same settings page. [Connection instructions for ChatGPT and Claude](docs/mcp-connections.md)
+
+For an MCP client that accepts an API key, use its custom HTTP headers:
 
 1. Open **Settings → API Keys** and create a key with the account/scope you need.
 2. Copy it when shown; the raw value is only displayed once.
@@ -252,7 +254,7 @@ For a client accepting Claude-style `mcpServers` JSON:
 
 Use your deployed HTTPS URL remotely. Configuration format and file location depend on the client. A direct MCP connection provides tools; it does not by itself make that client a Runtime Host receiving the execution queue.
 
-Discover current tools through MCP `tools/list`. Categories cover accounts, tickets, projects, comments, chat, resources, QA/Security, Actions/Functions/Schedules, missions/steps, skills, builds, deployments, and ontology queries. Canonical names include `list_accounts`, `create_ticket`, `move_ticket`, `save_project`, and `create_automation_schedule`. Registration lives in [tools/index.ts](apps/server/src/modules/mcp/tools/index.ts); `/api-docs` describes REST, not MCP JSON-RPC.
+Discover available tools through MCP `tools/list`. Google-authorized connections expose `list_projects`, `get_project`, `list_tickets`, and `get_ticket`. API-key connections have their own scopes and tool profiles. [Tool registration](apps/server/src/modules/mcp/tools/index.ts)
 
 For development, `npm run mcp` starts standalone stdio and `npm run mcp:http` starts separate HTTP on **7702** by default. Prefer integrated `/mcp` when the web server is running. With SQLite, do not run separate server processes against the same file; give standalone processes their own absolute `SQLJS_DB_PATH` and `SQLJS_ONTOLOGY_DB_PATH`, or use PostgreSQL.
 
@@ -275,6 +277,7 @@ Source npm scripts run the backend in `apps/server`, where `dotenv/config` loads
 | `CORS_ORIGIN` | Explicit allowed origin for cross-origin browser access. Development reflects origins when unset; production rejects cross-origin requests when unset. Same-origin UI/API deployment works without it. |
 | `MCP_API_KEYS` | Environment MCP keys (`name:key,name2:key2` or comma-separated keys). Requires `MCP_ACCOUNT_ID`; UI-managed keys are preferred. |
 | `MCP_ACCOUNT_ID` | Account that owns every key configured through `MCP_API_KEYS`. An unset owner disables those keys. |
+| `MCP_OAUTH_REDIRECT_URIS` | Optional comma-separated list of exact HTTPS callbacks for additional trusted OAuth clients. ChatGPT and Claude work with their published callback URLs by default. |
 | `AGENT_API_KEY` | Environment agent key. Requires `AGENT_ACCOUNT_ID`. Host pairing issues an account-owned managed key instead. |
 | `AGENT_ACCOUNT_ID` | Account that owns `AGENT_API_KEY`. An unset owner disables the environment key. |
 | `MCP_DEV_MODE` | Optional local bypass: only outside production and when no active DB/environment MCP keys exist. Defaults to no bypass. |

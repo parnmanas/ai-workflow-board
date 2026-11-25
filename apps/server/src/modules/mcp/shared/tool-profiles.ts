@@ -53,7 +53,9 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-export type ToolProfile = 'full' | 'compact';
+export type ToolProfile = 'full' | 'compact' | 'account-read';
+
+const accountReadTools = new Set(['list_projects', 'get_project', 'list_tickets', 'get_ticket']);
 
 /**
  * 출발점 allowlist(19개) — 칸반 컬럼 workflow 가이드가 실제로 호출하는
@@ -113,13 +115,20 @@ type ToolMethod = McpServer['tool'];
  * `installToolAuthzGate` — `registerAllTools` builds a brand-new McpServer
  * per MCP session, so there is never a shared instance to double-wrap.
  */
-export function installToolProfileGate(server: McpServer): void {
+export function installToolProfileGate(server: McpServer, profile: 'compact' | 'account-read' = 'compact'): void {
+  const allowlist = profile === 'account-read' ? accountReadTools : COMPACT_TOOL_ALLOWLIST;
   const originalTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
 
   (server as unknown as { tool: ToolMethod }).tool = ((...args: unknown[]) => {
     const name = args[0];
-    if (typeof name === 'string' && !COMPACT_TOOL_ALLOWLIST.has(name)) {
+    if (typeof name === 'string' && !allowlist.has(name)) {
       return undefined;
+    }
+    if (profile === 'account-read') {
+      const hints = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+      // All four account reads register a description and input schema before the handler.
+      if (args.length === 4) args.splice(3, 0, hints);
+      else if (args.length === 5) args[3] = { ...args[3] as object, ...hints };
     }
     return originalTool(...args);
   }) as ToolMethod;

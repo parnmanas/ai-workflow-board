@@ -300,6 +300,7 @@ export default function Sidebar({
         { key: 'credentials', path: `${basePath}/settings/credentials`, label: translate('Credentials'), icon: 'C' },
         { key: 'channels', path: `${basePath}/settings/channels`, label: translate('Channels'), icon: 'N' },
         { key: 'api-keys', path: `${basePath}/settings/api-keys`, label: translate('API Keys'), icon: 'K' },
+        { key: 'mcp-connections', path: `${basePath}/settings/mcp`, label: translate('MCP connections'), icon: 'M' },
         {
           key: 'claude-profiles',
           path: `${basePath}/settings/claude-profiles`,
