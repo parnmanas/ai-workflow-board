@@ -9,7 +9,7 @@ AWB의 **설정 → MCP 연결**에서 이 인스턴스의 서버 주소를 복�
 3. 안내를 확인하고 플러그인을 생성한 뒤 설치하세요. **Connect**를 누르면 Google 로그인이 열립니다. AWB에서 사용할 계정을 확인하고 **작업 권한 허용**을 누르세요.
 4. 새 대화에서 AWB를 선택하거나 `@AWB`를 입력한 뒤 “내 AWB 프로젝트 목록을 보여줘”라고 물어보세요.
 
-Business에서는 소유자나 관리자가 커스텀 서버를 등록할 수 있습니다. Enterprise·Edu에서는 관리자가 지정한 구성원도 등록할 수 있습니다. 메뉴가 보이지 않으면 요금제와 조직의 플러그인 생성 권한을 확인하세요. [OpenAI의 연결 및 이용 조건](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt)
+ChatGPT에서 세션에 메시지를 보내려면 Business, Enterprise 또는 Edu 요금제가 필요합니다. Pro는 조회 작업을 지원합니다. Business에서는 소유자나 관리자가 커스텀 서버를 등록할 수 있고, Enterprise·Edu에서는 관리자가 지정한 구성원도 등록할 수 있습니다. 이미 게시한 AWB 앱에 세션 도구가 보이지 않으면 워크스페이스 관리자가 앱 설정의 **Refresh**로 도구 목록을 새로 고치고 세션 작업을 활성화하세요. [OpenAI의 연결 및 이용 조건](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt)
 
 ## Claude 웹·데스크톱
 

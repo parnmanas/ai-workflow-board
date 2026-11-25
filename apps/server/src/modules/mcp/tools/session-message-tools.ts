@@ -6,6 +6,7 @@ import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
 const SESSION_TOOL_AUTH = 'Requires a full-scope Host key or an account app with awb.manage and an owner with agent_sessions.use. Only sessions on the selected account’s Hosts are available.';
+const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 
 async function directory(ctx: ToolContext, run: (svc: NonNullable<ToolContext['sessionDirectoryService']>) => Promise<unknown>) {
   if (!ctx.sessionDirectoryService) return err('Finding sessions requires the NestJS-integrated AWB server.');
@@ -22,6 +23,7 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
     'List the Runtime Hosts of your account for native CLI sessions: manager_id, name, online, session CLIs, last_seen_at, and registered project folders. ' +
     `Use the manager_id with list_session_folders, list_sessions, open_session or send_session_message. ${SESSION_TOOL_AUTH} Read-only.`,
     {},
+    SESSION_READ_ANNOTATIONS,
     async (_args, extra) => directory(ctx, svc => svc.listHosts(getCallerAgent(extra))),
   );
   server.tool(
@@ -32,6 +34,7 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
       manager_id: z.string().uuid().optional().describe('One Host; default: every connected Host of your account.'),
       cli: z.string().trim().min(1).max(40).optional().describe('One CLI, e.g. codex or claude.'),
     },
+    SESSION_READ_ANNOTATIONS,
     async (args, extra) => directory(ctx, svc => svc.listFolders(getCallerAgent(extra), args)),
   );
   server.tool(
@@ -49,6 +52,7 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
       details: z.boolean().optional().describe('Read model/effort/mode from native records for up to 20 results (slower).'),
       limit: z.number().int().min(1).max(200).optional().describe('Default 30.'),
     },
+    SESSION_READ_ANNOTATIONS,
     async (args, extra) => directory(ctx, svc => svc.listSessions(getCallerAgent(extra), args)),
   );
   server.tool(
@@ -61,6 +65,7 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
       manager_id: z.string().uuid().optional().describe('Host UUID; needed when the ID is not unique.'),
       cli: z.string().trim().min(1).max(40).optional().describe('CLI; needed when the ID is not unique.'),
     },
+    SESSION_READ_ANNOTATIONS,
     async (args, extra) => directory(ctx, svc => svc.getSessionInfo(getCallerAgent(extra), args)),
   );
   server.tool(
@@ -113,7 +118,7 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
       cli: z.string().trim().min(1).max(40).optional(),
       before: z.string().min(1).max(512).optional().describe('Opaque next_before cursor from the previous page.'),
     },
-    { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    SESSION_READ_ANNOTATIONS,
     async (args, extra) => {
       if (!ctx.sessionMessagesService) return err('Session messages require the NestJS-integrated AWB server.');
       try { return ok(await ctx.sessionMessagesService.history(getCallerAgent(extra), args)); }

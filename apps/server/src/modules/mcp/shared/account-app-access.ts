@@ -40,9 +40,18 @@ function permissionFor(domain: string, name: string): Permission | null | undefi
   return domainPermissions[domain];
 }
 
-export async function checkAccountAppTool(ds: DataSource, caller: McpAgentContext, domain: string, name: string, args: Record<string, any>) {
+export async function checkAccountAppTool(
+  ds: DataSource, caller: McpAgentContext, domain: string, name: string,
+  args: Record<string, any>, acceptsAccountId: boolean,
+) {
   const user = await accountAppOwner(ds, caller);
   if (!user) return 'Unauthorized: the app requires current account access.';
+  if (acceptsAccountId) {
+    if (args.account_id !== undefined && args.account_id !== caller.accountId) {
+      return 'Unauthorized: the requested account differs from the selected account.';
+    }
+    args.account_id = caller.accountId;
+  }
   const required = permissionFor(domain, name);
   const permissions = JSON.parse(user.permissions || '[]');
   if (required === undefined || (required && !hasPermission(user.role, permissions, required))) {

@@ -521,6 +521,7 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource, 
     if (typeof name !== 'string' || typeof handler !== 'function') {
       return originalTool(...args);
     }
+    const acceptsAccountId = args.some(arg => arg !== null && typeof arg === 'object' && 'account_id' in arg);
 
     const gatedHandler = async (...handlerArgs: unknown[]) => {
       const extra = (handlerArgs[handlerArgs.length - 1] || {}) as { sessionId?: string };
@@ -528,7 +529,7 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource, 
       const input = handlerArgs.length > 1 ? handlerArgs[0] as Record<string, any> : {};
       const accountApp = caller?.source === 'oauth' && caller.scope === 'full';
       if (accountApp) {
-        const denied = await checkAccountAppTool(dataSource, caller, domain, name, input || {});
+        const denied = await checkAccountAppTool(dataSource, caller, domain, name, input || {}, acceptsAccountId);
         if (denied) return err(denied);
       }
       // Session and business handlers also authenticate delegated owners. Other

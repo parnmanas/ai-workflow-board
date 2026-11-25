@@ -193,10 +193,15 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   } } });
   await appClient.connect(managedTransport);
   t.after(() => appClient.close());
-  const names = (await appClient.listTools()).tools.map(t => t.name);
+  const fullTools = (await appClient.listTools()).tools;
+  const names = fullTools.map(t => t.name);
   for (const name of ['create_ticket', 'move_ticket', 'add_comment', 'list_sessions', 'open_session', 'send_session_message', 'get_session_messages', 'get_business_cashbook', 'get_action']) {
     assert.ok(names.includes(name), name);
   }
+  for (const name of ['list_session_hosts', 'list_sessions', 'get_session_messages']) {
+    assert.equal(fullTools.find(tool => tool.name === name)?.annotations?.readOnlyHint, true, name);
+  }
+  assert.ok(!fullTools.find(tool => tool.name === 'send_session_message').annotations?.readOnlyHint);
   const call = (name, args = {}) => appClient.callTool({ name, arguments: args });
   const me = JSON.parse((await call('whoami')).content[0].text);
   assert.equal(me.user_id, alice.id);
@@ -235,6 +240,10 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['admin.actions']) });
   assert.ok(!(await call('get_action', { id: action.id })).isError);
   assert.equal((await call('get_action', { id: foreignAction.id })).isError, true);
+  assert.equal((await call('list_actions', { account_id: '' })).isError, true);
+  const visibleTickets = (await call('list_tickets')).content[0].text;
+  assert.ok(visibleTickets.includes(ticket.id));
+  assert.ok(!visibleTickets.includes(privateTicket.id));
   const narrowed = await token({ grant_type: 'refresh_token', refresh_token: manage.refresh_token, scope: 'awb.read offline_access' });
   assert.equal(narrowed.status, 200);
   const reduced = await narrowed.json();

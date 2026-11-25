@@ -9,6 +9,7 @@
   "Name it AWB, paste the server URL and choose OAuth with Dynamic Client Registration (DCR).": "名前に AWB、URL にサーバーのアドレスを入力し、OAuth と Dynamic Client Registration（DCR）を選びます。",
   "Create and install the plugin. Connect with Google and select Allow account actions in AWB.": "プラグインを作成してインストールし、Google で接続して AWB でアカウント操作を許可します。",
   "ChatGPT setup and availability": "ChatGPT の設定と利用条件",
+  "Sending session messages requires ChatGPT Business, Enterprise or Edu. For a published workspace app, ask an admin to refresh and enable the new actions.": "ChatGPT からセッションにメッセージを送るには、Business、Enterprise、Edu のいずれかのプランが必要です。公開済みのアプリでは、ワークスペース管理者がツール一覧を更新し、新しいアクションを有効にしてください。",
   "Open Settings → Connectors → + Add → Add custom connector.": "Settings → Connectors → + Add → Add custom connector を開きます。",
   "Name it AWB, paste the server URL and continue. Select Sign in now and Register automatically.": "名前に AWB、URL にサーバーのアドレスを入力して続行します。Sign in now と Register automatically を選びます。",
   "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.": "コネクターを追加して Connect を選び、Google でログインして AWB でアカウント操作を許可します。",

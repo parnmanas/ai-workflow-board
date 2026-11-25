@@ -57,6 +57,7 @@ function AccountConnections({ accountId }: { accountId: string }) {
           <li>{t('Name it AWB, paste the server URL and choose OAuth with Dynamic Client Registration (DCR).')}</li>
           <li>{t('Create and install the plugin. Connect with Google and select Allow account actions in AWB.')}</li>
         </ol>
+        <p>{t('Sending session messages requires ChatGPT Business, Enterprise or Edu. For a published workspace app, ask an admin to refresh and enable the new actions.')}</p>
         <a href="https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt" target="_blank" rel="noreferrer">{t('ChatGPT setup and availability')} ↗</a>
       </section>
       <section>

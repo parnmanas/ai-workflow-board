@@ -9,6 +9,7 @@
   "Name it AWB, paste the server URL and choose OAuth with Dynamic Client Registration (DCR).": "名称填写 AWB，粘贴服务器地址，再选择 OAuth 和 Dynamic Client Registration（DCR）。",
   "Create and install the plugin. Connect with Google and select Allow account actions in AWB.": "创建并安装插件，通过 Google 连接，然后在 AWB 中允许账户操作。",
   "ChatGPT setup and availability": "ChatGPT 设置及使用条件",
+  "Sending session messages requires ChatGPT Business, Enterprise or Edu. For a published workspace app, ask an admin to refresh and enable the new actions.": "要在 ChatGPT 中向会话发送消息，需要使用 Business、Enterprise 或 Edu 套餐。对于已发布的应用，请工作区管理员刷新工具列表并启用新操作。",
   "Open Settings → Connectors → + Add → Add custom connector.": "打开 Settings → Connectors → + Add → Add custom connector。",
   "Name it AWB, paste the server URL and continue. Select Sign in now and Register automatically.": "名称填写 AWB，粘贴服务器地址并继续，再选择 Sign in now 和 Register automatically。",
   "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.": "添加连接器，选择 Connect，通过 Google 登录，并在 AWB 中允许账户操作。",
