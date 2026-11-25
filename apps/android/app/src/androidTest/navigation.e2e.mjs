@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 
 const exec = promisify(execFile);
 const serial = process.env.AWB_ANDROID_TEST_SERIAL;
-assert.match(serial || '', /^emulator-\d+$/, 'Use a disposable emulator; this test clears its AWB app data.');
+assert.match(serial || '', /^emulator-\d+$/, 'Use a disposable emulator; this test clears its AWB and Chrome app data.');
 const adbPath = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const adb = async (...args) => (await exec(adbPath, ['-s', serial, ...args], { maxBuffer: 8 * 1024 * 1024 })).stdout.trim();
 const pause = (ms = 300) => new Promise(resolve => setTimeout(resolve, ms));
@@ -56,9 +56,12 @@ async function click(key, value, scroll = false) {
       }
     }
     if (scroll) {
-      const [, , width, height] = tree[0].bounds.match(/\d+/g).map(Number);
-      await adb('shell', 'input', 'swipe', String(Math.round(width * 0.7)), String(height - 70),
-        String(Math.round(width * 0.7)), '140', '250');
+      // Swipe inside the app's scroll area; the landscape taskbar can intercept bottom-edge gestures.
+      const area = tree.find(node => node['resource-id'] === `${app}:id/panel`) || tree[0];
+      const [left, top, right, bottom] = area.bounds.match(/\d+/g).map(Number);
+      const x = String(Math.round(left + (right - left) * 0.7));
+      await adb('shell', 'input', 'swipe', x, String(Math.round(top + (bottom - top) * 0.7)),
+        x, String(Math.round(top + (bottom - top) * 0.2)), '250');
     }
     else await pause();
   }
@@ -85,8 +88,41 @@ async function fixture(name) {
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
-    requests.push({ server: name, path: request.url, auth: request.headers.authorization, body });
+    requests.push({ server: name, path: request.url, auth: request.headers.authorization,
+      cookie: request.headers.cookie || '', agent: request.headers['user-agent'] || '', body });
     response.setHeader('Cache-Control', 'no-store');
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const identity = `http://localhost:${server.address().port}`;
+    const dashboard = '/browser/dashboard?org=2&var=a+b';
+    const redirect = (url) => { response.writeHead(302, { Location: url }); response.end(); };
+    // A fake identity provider on a different hostname exercises browser cookies AND OAuth state.
+    // No real Google account or credentials are used.
+    if (request.url === '/browser/seed') {
+      response.setHeader('Set-Cookie', 'identity_session=already-signed-in; Path=/; HttpOnly; SameSite=Lax');
+      response.end('Browser identity ready'); return;
+    }
+    if (request.url === '/browser/authorize') {
+      if (!request.headers.cookie?.includes('identity_session=already-signed-in')) {
+        response.end('Sign in required'); return;
+      }
+      redirect(`${origin}/browser/callback?state=fixture-state`); return;
+    }
+    if (request.url === '/browser/callback?state=fixture-state') {
+      if (!request.headers.cookie?.includes('oauth_state=fixture-state')) {
+        response.writeHead(403); response.end('OAuth state lost'); return;
+      }
+      response.setHeader('Set-Cookie', 'site_session=signed-in; Path=/; HttpOnly; SameSite=Lax');
+      redirect(`${origin}${dashboard}#/overview`); return;
+    }
+    if (request.url === dashboard) {
+      if (!request.headers.cookie?.includes('site_session=signed-in')) {
+        response.setHeader('Set-Cookie', 'oauth_state=fixture-state; Path=/; HttpOnly; SameSite=Lax');
+        redirect(`${identity}/browser/authorize`); return;
+      }
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end('<meta name="viewport" content="width=device-width,initial-scale=1"><h1>Signed in with browser</h1>');
+      return;
+    }
     if (request.url.startsWith('/api/')) {
       response.setHeader('Content-Type', 'application/json');
       let result = {};
@@ -166,11 +202,14 @@ async function addServer(item) {
   return page;
 }
 
-async function addPage(url, name) {
+async function addPage(url, name, useBrowser = false) {
   await byId('navigation_button');
   await byText('+ 웹 페이지 추가', true);
   await fill('server_input', url);
   await fill('name_input', name);
+  const options = await nodes();
+  assert.equal(options.find(node => node['resource-id'] === `${app}:id/page_use_browser`)?.checked, 'true');
+  if (!useBrowser) await byId('page_use_browser', true);
   await byId('primary_button', true);
 }
 
@@ -178,6 +217,7 @@ let first, second;
 try {
   first = await fixture('Server-A');
   second = await fixture('Server-B');
+  await adb('shell', 'am', 'force-stop', 'com.android.chrome');
   await adb('shell', 'am', 'force-stop', app);
   await adb('shell', 'pm', 'clear', app);
   await adb('shell', 'wm', 'size', '320x568');
@@ -185,6 +225,50 @@ try {
   await adb('shell', 'am', 'start', '-n', `${app}/.MainActivity`);
   await until(async () => (await adb('shell', 'pidof', app)), 'app running');
   await connectDebug();
+
+  // Seed only Chrome, then launch the saved page through AWB. The embedded WebView has no cookie.
+  // Disabling first-run UI only affects this disposable emulator, never the installed user's browser.
+  assert.ok(await adb('shell', 'pm', 'path', 'com.android.chrome'), 'The test image must include Chrome');
+  await adb('shell', 'am', 'force-stop', 'com.android.chrome');
+  await adb('shell', 'pm', 'clear', 'com.android.chrome');
+  await adb('shell', 'am', 'set-debug-app', '--persistent', 'com.android.chrome');
+  await adb('shell', 'echo "_ --disable-fre --no-default-browser-check" > /data/local/tmp/chrome-command-line');
+  await adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `http://localhost:${first.port}/browser/seed`,
+    '-p', 'com.android.chrome');
+  await until(() => requests.some(request => request.path === '/browser/seed'), 'Chrome identity seeded', 30_000);
+  await adb('shell', 'am', 'start', '-n', `${app}/.MainActivity`);
+  const browserUrl = `${first.url}/browser/dashboard?org=2&var=a+b#/overview`;
+  await addPage(browserUrl, 'Browser-login', true);
+  const signedIn = () => requests.filter(request => request.path.startsWith('/browser/dashboard')
+    && request.cookie.includes('site_session=signed-in'));
+  await until(() => signedIn().length === 1, 'existing Chrome sign-in used by saved page');
+  assert.ok(requests.some(request => request.path === '/browser/authorize'
+    && request.cookie.includes('identity_session=already-signed-in')));
+  assert.ok(requests.some(request => request.path.startsWith('/browser/callback')
+    && request.cookie.includes('oauth_state=fixture-state')));
+  assert.ok(signedIn().every(request => !request.agent.includes('; wv)') && !request.agent.includes('AWBAndroid/') && !request.auth));
+  assert.match(await adb('shell', 'dumpsys', 'activity', 'activities'),
+    /(?:mResumedActivity:|topResumedActivity=).*com\.android\.chrome.*CustomTabActivity/);
+  await screenshot('phone-browser-signed-in');
+  await click('resource-id', 'com.android.chrome:id/close_button');
+  await until(async () => (await nodes()).some(node => node['resource-id'] === `${app}:id/page_browser_reopen`), 'return to AWB');
+  await pause(500);
+  assert.equal(signedIn().length, 1, 'returning to AWB must not reopen the tab');
+  await byId('navigation_more');
+  await byText('등록한 URL로 이동');
+  await until(() => signedIn().length === 2, 'saved page reuses browser site session');
+  await click('resource-id', 'com.android.chrome:id/close_button');
+  await until(async () => (await nodes()).some(node => node['resource-id'] === `${app}:id/page_browser_reopen`), 'return after reopen');
+  assert.equal(signedIn().length, 2, 'home action must launch exactly one tab');
+  await byId('navigation_more');
+  await byText('웹 페이지 수정');
+  assert.equal((await nodes()).find(node => node['resource-id'] === `${app}:id/page_use_browser`)?.checked, 'true');
+  await byId('page_use_browser', true);
+  await byId('primary_button', true);
+  const embeddedLogin = await pageAt(`http://localhost:${first.port}/browser/authorize#/overview`);
+  assert.equal(await embeddedLogin.evaluate('document.body.textContent'), 'Sign in required', 'Chrome cookies stay in Chrome');
+  assert.equal(await embeddedLogin.evaluate('typeof window.AwbAndroid'), 'undefined');
+  console.log('PASS Chrome cookie reuse, cross-origin OAuth state/callback, close/reopen, saved browser preference and WebView isolation');
 
   // A dashboard can be used before any AWB server has been configured.
   const dashboardUrl = `${first.url}/dash/?org=2&var=a+b#/overview`;
@@ -267,6 +351,8 @@ try {
   assert.ok(!requests.some(request => request.auth && request.auth !== `Bearer session-${request.server}`));
   console.log('PASS offline recovery, deletion/cancel and server auth survives page removal; no cross-server authorization');
 } finally {
+  await adb('shell', 'am', 'clear-debug-app').catch(() => {});
+  await adb('shell', 'rm', '-f', '/data/local/tmp/chrome-command-line').catch(() => {});
   for (const socket of sockets) socket.close();
   for (const item of [first, second].filter(Boolean)) {
     item.server.closeAllConnections();

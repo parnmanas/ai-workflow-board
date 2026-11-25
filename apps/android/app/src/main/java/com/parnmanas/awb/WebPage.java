@@ -15,11 +15,17 @@ public final class WebPage {
   public final String id;
   public final String url;
   public final String name;
+  public final boolean useBrowser;
 
   WebPage(String id, String url, String name) {
+    this(id, url, name, true);
+  }
+
+  WebPage(String id, String url, String name, boolean useBrowser) {
     this.id = id;
     this.url = url;
     this.name = name == null ? "" : name.trim();
+    this.useBrowser = useBrowser;
   }
 
   public String label() {
@@ -66,7 +72,8 @@ public final class WebPage {
           if (id.isEmpty() || ids.contains(id) || urls.contains(url)) continue;
           ids.add(id);
           urls.add(url);
-          pages.add(new WebPage(id, url, entry.optString("name", "")));
+          // Existing bookmarks also gain browser sign-in without having to be recreated.
+          pages.add(new WebPage(id, url, entry.optString("name", ""), entry.optBoolean("useBrowser", true)));
         } catch (JSONException | IllegalArgumentException ignored) {
           // One malformed bookmark must not hide the rest of the user's list.
         }
@@ -80,7 +87,8 @@ public final class WebPage {
     JSONArray entries = new JSONArray();
     for (WebPage page : pages) {
       try {
-        entries.put(new JSONObject().put("id", page.id).put("url", page.url).put("name", page.name));
+        entries.put(new JSONObject().put("id", page.id).put("url", page.url).put("name", page.name)
+            .put("useBrowser", page.useBrowser));
       } catch (JSONException e) {
         throw new IllegalStateException(e);
       }

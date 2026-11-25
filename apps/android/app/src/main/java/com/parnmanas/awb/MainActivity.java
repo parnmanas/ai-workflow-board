@@ -44,6 +44,7 @@ import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -73,7 +74,7 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * 웹 빌드를 앱에 묶지 않는다: 화면은 서버 배포를 그대로 따라가고, 앱은 웹이 못 하는 것
  * (백그라운드 상시 음성 · 끊기지 않는 로그인 · 구글 로그인 왕복 · 알림 · 서버 목록)만 맡는다. 같은 오리진이라
- * CORS 도 필요 없다. 등록한 커스텀 페이지는 브릿지가 없는 별도 WebView 로 연다.
+ * CORS 도 필요 없다. 커스텀 페이지는 브라우저 탭으로 열며, 별도 WebView 보기도 선택할 수 있다.
  *
  * 서버는 여러 개 둘 수 있다(Servers). 화면에는 "지금 서버" 하나를 띄우고, 전환하면 그 서버의 화면을 새로 연다 —
  * 서버마다 로그인이 따로 남아 있어 다시 로그인하지 않는다. 상시 음성도 지금 서버를 따라 옮겨 간다.
@@ -97,6 +98,7 @@ public class MainActivity extends Activity {
   private LinearLayout serverList;
   private EditText serverInput;
   private EditText nameInput;
+  private CheckBox pageUseBrowser;
   private Button primaryButton;
   private Button secondaryButton;
   private Panel panelMode = Panel.NONE;
@@ -152,6 +154,7 @@ public class MainActivity extends Activity {
     serverList = findViewById(R.id.server_list);
     serverInput = findViewById(R.id.server_input);
     nameInput = findViewById(R.id.name_input);
+    pageUseBrowser = findViewById(R.id.page_use_browser);
     primaryButton = findViewById(R.id.primary_button);
     secondaryButton = findViewById(R.id.secondary_button);
     navigationItems = findViewById(R.id.navigation_items);
@@ -193,7 +196,8 @@ public class MainActivity extends Activity {
     if (!handleIntent(getIntent())) {
       WebPage selected = WebPages.selected(this);
       Server active = Servers.active(this);
-      if (selected != null) showWebPage(selected.id);
+      // Restoring the activity underneath a browser tab must not launch a duplicate tab.
+      if (selected != null) showWebPage(selected.id, savedInstanceState == null);
       else if (active != null) loadApp(Servers.lastPath(this, active.id));
       else showServers();
     }
@@ -793,13 +797,17 @@ public class MainActivity extends Activity {
   }
 
   private void showWebPage(String id) {
+    showWebPage(id, true);
+  }
+
+  private void showWebPage(String id, boolean launchBrowser) {
     WebPage page = WebPages.get(this, id);
     if (page == null) { showServers(); return; }
     selectedPageId = id;
     WebPages.select(this, id);
     revealOnLoad = false;
     if (customPage == null) {
-      customPage = new WebPageView(this, this::openExternal, location -> {
+      customPage = new WebPageView(this, uri -> WebPageBrowser.open(this, uri), location -> {
         if (!selectedPageId.isEmpty()) navigationSubtitle.setText("웹 · " + ServerUrls.originOf(location));
       });
       customContainer.addView(customPage, new FrameLayout.LayoutParams(-1, -1));
@@ -809,6 +817,7 @@ public class MainActivity extends Activity {
     web.setVisibility(View.INVISIBLE);
     customContainer.setVisibility(View.VISIBLE);
     renderNavigation();
+    if (page.useBrowser && launchBrowser) customPage.home();
   }
 
   private void leaveWebPage() {
@@ -834,6 +843,7 @@ public class MainActivity extends Activity {
     nameInput.setHint(R.string.page_name_hint);
     nameInput.setText(page == null ? "" : page.name);
     nameInput.setVisibility(View.VISIBLE);
+    pageUseBrowser.setChecked(page == null || page.useBrowser);
     primaryButton.setText(R.string.save);
     primaryButton.setVisibility(View.VISIBLE);
     primaryButton.setEnabled(true);
@@ -845,7 +855,8 @@ public class MainActivity extends Activity {
 
   private void submitPage() {
     try {
-      WebPage saved = WebPages.save(this, editingPageId, serverInput.getText().toString(), nameInput.getText().toString());
+      WebPage saved = WebPages.save(this, editingPageId, serverInput.getText().toString(), nameInput.getText().toString(),
+          pageUseBrowser.isChecked());
       showWebPage(saved.id);
     } catch (IllegalArgumentException error) {
       panelMessage.setText(error.getMessage());
@@ -858,11 +869,11 @@ public class MainActivity extends Activity {
     List<String> labels = new ArrayList<>();
     List<Runnable> actions = new ArrayList<>();
     labels.add(getString(R.string.page_home));
-    actions.add(() -> { showWebPage(id); customPage.home(); });
+    actions.add(() -> { showWebPage(id, false); customPage.home(); });
     labels.add(getString(R.string.edit_page_title));
     actions.add(() -> showPageEditor(id));
     labels.add(getString(R.string.open_browser));
-    actions.add(() -> openExternal(Uri.parse(id.equals(selectedPageId) && customPage != null ? customPage.location() : page.url)));
+    actions.add(() -> WebPageBrowser.open(this, Uri.parse(page.url)));
     labels.add("목록에서 삭제");
     actions.add(() -> new AlertDialog.Builder(this)
         .setTitle(page.label() + " 삭제")
@@ -1083,6 +1094,7 @@ public class MainActivity extends Activity {
   }
 
   private void showPanel() {
+    findViewById(R.id.page_browser_options).setVisibility(panelMode == Panel.ADD_PAGE ? View.VISIBLE : View.GONE);
     revealOnLoad = false;
     panel.setVisibility(View.VISIBLE);
     panel.scrollTo(0, 0);

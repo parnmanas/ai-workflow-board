@@ -212,6 +212,28 @@
                 android:textSize="15sp"
                 android:visibility="gone" />
 
+            <LinearLayout
+                android:id="@+id/page_browser_options"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+                <CheckBox
+                    android:id="@+id/page_use_browser"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="@string/page_use_browser"
+                    android:textColor="@color/text_primary" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/page_browser_hint"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
             <Button
                 android:id="@+id/primary_button"
                 android:layout_width="match_parent"

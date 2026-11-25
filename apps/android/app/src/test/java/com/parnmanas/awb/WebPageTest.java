@@ -1,6 +1,7 @@
 package com.parnmanas.awb;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -53,5 +54,25 @@ public class WebPageTest {
     assertEquals("a", restored.get(0).id);
     assertEquals("c", restored.get(1).id);
     assertTrue(WebPage.decode("not json").isEmpty());
+  }
+
+  @Test public void newAndExistingBookmarksUseBrowserSignInByDefault() {
+    assertTrue(new WebPage("new", "https://example.com/dashboard", "New").useBrowser);
+    WebPage legacy = WebPage.decode("[{\"id\":\"old\",\"url\":\"https://example.com/d/?org=2#/overview\","
+        + "\"name\":\"기존 대시보드\"}]").get(0);
+    assertTrue(legacy.useBrowser);
+    assertEquals("old", legacy.id);
+    assertEquals("기존 대시보드", legacy.name);
+    assertEquals("https://example.com/d/?org=2#/overview", legacy.url);
+    assertTrue(WebPage.decode(WebPage.encode(Arrays.asList(legacy))).get(0).useBrowser);
+  }
+
+  @Test public void embeddedViewOptOutSurvivesSavingOtherBookmarks() {
+    List<WebPage> pages = Arrays.asList(new WebPage("embedded", "https://example.com/a", "A", false),
+        new WebPage("browser", "https://example.com/b", "B", true));
+    List<WebPage> restored = WebPage.decode(WebPage.encode(pages));
+    assertFalse(restored.get(0).useBrowser);
+    assertTrue(restored.get(1).useBrowser);
+    assertFalse(WebPage.decode(WebPage.encode(restored)).get(0).useBrowser);
   }
 }

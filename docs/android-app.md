@@ -19,8 +19,9 @@ CORS 설정이 필요했고, 구글 로그인은 페이지째 이동이라 시�
 MainActivity      AWB WebView + 서버·웹 페이지 전환 목록 / 오프라인 화면 + 딥링크(awb://oauth · awb://sessions/…)
 Servers · Server  서버 목록 · 현재 서버 · 서버별 단말 자격과 음성 설정
 ServerUrls        서버 주소 정규화 · 오리진 중복 검사
-WebPages · WebPage  단말에 저장한 커스텀 웹 페이지 이름·URL·순서·마지막 선택
-WebPageView       네이티브 브릿지 없는 별도 WebView — 대시보드 등 일반 웹 페이지
+WebPages · WebPage  단말에 저장한 커스텀 웹 페이지 이름·URL·열기 방식·순서·마지막 선택
+WebPageBrowser    Chrome 로그인 상태를 사용하는 Custom Tab (없으면 다른 브라우저)
+WebPageView       브라우저 복귀 화면 또는 네이티브 브릿지 없는 별도 WebView
 WebBridge         window.AwbAndroid — 서버 오리진의 최상위 문서에만 주입(androidx.webkit WebMessageListener)
 Auth              서버별 세션 토큰의 단일 출처. 해당 서버의 단말 자격으로 세션을 다시 받는다
 GoogleLogin       PKCE + Custom Tab
@@ -52,17 +53,28 @@ WebView 저장소는 오리진 단위라 같은 오리진을 중복 등록하지
 일반 대시보드 URL의 경로, 끝 슬래시, 쿼리 필터와 `#` 라우트를 그대로 보존한다. 같은 사이트의 서로 다른 대시보드도
 따로 추가할 수 있다. 목록과 마지막 선택은 이 단말에 저장되며 서버로 동기화하지 않는다.
 
-- 앱 안에서 웹 페이지 전체를 연다(iframe 아님). 상단 **↻**는 현재 페이지 새로고침, **⋯**는 등록한 URL로 이동,
-  이름·URL 수정, 브라우저에서 열기, 목록에서 삭제다. 목록 항목의 **⋯** 또는 전환 바 길게 누르기로도 관리한다.
-- Android 뒤로는 페이지 안의 이전 화면으로 이동하고, 더 이상 기록이 없으면 전환 목록을 연다. 페이지를 바꾸면
-  이전 페이지의 뒤로 기록을 비운다. 다시 열린 앱은 마지막으로 선택한 항목의 등록 URL을 연다.
-- AWB와 별도 WebView를 사용한다. 커스텀 페이지에는 `AwbAndroid` 브릿지, AWB 앱 user-agent 표시, 네이티브 세션
-  헤더를 넣지 않는다. 같은 AWB 오리진을 커스텀 URL로 등록해도 네이티브 인증 기능을 쓸 수 없다. 웹의 쿠키·저장소는
-  일반 WebView의 사이트별 규칙을 따른다. `file:`, `javascript:`, 자격을 포함한 URL 등은 등록하지 못한다.
+- **Chrome 로그인 사용**이 기본이다. 기존에 등록한 페이지도 업데이트 뒤 이 방식을 쓴다. Chrome이 있으면
+  Chrome Custom Tab으로 페이지 전체를 열어 해당 Chrome 프로필의 로그인·저장된 비밀번호를 이용한다. Chrome이
+  없으면 사용 가능한 다른 브라우저로 연다. Google 로그인과 사이트로 돌아오는 리다이렉트도 같은 브라우저에서
+  처리한다. 계정 선택·동의·서비스가 요구하는 재인증은 표시될 수 있다.
+- 탭의 닫기 버튼으로 AWB에 돌아오며, **페이지 다시 열기**로 등록 URL을 다시 연다. 복귀만으로 탭을 다시 띄우지
+  않는다. 상단 **⋯**에서 등록 URL 열기, 이름·URL·열기 방식 수정, 브라우저에서 열기, 삭제를 제공한다. 목록의
+  **⋯** 또는 전환 바 길게 누르기로도 관리한다. 다시 실행한 앱은 마지막 선택 항목의 등록 URL을 연다.
+- **웹 페이지 수정 → Chrome 로그인 사용**을 끄면 기존처럼 앱 내부의 별도 WebView로 연다(iframe 아님).
+  이 경우 **↻**는 현재 페이지 새로고침이고, Android 뒤로는 페이지 기록을 거쳐 전환 목록으로 이동한다. 페이지를
+  바꾸면 이전 기록을 비운다. WebView는 Chrome과 쿠키·로그인을 공유하지 않으므로 Google 등 브라우저 인증이
+  필요한 사이트는 기본 방식을 쓴다. **브라우저에서 열기**는 등록 URL에서 시작하며, 진행 중인 WebView OAuth
+  URL을 복사하지 않는다(브라우저에 해당 인증 요청의 쿠키·state가 없기 때문이다).
+- 두 방식 모두 `AwbAndroid` 브릿지, AWB 앱 user-agent 표시, 네이티브 세션 헤더를 넣지 않는다. 같은 AWB 오리진을
+  커스텀 URL로 등록해도 네이티브 인증 기능을 쓸 수 없다. 브라우저 쿠키를 앱으로 복사하지 않는다.
+  `file:`, `javascript:`, 자격을 포함한 URL 등은 등록하지 못한다.
 - AWB에서 커스텀 페이지로 갔다가 같은 서버로 돌아오면 AWB 문서를 유지해 작성 중인 입력을 보존한다. 커스텀
   페이지를 보는 동안 상시 음성은 마지막 선택한 AWB 서버에 연결된 서비스가 맡는다. 여러 서버를 동시에 듣지는 않는다.
-- 네트워크·인증서 오류에는 재시도 또는 브라우저에서 열기를 제공한다. 임베디드 브라우저를 차단하는 로그인은
-  **브라우저에서 열기**로 그 사이트를 이용한다. 커스텀 페이지의 마이크·카메라에는 네이티브 권한을 제공하지 않는다.
+- 앱 내부 보기의 네트워크·인증서 오류에는 재시도 또는 브라우저에서 열기를 제공한다. 내부 보기의 마이크·카메라에는
+  네이티브 권한을 제공하지 않는다. 브라우저 방식의 사이트 권한은 브라우저가 관리한다.
+
+근거: [Custom Tabs의 로그인·쿠키 공유](https://developer.chrome.com/docs/android/custom-tabs/),
+[Google의 임베디드 브라우저 OAuth 정책](https://developers.google.com/identity/protocols/oauth2/policies).
 
 이 전환 셸과 커스텀 페이지는 APK 기능이다. 서로 다른 서버의 웹 앱을 브라우저 한 오리진에 합치거나 인증을 공유하지 않는다.
 
@@ -164,8 +176,10 @@ JAVA_HOME=<jdk 17+> ./gradlew assembleRelease      # local.properties 의 awb.ke
 JAVA_HOME=<jdk 17+> ./gradlew testDebugUnitTest    # ServerUrls · VoiceRules · Vad · Downloads 단위 테스트
 ```
 
-전환·인증 분리·커스텀 URL·수정/삭제·재실행·320dp/태블릿/가로 배치는 debug APK를 설치한 **일회용 에뮬레이터**에서
-다음으로 검증한다. 해당 에뮬레이터의 AWB 데이터를 초기화하며 실제 서버 대신 loopback fixture 두 개를 사용한다.
+전환·인증 분리·커스텀 URL·수정/삭제·재실행·320dp/태블릿/가로 배치는 debug APK와 Chrome이 설치된 **일회용 에뮬레이터**에서
+다음으로 검증한다. 해당 에뮬레이터의 AWB·Chrome 데이터를 초기화하며 실제 서버 대신 loopback fixture 두 개를 사용한다.
+Chrome에만 테스트 로그인 쿠키를 만들고, 앱이 연 Custom Tab에서 다른 오리진의 인증·state 확인·사이트 복귀가
+통과하는지도 검사한다. 실제 Google 계정은 사용하지 않는다. Chrome 첫 실행 안내를 건너뛰는 테스트 플래그는 종료 시 지운다.
 테스트 이미지와 결과는 기본 `/tmp/awb-android-navigation-test/`에 남는다.
 
 ```

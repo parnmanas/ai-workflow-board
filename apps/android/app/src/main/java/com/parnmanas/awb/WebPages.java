@@ -30,7 +30,7 @@ public final class WebPages {
     prefs(context).edit().putString("selected", id == null ? "" : id).apply();
   }
 
-  public static synchronized WebPage save(Context context, String id, String url, String name) {
+  public static synchronized WebPage save(Context context, String id, String url, String name, boolean useBrowser) {
     String normalized = WebPage.normalizeUrl(url);
     List<WebPage> pages = list(context);
     int index = -1;
@@ -40,7 +40,7 @@ public final class WebPages {
       else if (page.url.equals(normalized)) throw new IllegalArgumentException("이미 목록에 있는 웹 페이지입니다");
     }
     if (id != null && index < 0) throw new IllegalArgumentException("삭제된 웹 페이지입니다");
-    WebPage saved = new WebPage(id == null ? UUID.randomUUID().toString() : id, normalized, name);
+    WebPage saved = new WebPage(id == null ? UUID.randomUUID().toString() : id, normalized, name, useBrowser);
     if (index < 0) pages.add(saved);
     else pages.set(index, saved);
     prefs(context).edit().putString("pages", WebPage.encode(pages)).apply();
