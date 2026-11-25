@@ -5017,3 +5017,30 @@ green 이다. `dependency audit` 잡의 스텝별 판정도 전부 success 이�
   수(현재 **3**)와 ref 전체 lockfile blob. (c) **PR #12 머지 여부** 및 머지 후 첫 cron 의
   `next` 축 패키지 수. (d) `production.private` 문자열은 **안전망**이다 — 드리프트로 오인하지
   말 것(16회차 1절).
+
+## 2026-11-26 — 정기 CI의 Hono 취약점 6건 해소
+
+`main`의 [2026-11-25 정기 실행](https://github.com/parnmanas/ai-workflow-board/actions/runs/45633619008)은
+`dependency audit`의 전체 lockfile 검사에서 실패했다. 같은 커밋 `6ed3f89d`의 push CI는 통과했지만,
+push 검사는 기존 버전의 advisory를 경고로 남기므로 전체 의존성이 안전하다는 증거가 아니었다.
+다른 테스트 잡의 `Skipped`는 정기 실행에서 감사만 돌리는 `schedule` 조건에 따른 정상 동작이다.
+
+| 패키지 | lockfile 이전 → 이후 | root override 최소 버전 | 해소한 advisory |
+| --- | --- | --- | --- |
+| `@hono/node-server` | 2.1.5 → 2.1.11 | `^2.1.11` | [GHSA-qv5m-9pm6-hqp3](https://github.com/advisories/GHSA-qv5m-9pm6-hqp3), [GHSA-jpvv-r467-5p4w](https://github.com/advisories/GHSA-jpvv-r467-5p4w) |
+| `hono` | 4.13.13 → 4.13.22 | `^4.13.22` | [GHSA-4m76-xfj5-7975](https://github.com/advisories/GHSA-4m76-xfj5-7975), [GHSA-h7mg-cq63-vhpq](https://github.com/advisories/GHSA-h7mg-cq63-vhpq), [GHSA-46wx-v44x-9hh2](https://github.com/advisories/GHSA-46wx-v44x-9hh2), [GHSA-4h7h-rv7c-7m2v](https://github.com/advisories/GHSA-4h7h-rv7c-7m2v) |
+
+두 패키지는 `@modelcontextprotocol/sdk`의 전이 의존성이다. 레지스트리에서 재해결한 두 항목의 버전·tarball·integrity를
+lockfile에 반영하고, 나머지 항목은 유지했다. `npm audit fix`는 사용하지 않았다. 감사 기준·예외·CI 조건도 바꾸지 않았다.
+
+확인한 결과:
+
+- `npm ci --no-audit --no-fund` — lockfile로 새 설치 성공. 설치된 Hono 두 버전도 위와 일치.
+- `node scripts/audit-lockfile-advisories.mjs` — **moderate 이상 6건 → 0건**.
+  기준 비교 없이 전체를 판정했으며, 검사 대상은 변경 전후 **756개 패키지 / 804개 버전**으로 동일하다.
+- install-script·액션 SHA·배포 브랜치·정기 감사 커버리지 가드 통과.
+- `node scripts/audit-published-deps.mjs` — **live/next 양쪽 moderate 이상 0건**, install script 0개.
+- 루트 `npm run build`, 감사 가드 회귀 **125개**, 서버·Host의 MCP 통신 및 인증 테스트 **23개** 통과.
+
+정기 실패를 고쳤는지 확인할 때는 push CI의 성공 여부와 함께 **기준 없는 전체 감사** 결과를 확인한다.
+실패한 이전 실행을 재실행하면 이전 SHA의 취약한 lockfile을 다시 검사하므로, 수정된 SHA로 검증해야 한다.
