@@ -27,6 +27,9 @@ import type { WebStandardStreamableHTTPServerTransport } from '@modelcontextprot
 
 export interface McpAgentContext {
   agentId?: string;
+  /** Browser-consented user, distinct from any Host or runtime identity. */
+  userId?: string;
+  canManageKeys?: boolean;
   agentName?: string;
   accountId?: string;
   scope?: string;

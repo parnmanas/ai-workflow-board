@@ -25,6 +25,7 @@ export class SessionOpenService {
   async open(caller: McpAgentContext | undefined, input: SessionOpenInput) {
     const { accountId, hostId, owner } = await resolveSessionCaller(this.dataSource, caller);
     const managerId = input.manager_id || hostId;
+    if (!managerId) throw new AgentSessionError(400, 'manager_id_required', 'Choose a manager_id from list_session_hosts.');
     const target = await this.dataSource.getRepository(RuntimeHost).findOne({ where: { id: managerId, account_id: accountId, is_active: 1 } });
     if (!target) throw new AgentSessionError(403, 'account_access_denied');
     if (input.session_id) {

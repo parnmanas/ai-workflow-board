@@ -30,7 +30,7 @@ function AccountConnections({ accountId }: { accountId: string }) {
 
   async function disconnect(connection: ConnectionInfo['connections'][number]) {
     if (!await confirm({ title: t('Disconnect {0}?', { 0: connection.client_name }),
-      message: t('This app will need your permission to read AWB again.'), confirmLabel: t('Disconnect') })) return;
+      message: t('This app will need your permission to access AWB again.'), confirmLabel: t('Disconnect') })) return;
     setPending(connection.id);
     setError('');
     try {
@@ -47,7 +47,7 @@ function AccountConnections({ accountId }: { accountId: string }) {
       {info?.endpoint ? <CodeBlock language="Streamable HTTP" code={info.endpoint} />
         : info ? <p>{t('Ask your AWB administrator to configure a public HTTPS address for this instance.')}</p>
         : !error && <p role="status">{t('Loading…')}</p>}
-      <p>{t('Sign in with the Google account you use for AWB. You choose which AWB account can share projects, tickets and ticket comments.')}</p>
+      <p>{t('Sign in with Google and choose the AWB account the app can use. Account actions follow your AWB permissions, including access to Host sessions.')}</p>
     </section>
     <div className="mcp-guide-apps">
       <section>
@@ -55,7 +55,7 @@ function AccountConnections({ accountId }: { accountId: string }) {
         <ol>
           <li>{t('On ChatGPT web, open Plugins → + → Add custom MCP server.')}</li>
           <li>{t('Name it AWB, paste the server URL and choose OAuth with Dynamic Client Registration (DCR).')}</li>
-          <li>{t('Create and install the plugin. Connect with Google and approve read access in AWB.')}</li>
+          <li>{t('Create and install the plugin. Connect with Google and select Allow account actions in AWB.')}</li>
         </ol>
         <a href="https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt" target="_blank" rel="noreferrer">{t('ChatGPT setup and availability')} ↗</a>
       </section>
@@ -64,21 +64,22 @@ function AccountConnections({ accountId }: { accountId: string }) {
         <ol>
           <li>{t('Open Settings → Connectors → + Add → Add custom connector.')}</li>
           <li>{t('Name it AWB, paste the server URL and continue. Select Sign in now and Register automatically.')}</li>
-          <li>{t('Add the connector and select Connect. Sign in with Google and approve read access in AWB.')}</li>
+          <li>{t('Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.')}</li>
         </ol>
         <a href="https://claude.com/docs/connectors/custom/add-unlisted" target="_blank" rel="noreferrer">{t('Claude connector guide')} ↗</a>
       </section>
     </div>
     <section>
       <h2>{t('Try the connection')}</h2>
-      <p>{t('Select AWB in a new chat and ask “Show my AWB projects.” If your workspace manages connectors, an owner may need to enable AWB first.')}</p>
+      <p>{t('Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.')}</p>
     </section>
     <section>
       <h2>{t('Connected apps')}</h2>
       {error && <p role="alert">{error} <button type="button" onClick={() => { setError(''); setAttempt(a => a + 1); }}>{t('Retry')}</button></p>}
       {info?.connections.length === 0 && <p>{t('No apps are connected to this account.')}</p>}
       {!!info?.connections.length && <ul>{info.connections.map(c =>
-        <li key={c.id}><span><strong>{c.client_name}</strong> · {t('Expires {0}', { 0: new Date(c.expires_at).toLocaleString(locale) })}</span>
+        <li key={c.id}><span><strong>{c.client_name}</strong> · {c.scope?.split(' ').includes('awb.manage') ? t('Account actions') : t('Read-only connection')}
+          {c.scope?.split(' ').includes('awb.keys') && <> · {t('API Keys')}</>} · {t('Expires {0}', { 0: new Date(c.expires_at).toLocaleString(locale) })}</span>
           <button type="button" disabled={!!pending} onClick={() => void disconnect(c)}>{t('Disconnect')}</button></li>)}</ul>}
     </section>
     <section>

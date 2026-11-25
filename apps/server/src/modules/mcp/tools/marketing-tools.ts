@@ -27,11 +27,13 @@ export function registerMarketingTools(server: McpServer, ctx: ToolContext): voi
 
   function dbCaller(extra: { sessionId?: string }) {
     const caller = getCallerAgent(extra);
+    if (caller?.source === 'oauth' && caller.scope === 'full' && caller.userId) return caller;
     if (!caller || caller.source !== 'db' || !caller.agentId) return null;
     return caller;
   }
 
   function actorOf(caller: NonNullable<ReturnType<typeof dbCaller>>): MarketingActor {
+    if (caller.userId) return { type: 'user', id: caller.userId, name: caller.agentName || caller.userId };
     const id = caller.runtimeKey || caller.agentId || '';
     return { type: 'agent', id, name: caller.agentName || id };
   }

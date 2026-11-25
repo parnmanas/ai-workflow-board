@@ -10,6 +10,8 @@ export class McpOAuthGrant {
   @Column('text') client_id: string;
   @Column('varchar') client_name: string;
   @Column('text') resource: string;
+  // Grants issued before account actions were introduced retain their original consent.
+  @Column({ type: 'varchar', default: 'awb.read' }) scope: string;
   @Index({ unique: true })
   @Column('varchar') access_hash: string;
   @Column({ type: Date }) access_expires_at: Date;

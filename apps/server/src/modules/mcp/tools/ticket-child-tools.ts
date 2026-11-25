@@ -45,14 +45,14 @@ export function registerTicketChildTools(server: McpServer, ctx: ToolContext): v
       const caller = getCallerAgent(extra);
       description = sanitizeHarnessMarkers(description, { logger, toolName: 'create_child_ticket', fieldName: 'description', agentId: caller?.agentId });
       const creatorName = caller?.agentName || '';
-      const creatorId = caller?.runtimeKey || caller?.agentId || '';
+      const creatorId = caller?.userId || caller?.runtimeKey || caller?.agentId || '';
 
       const position = await maxChildPosition(dataSource, parent_id);
       const child = await ticketRepo.save(ticketRepo.create({
         parent_id, depth: newDepth, title, description, priority, status,
         tags: JSON.stringify(normalizeTags(tags)), channel_ids: '[]', position,
         account_id: parent.account_id || '',
-        created_by: creatorName, created_by_type: 'agent', created_by_id: creatorId,
+        created_by: creatorName, created_by_type: caller?.userId ? 'user' : 'agent', created_by_id: creatorId,
       }));
 
       await activityService.logActivity({

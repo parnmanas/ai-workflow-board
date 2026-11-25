@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DIRECT_WORK_POLICY, stripDirectWorkPolicy, isDirectWorkPolicyTitle } from '../dist/lib/ticket-creation-policy.js';
 import { isSyntheticPrompt } from '../dist/lib/agent-session-history.js';
+import { HOST_AWB_MCP_INSTRUCTION } from '../dist/lib/awb-mcp-preference.js';
 
 test('manager policy is hidden while combined user input survives', () => {
   const prefix = `${DIRECT_WORK_POLICY}\n\nSession Git workflow: main. Working directory: /tmp/repo. Base branch: main.`;
   assert.equal(stripDirectWorkPolicy(prefix), '');
+  const current = prefix.replace(DIRECT_WORK_POLICY, DIRECT_WORK_POLICY + '\n\n' + HOST_AWB_MCP_INSTRUCTION);
+  assert.equal(stripDirectWorkPolicy(current + '\n\nFix the login'), 'Fix the login');
+  assert.equal(isSyntheticPrompt(current), true);
   assert.equal(isSyntheticPrompt(prefix), true);
   assert.equal(stripDirectWorkPolicy(`${prefix}\n\nFix the login`), 'Fix the login');
   assert.equal(isSyntheticPrompt(`${prefix}\n\nFix the login`), false);

@@ -89,8 +89,10 @@ export function registerAllTools(server: McpServer, ctx: ToolContext, profile: T
   // registered below (and any future *-tools.ts file discovered by name
   // alone) is checked against the destructive-tool table before its own
   // handler runs. See shared/tool-authz-gate.ts for the rationale.
-  installToolAuthzGate(server, ctx.dataSource);
+  const registerTool = server.tool;
   for (const mod of discoverToolModules()) {
+    server.tool = registerTool;
+    installToolAuthzGate(server, ctx.dataSource, mod.domain);
     mod.register(server, ctx);
   }
 }

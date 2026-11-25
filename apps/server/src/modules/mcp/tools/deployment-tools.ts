@@ -68,7 +68,8 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
       const caller = getCallerAgent(extra);
       try {
         const accountId = account_id || await resolveCallerAccountId(ctx.dataSource, caller);
-        const denied = await requireAccountScopedFullAccess(ctx.dataSource, caller, accountId);
+        const authorizedApp = caller?.source === 'oauth' && caller.scope === 'full' && caller.userId && accountId && accountId === caller.accountId;
+        const denied = authorizedApp ? null : await requireAccountScopedFullAccess(ctx.dataSource, caller, accountId);
         if (denied) return err(denied);
         const row = await deploymentService.report({
           accountId,
@@ -78,7 +79,7 @@ export function registerDeploymentTools(server: McpServer, ctx: ToolContext) {
           repoResourceId: repo_resource_id,
           ancestorShas: ancestor_shas,
           source: (source as any) ?? 'mcp',
-          reportedBy: caller?.agentId ?? '',
+          reportedBy: caller?.userId ?? caller?.agentId ?? '',
           deployedAt: deployed_at ?? null,
         });
         return ok(deploymentToJson(row));

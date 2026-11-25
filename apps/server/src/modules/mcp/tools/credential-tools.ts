@@ -43,6 +43,9 @@ export function registerCredentialTools(server: McpServer, ctx: ToolContext): vo
 
   async function access(extra: { sessionId?: string }) {
     const caller = getCallerAgent(extra);
+    if (caller?.source === 'oauth' && caller.scope === 'full' && caller.userId && caller.accountId) {
+      return { caller, accountId: caller.accountId };
+    }
     if (!caller || caller.source !== 'db' || !['read', 'write', 'full'].includes(caller.scope || '')
       || !(await resolveCallerIdentityRow(dataSource, caller.agentId))) return null;
     const accountId = await resolveCallerAccountId(dataSource, caller);

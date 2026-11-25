@@ -270,6 +270,9 @@ test('prepareCliHome preserves unrelated Codex settings and MCP servers while re
       'command = "/bin/existing"',
       '[mcp_servers.awb]',
       'url = "https://stale.example/mcp"',
+      'bearer_token_env_var = "PERSONAL_AWB_TOKEN"',
+      '[apps.personal_connector]',
+      'enabled = true',
       '',
     ].join('\n'),
   );
@@ -287,6 +290,9 @@ test('prepareCliHome preserves unrelated Codex settings and MCP servers while re
   assert.equal(config.model, 'gpt-5.4');
   assert.equal(config.mcp_servers.existing.command, '/bin/existing');
   assert.equal(config.mcp_servers.awb.url, 'https://new.example/mcp');
+  assert.equal(config.mcp_servers.awb.bearer_token_env_var, 'AWB_API_KEY');
+  assert.equal(config.mcp_servers.awb.required, true);
+  assert.equal(config.apps.personal_connector.enabled, true);
   assert.equal((text.match(/\[mcp_servers\.awb\]/g) ?? []).length, 1);
   assert.ok(!text.includes('secret-not-for-toml'));
   assert.ok(!text.includes('rotated-secret'));

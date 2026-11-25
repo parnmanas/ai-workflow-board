@@ -228,7 +228,7 @@ Ownership follows the selected account-owned team/project. Global-team standalon
 
 ## Connect an external MCP client
 
-**ChatGPT and Claude** can read projects and tickets with your AWB Google login. Open **Settings → MCP connections**, copy the public server URL, and register AWB as a custom MCP server using OAuth and automatic client registration. In AWB, choose an account and approve read access. You can disconnect each app on the same settings page. [Connection instructions for ChatGPT and Claude](docs/mcp-connections.md)
+**ChatGPT and Claude** can work in your AWB account and converse with native Host sessions using your AWB Google login. Open **Settings → MCP connections**, copy the public server URL, and register AWB as a custom MCP server using OAuth and automatic client registration. In AWB, choose an account and approve account actions. You can disconnect each app on the same settings page. [Connection instructions for ChatGPT and Claude](docs/mcp-connections.md)
 
 For an MCP client that accepts an API key, use its custom HTTP headers:
 
@@ -254,7 +254,7 @@ For a client accepting Claude-style `mcpServers` JSON:
 
 Use your deployed HTTPS URL remotely. Configuration format and file location depend on the client. A direct MCP connection provides tools; it does not by itself make that client a Runtime Host receiving the execution queue.
 
-Discover available tools through MCP `tools/list`. Google-authorized connections expose `list_projects`, `get_project`, `list_tickets`, and `get_ticket`. API-key connections have their own scopes and tool profiles. [Tool registration](apps/server/src/modules/mcp/tools/index.ts)
+Discover available tools through MCP `tools/list`. The `awb.manage` grant exposes the full MCP catalog subject to account permissions and tool identity requirements. Use `list_sessions`, `send_session_message` and `get_session_messages` to converse with a Host session. Existing `awb.read` grants retain their four project and ticket reads until you reconnect and approve account actions. [Tool registration](apps/server/src/modules/mcp/tools/index.ts)
 
 For development, `npm run mcp` starts standalone stdio and `npm run mcp:http` starts separate HTTP on **7702** by default. Prefer integrated `/mcp` when the web server is running. With SQLite, do not run separate server processes against the same file; give standalone processes their own absolute `SQLJS_DB_PATH` and `SQLJS_ONTOLOGY_DB_PATH`, or use PostgreSQL.
 

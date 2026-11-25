@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BaseSessionManager } from '../dist/lib/base-session-manager.js';
+import { hostAwbRolePrompt } from '../dist/lib/awb-mcp-preference.js';
 import { resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
 import { cleanupOrphanSubagents } from '../dist/lib/orphan-cleanup.js';
 import { SubagentManager } from '../dist/lib/subagent-manager.js';
@@ -898,11 +899,8 @@ test('profile.context_window 가 CLAUDE_CODE_MAX_CONTEXT_TOKENS 와 clamp 된 CL
     safety_margin_tokens: 5_000,
   }, join(fixtureRoot, 'context-window.json'));
   assert.equal(capture.contextWindowEnv, '10000');
-  // rolePrompt='fixture role' + taskText='fixture task'(각 12자)는 known-input
-  // 추정치가 작게 나온다; 여기서는 context_window - safety_margin_tokens 가
-  // max_output_tokens 와 정확히 같으므로, clamp 는 정확히 그 known-input 만큼만
-  // 깎는다: effective = 5000 - knownInput.
-  const knownInput = Math.ceil('fixture role'.length / 4) + Math.ceil('fixture task'.length / 4);
+  // Count the same host instruction that Claude receives in its role prompt.
+  const knownInput = Math.ceil(hostAwbRolePrompt('fixture role').length / 4) + Math.ceil('fixture task'.length / 4);
   assert.equal(Number(capture.maxOutputEnv), 5_000 - knownInput);
 });
 

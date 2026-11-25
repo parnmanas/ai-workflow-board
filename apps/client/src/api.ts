@@ -686,7 +686,7 @@ export const api = {
     request<{ success: boolean; error?: string }>(`/me/channels/${id}/test`, { method: 'POST' }),
 
   getMcpConnections: (accountId: string) =>
-    request<{ endpoint: string | null; connections: { id: string; client_name: string; expires_at: string }[] }>(
+    request<{ endpoint: string | null; connections: { id: string; client_name: string; scope: string; expires_at: string }[] }>(
       '/mcp-oauth/connections', { headers: { ...getAuthHeaders(), 'X-Account-Id': accountId } }),
   disconnectMcp: (id: string, accountId: string) =>
     request<{ disconnected: boolean }>(`/mcp-oauth/connections/${id}`, {

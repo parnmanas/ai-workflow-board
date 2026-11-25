@@ -16,6 +16,7 @@ import { parse as parseToml } from 'smol-toml';
 
 import { AgentSessionRunner, detectAcpSessionClis, redactSecrets, resolveAcpCommandForCli } from '../dist/lib/agent-session-runner.js';
 import { AgentSessionStore } from '../dist/lib/agent-session-store.js';
+import { HOST_AWB_MCP_INSTRUCTION } from '../dist/lib/awb-mcp-preference.js';
 import { watchCodexAsyncQuestions } from '../dist/lib/clis/codex/async-questions.js';
 import { codexAsyncRecord } from './fixtures/codex-async-elicitation.mjs';
 import { appendFile } from 'node:fs/promises';
@@ -477,6 +478,7 @@ for (const mode of ['folder', 'repository', 'existing']) {
       assert.match(sent.prompt[0].text, /Perform requested work directly.*regardless of task size/);
       assert.match(sent.prompt[0].text, /only when the user explicitly requests ticket creation/);
       assert.match(sent.prompt[0].text, /missing tools and newly discovered work do not authorize ticket creation/);
+      assert.ok(sent.prompt[0].text.includes(HOST_AWB_MCP_INSTRUCTION));
       assert.deepEqual(sent.prompt[1], { type: 'text', text }, 'the user message is preserved');
       if (mode === 'repository') assert.match(sent.prompt[0].text, /Session Git workflow: main/);
       else assert.doesNotMatch(sent.prompt[0].text, /Session Git workflow:/, 'policy also reaches sessions without managed Git metadata');

@@ -86,6 +86,7 @@ import { err } from './helpers';
 import { getCallerAgent, type McpAgentContext } from './session-auth';
 import { requireFullScopeCaller } from './authz';
 import { checkToolOwnership } from './tool-ownership';
+import { checkAccountAppTool } from './account-app-access';
 
 export type AuthzTier = 'full' | 'caller';
 
@@ -97,6 +98,7 @@ export type AuthzTier = 'full' | 'caller';
 export const TOOL_AUTHZ_TABLE: Record<string, AuthzTier> = {
   // Native session messaging additionally checks both sessions' current account/Host ownership.
   send_session_message: 'full',
+  get_session_messages: 'full',
   list_event_types: 'full',
   subscribe_to_event: 'full',
   list_event_subscriptions: 'full',
@@ -507,7 +509,7 @@ type ToolMethod = McpServer['tool'];
  * per MCP session (see internal/create-mcp-server.ts), so there is never a
  * shared instance to double-wrap or leak state across sessions.
  */
-export function installToolAuthzGate(server: McpServer, dataSource: DataSource): void {
+export function installToolAuthzGate(server: McpServer, dataSource: DataSource, domain = ''): void {
   const originalTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
 
   (server as unknown as { tool: ToolMethod }).tool = ((...args: unknown[]) => {
@@ -523,9 +525,17 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource):
     const gatedHandler = async (...handlerArgs: unknown[]) => {
       const extra = (handlerArgs[handlerArgs.length - 1] || {}) as { sessionId?: string };
       const caller = getCallerAgent(extra);
-      const gateError = tier ? await checkAuthzTier(tier, dataSource, caller) : null;
-      if (gateError) return err(gateError);
       const input = handlerArgs.length > 1 ? handlerArgs[0] as Record<string, any> : {};
+      const accountApp = caller?.source === 'oauth' && caller.scope === 'full';
+      if (accountApp) {
+        const denied = await checkAccountAppTool(dataSource, caller, domain, name, input || {});
+        if (denied) return err(denied);
+      }
+      // Session and business handlers also authenticate delegated owners. Other
+      // full-tier handlers retain their native Host identity requirements.
+      const accountHandler = domain === 'session-message' || domain === 'business' || domain.startsWith('business-') || domain === 'deployment';
+      const gateError = tier && !(tier === 'full' && accountApp && accountHandler) ? await checkAuthzTier(tier, dataSource, caller) : null;
+      if (gateError) return err(gateError);
       const ownershipError = await checkToolOwnership(dataSource, caller, name, input || {});
       if (ownershipError) return err(ownershipError);
       return (handler as (...a: unknown[]) => unknown)(...handlerArgs);

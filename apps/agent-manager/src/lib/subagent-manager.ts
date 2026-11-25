@@ -29,6 +29,7 @@ import { assertCliExecutable, resolveBinOverride } from './cli-resolver.js';
 import { cliDispatch } from './clis/index.js';
 import { selectEffortSlice } from './clis/effort.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
+import { hostAwbRolePrompt } from './awb-mcp-preference.js';
 import type { RuntimeAdapterResolver } from './runtime/composition/runtime-adapter-resolver.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import {
@@ -809,7 +810,7 @@ export class SubagentManager implements SubagentManagerContract {
     try {
       if (claudeRuntimeProfile) {
         maxOutputResolution = resolveMaxOutputTokensEnv(claudeRuntimeProfile, {
-          rolePrompt: spec.rolePrompt,
+          rolePrompt: hostAwbRolePrompt(spec.rolePrompt),
           harnessAppend: harness?.system_prompt_append,
           firstTurnText: spec.taskText,
         });

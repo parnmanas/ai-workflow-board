@@ -29,6 +29,7 @@ import type { ToolContext } from './context';
 
 /** The MCP caller as a ticket actor — runtime key first, it is what `assignee_key` holds. */
 export function callerActor(caller: McpAgentContext | undefined): TicketActor {
+  if (caller?.source === 'oauth' && caller.userId) return { id: caller.userId, name: caller.agentName || 'AWB app', type: 'user' };
   return {
     id: caller?.runtimeKey || caller?.agentId || '',
     name: caller?.agentName || 'agent',

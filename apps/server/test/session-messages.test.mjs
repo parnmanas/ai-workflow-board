@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { bootApp, closeTestApp } from './helpers/boot.mjs';
 import { createAccount, createAgent, createApiKey, createUser, runtimeHostKeyForAgent } from './helpers/fixtures.mjs';
 import { McpClient } from './helpers/mcp-client.mjs';
@@ -81,12 +82,15 @@ test('native session DMs route by session ID with account isolation and no human
     [second.id]: { codex: ['native-recipient', 'closed-native', 'terminal-only', 'locked-native', 'slow-native'], claude: ['operator-recipient'] },
   };
   const rpcErrors = [];
+  const conversation = [];
   const respond = (p) => {
     if (!p.request_id || !keys.has(p.manager_id)) return;
     const ids = onHost[p.manager_id]?.[p.cli] ?? [];
     let reply;
     if (p.op === 'list') {
       reply = { ok: true, result: { sessions: ids.map((id) => ({ session_id: id, cwd: '/repo', title: id, created_at: null, updated_at: new Date().toISOString(), source: 'cli' })) } };
+    } else if (p.op === 'history') {
+      reply = { ok: true, result: { session: { session_id: p.session_id, cwd: '/repo', title: p.session_id }, events: conversation, next_before: p.history_before ? null : 'older-page' } };
     } else if (p.op === 'info') {
       reply = ids.includes(p.session_id)
         ? { ok: true, result: { session: { session_id: p.session_id, cwd: '/repo', title: p.session_id, updated_at: new Date().toISOString() }, settings: null, live: null } }
@@ -298,6 +302,37 @@ test('native session DMs route by session ID with account isolation and no human
     } finally {
       activityEvents.removeListener('agent_session_request', check);
     }
+  });
+
+  await t.test('an account app can find a session, send a prompt, read its reply and continue on the same Host', async () => {
+    process.env.AWB_PUBLIC_URL = 'https://awb.example.test';
+    const token = 'awbo_' + randomBytes(32).toString('base64url');
+    await ds.getRepository('McpOAuthGrant').insert({ id: randomUUID(), user_id: owner.id, account_id: account.id,
+      client_id: 'test-client', client_name: 'ChatGPT', resource: process.env.AWB_PUBLIC_URL + '/mcp', scope: 'awb.manage',
+      access_hash: createHash('sha256').update(token).digest('hex'), access_expires_at: new Date(Date.now() + 60_000), expires_at: new Date(Date.now() + 60_000) });
+    const connector = mcp(first, 'native-sender', token);
+    assert.deepEqual((await connector.listTools()).map(tool => tool.name).sort(), (await sender.listTools()).map(tool => tool.name).sort());
+    const listed = await connector.callTool('list_sessions', { manager_id: second.id });
+    assert.ok(JSON.stringify(listed).includes('native-recipient'), JSON.stringify(listed));
+    const firstTurn = await send(connector, to, 'How is the build?');
+    assert.equal(firstTurn.from.app, 'ChatGPT');
+    assert.equal(firstTurn.from.user_id, owner.id);
+    const dispatched = requests.findLast(p => p.op === 'prompt' && p.turn_id === firstTurn.turn_id);
+    assert.equal(dispatched.session_id, to.session_id);
+    assert.match(dispatched.text, /How is the build/);
+    conversation.push(...[['user_prompt', 'How is the build?'], ['reasoning', 'internal'], ['text', 'The build passed.']].map(([type, text], n) =>
+      ({ id: 'm' + n, seq: n + 1, type, turn_id: firstTurn.turn_id, created_at: new Date().toISOString(), payload: { text } })));
+    const history = await connector.callTool('get_session_messages', to);
+    assert.deepEqual(history.messages.map(m => [m.role, m.text]), [['user', 'How is the build?'], ['assistant', 'The build passed.']]);
+    const older = await connector.callTool('get_session_messages', { ...to, before: history.next_before });
+    assert.equal(older.next_before, null);
+    const next = await send(connector, to, 'Which tests passed?');
+    assert.notEqual(next.turn_id, firstTurn.turn_id);
+    assert.deepEqual(next.to, to);
+    const before = requests.length;
+    error(await connector.callTool('get_session_messages', outsider), 'session_not_found');
+    error(await send(connector, outsider), 'session_not_found');
+    assert.equal(requests.length, before);
   });
 
   await t.test('no live Host stream produces an explicit error instead of silent success', async () => {

@@ -38,14 +38,17 @@ import { isRuntimeIdentityKey } from '../../../common/runtime-spec';
 async function resolveChatCaller(
   dataSource: import('typeorm').DataSource,
   caller: McpAgentContext | undefined,
-): Promise<{ agentId: string; agentName: string; accountId: string } | { error: string }> {
+): Promise<{ agentId: string; agentName: string; accountId: string; type: 'user' | 'agent' } | { error: string }> {
+  if (caller?.source === 'oauth' && caller.scope === 'full' && caller.userId && caller.accountId) {
+    return { agentId: caller.userId, agentName: caller.agentName || 'AWB app', accountId: caller.accountId, type: 'user' };
+  }
   if (!caller?.agentId && !caller?.runtimeKey) {
     return { error: 'Unauthorized: agent identity required' };
   }
   if (caller?.runtimeKey) {
     if (!caller.accountId) return { error: 'Could not resolve account from caller API key' };
     return {
-      agentId: caller.runtimeKey,
+      type: 'agent', agentId: caller.runtimeKey,
       agentName: caller.agentName || caller.runtimeKey.slice(0, 11),
       accountId: caller.accountId,
     };
@@ -55,7 +58,7 @@ async function resolveChatCaller(
   if (!agent) return { error: 'Agent identity not found for this session' };
   const accountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
   if (!accountId) return { error: 'Could not resolve account from caller API key' };
-  return { agentId: agent.id, agentName: agent.name, accountId };
+  return { type: 'agent', agentId: agent.id, agentName: agent.name, accountId };
 }
 
 export function registerChatTools(server: McpServer, ctx: ToolContext): void {
@@ -217,6 +220,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         return err('send_chat_room_message is unavailable in this MCP context (no RoomMessagingService)');
       }
       const caller = getCallerAgent(extra);
+      if (caller?.source === 'oauth' && caller.userId && caller.accountId) {
+        const msg = await roomMessagingService.sendMessage(room_id, caller.accountId, 'user', caller.userId, caller.agentName || 'AWB app', content, undefined, attachment_ids);
+        return ok({ message_id: msg.id, room_id });
+      }
       if (!caller) return err('Unauthorized: no agent identity for this session');
 
       // P4c-4: Host/링크 해소 (Agent 행 없음).
@@ -334,13 +341,11 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
 
       const caller = getCallerAgent(extra);
-      if (!caller?.agentId) return err('Unauthorized: agent identity required');
-      // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
-      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
-      if (!agent) return err('Agent identity not found for this session');
-      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
-      if (!callerAccountId) return err('Could not resolve account from caller API key');
+      const principal = await resolveChatCaller(dataSource, caller);
+      if ('error' in principal) return err(principal.error);
+      const callerAccountId = principal.accountId;
+      const room = await dataSource.getRepository(ChatRoom).findOneBy({ id: room_id, account_id: callerAccountId });
+      if (!room) return err('Chat room not found');
 
       const size = approxBase64Size(file_data);
       if (size > MAX_TICKET_ATTACHMENT_SIZE) {
@@ -349,19 +354,20 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
 
       try {
         // P4c-4: rt- 슬롯 세션은 runtimeKey 로 방에 앉아 있다 (agent.id 는 Host).
-        const uploaderId = caller.runtimeKey ?? agent.id;
-        await roomMembershipService.requireActiveParticipant(room_id, uploaderId, 'agent');
+        const uploaderId = principal.agentId;
+        await roomMembershipService.requireActiveParticipant(room_id, uploaderId, principal.type);
         // P4c-4: rt- 슬롯의 표시명은 `<Host>/<cli>` 로 합성한다.
         // TeamAgentSpec 에는 label 컬럼이 없어 스냅샷에서 leaf 를 읽을 수 없고,
         // 키 이름(`runtime:<label>:<rt>`)은 키 로테이션마다 바뀌어 표시에 부적합하다.
-        let uploaderName = caller.agentName || agent.name;
-        if (caller.runtimeKey) {
+        let uploaderName = principal.agentName;
+        if (caller?.runtimeKey) {
           const part = await dataSource.getRepository(ChatRoomParticipant).findOne({
             where: { room_id, participant_id: caller.runtimeKey, participant_type: 'agent' },
           });
           const spec = ((part as any)?.runtime_spec as Record<string, any> | null) ?? null;
           const cli = typeof spec?.cli === 'string' && spec.cli.trim() ? spec.cli.trim() : '';
-          if (cli) uploaderName = `${agent.name}/${cli}`;
+          const host = cli && await resolveCallerIdentityRow(dataSource, caller.agentId);
+          if (host) uploaderName = `${host.name}/${cli}`;
         }
         // Sniff the file bytes BEFORE persistence so a forged mime can
         // never reach disk. Mirrors the REST upload path — same helper,
@@ -381,7 +387,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
           file_mimetype: verifiedMime,
           file_data,
           file_size: size,
-          uploaded_by_type: 'agent',
+          uploaded_by_type: principal.type,
           // P4c-4: rt- 슬롯 세션은 runtimeKey 로 기록한다 (send path 와 일치).
           uploaded_by_id: uploaderId,
           uploaded_by: uploaderName,
@@ -405,25 +411,26 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     async ({ attachment_id }, extra: { sessionId?: string }) => {
       if (!roomMembershipService) return err('Chat membership is unavailable in this MCP context');
       const caller = getCallerAgent(extra);
-      if (!caller?.agentId) return err('Unauthorized: agent identity required');
+      const principal = await resolveChatCaller(dataSource, caller);
+      if ('error' in principal) return err(principal.error);
 
       const repo = dataSource.getRepository(TicketAttachment);
       const row = await repo.findOne({ where: { id: attachment_id } });
-      if (!row || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
+      if (!row || row.account_id !== principal.accountId || (row.owner_type !== 'chat_room' && row.owner_type !== 'chat_message')) {
         return err('Attachment not found');
       }
       if (row.owner_type === 'chat_message') {
         return err('Attachment is already sent and cannot be deleted directly');
       }
       // P4c-4: 업로더 판정은 runtimeKey 도 인정한다 (rt- 슬롯 세션).
-      if (row.uploaded_by_type !== 'agent' || (row.uploaded_by_id !== caller.agentId && row.uploaded_by_id !== caller.runtimeKey)) {
+      if (row.uploaded_by_type !== principal.type || (row.uploaded_by_id !== principal.agentId && row.uploaded_by_id !== caller?.agentId)) {
         return err('Only the uploader can discard a pending attachment');
       }
       try {
         // Re-check membership at delete time too — the room or agent could
         // have been removed between upload and discard.
         if (row.room_id) {
-          await roomMembershipService.requireActiveParticipant(row.room_id, caller.agentId, 'agent');
+          await roomMembershipService.requireActiveParticipant(row.room_id, principal.agentId, principal.type);
         }
         await repo.delete({ id: attachment_id });
         return ok({ ok: true, attachment_id });
@@ -441,6 +448,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     {},
     async (_args: Record<string, never>, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
+      if (caller?.source === 'oauth' && caller.userId && caller.accountId && roomCrudService) {
+        const rooms = await roomCrudService.listRooms(caller.accountId, caller.userId);
+        return ok(rooms.map(room => ({ room_id: room.id, name: room.name, type: room.type, last_message_at: room.last_message_at, open_join: !!room.open_join })));
+      }
       if (!caller) return err('Unauthorized: no agent identity for this session');
 
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
@@ -533,13 +544,13 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         // so the model reads conversation, not its own narration.
         // resolveChatCaller 가 runtimeKey 세션은 agentId=runtimeKey 로 해소했으므로
         // 그대로 쓰면 rt- 슬롯 참여자 행과 맞는다.
-        await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
+        if (chatCaller.type === 'agent') await roomMembershipService.requireActiveParticipant(room_id, agent.id, 'agent');
         const messages = await roomMessagingService.getMessages(
           room_id,
           agent.id,
           limit ?? 50,
           before,
-          { observer: true, excludeProgress: true },
+          { observer: chatCaller.type === 'agent', accountId: callerAccountId, excludeProgress: true },
         );
         return ok({ room_id, count: messages.length, messages });
       } catch (e: any) {
@@ -573,7 +584,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         if (!roomMembershipService) {
           return err('list_chat_room_participants is unavailable in this MCP context (no chat services)');
         }
-        await roomMembershipService.requireActiveParticipant(room_id, chatCaller.agentId, 'agent');
+        await roomMembershipService.requireActiveParticipant(room_id, chatCaller.agentId, chatCaller.type);
         const rows = await dataSource.getRepository(ChatRoomParticipant).find({
           where: { room_id, left_at: IsNull() },
           order: { joined_at: 'ASC' },
@@ -647,6 +658,10 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         return err('query must be at least 2 characters');
       }
       const caller = getCallerAgent(extra);
+      if (caller?.source === 'oauth' && caller.userId && caller.accountId) {
+        const results = await roomMessagingService.searchMessages(caller.accountId, caller.userId, query.trim(), Math.min(limit ?? 20, 50));
+        return ok({ query: query.trim(), count: results.length, results });
+      }
       if (!caller?.agentId) return err('Unauthorized: agent identity required');
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
       const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
@@ -691,17 +706,12 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
     async ({ participants, name }, extra: { sessionId?: string }) => {
       if (!roomCrudService) return err('Chat room creation is unavailable in this MCP context');
       const caller = getCallerAgent(extra);
-      if (!caller?.agentId) return err('Unauthorized: agent identity required');
-      // P4: Agent 행 또는 Host 행 — host-keyed 세션도 chat 주체다.
-      const identity = await resolveCallerIdentityRow(dataSource, caller.agentId);
-      const agent = identity && { ...identity, id: caller.runtimeKey ?? identity.id };
-      if (!agent) return err('Agent identity not found for this session');
-      const callerAccountId = caller.accountId || normalizeAgentAccountId(agent.account_id);
-      if (!callerAccountId) return err('Could not resolve account from caller API key');
+      const principal = await resolveChatCaller(dataSource, caller);
+      if ('error' in principal) return err(principal.error);
       try {
         const result = await roomCrudService.createRoom(
-          callerAccountId,
-          { type: 'agent', id: caller.agentId },
+          principal.accountId,
+          { type: principal.type, id: principal.type === 'agent' ? caller!.agentId! : principal.agentId },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
           name,
         );
@@ -744,7 +754,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
       // 있는 에이전트가 지금 API key 가 묶인 스코프 밖의 방 이름을 바꿀 수 있다. 이 파일의
       // 다른 툴들과 같은 방식으로 호출자의 계정를 해석해 함께 넘긴다.
       try {
-        await roomCrudService.renameRoom(room_id, callerAccountId, agent.id, name, 'agent');
+        await roomCrudService.renameRoom(room_id, callerAccountId, agent.id, name, chatCaller.type);
         return ok({ room_id, name: name.trim() });
       } catch (e: any) {
         return err(e?.message || 'Failed to set chat room name');
@@ -777,7 +787,7 @@ export function registerChatTools(server: McpServer, ctx: ToolContext): void {
         await roomMembershipService.addParticipants(
           room_id,
           callerAccountId,
-          { type: 'agent', id: agent.id },
+          { type: chatCaller.type, id: agent.id },
           participants.map(p => ({ participant_type: p.type, participant_id: p.id })),
         );
         return ok({ ok: true, room_id });

@@ -1,4 +1,5 @@
 import { negotiateCapabilities } from './negotiate-capabilities.js';
+import { hostAwbRolePrompt } from '../../awb-mcp-preference.js';
 import type { NormalizedRuntimeRequest, RuntimeError } from '../domain/execution.js';
 import type { CliExecutionAdapterPort, CliOneshotRequestPort, CliSessionRequestPort, CliSpawnDescriptorPort, RuntimeInfrastructurePorts, RuntimePluginLookupPort } from '../ports/index.js';
 
@@ -23,7 +24,7 @@ export class RuntimeExecutionFacade {
       mode: 'oneshot',
       model: spec.model ?? undefined,
       effort: spec.effort ?? undefined,
-      systemPrompt: spec.rolePrompt || undefined,
+      systemPrompt: this.#hostRolePrompt(runtimeId, spec.rolePrompt),
       mcpServers: spec.mcpConfigPath ? [spec.mcpConfigPath] : undefined,
       streaming: false,
     });
@@ -45,7 +46,7 @@ export class RuntimeExecutionFacade {
       model: spec.model ?? undefined,
       effort: spec.effort ?? undefined,
       sessionId,
-      systemPrompt: spec.rolePrompt || undefined,
+      systemPrompt: this.#hostRolePrompt(runtimeId, spec.rolePrompt),
       mcpServers: spec.mcpConfigPath ? [spec.mcpConfigPath] : undefined,
       streaming: true,
     });
@@ -59,6 +60,12 @@ export class RuntimeExecutionFacade {
       mcpConfigPath: request.mcpServers?.[0] ?? null,
     };
     return Object.freeze({ adapter, request, spec: negotiatedSpec, descriptor: adapter.buildSessionSpawn(negotiatedSpec) });
+  }
+
+  #hostRolePrompt(runtimeId: string, rolePrompt: string) {
+    // Codex receives its awb server via its managed CLI home even without an MCP config path.
+    if (!this.registry.manifest(runtimeId).capabilities.native_mcp) return rolePrompt || undefined;
+    return hostAwbRolePrompt(rolePrompt);
   }
 
   async complete(runtimeId: string, request: NormalizedRuntimeRequest) {

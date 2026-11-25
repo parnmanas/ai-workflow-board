@@ -1,3 +1,5 @@
+import { HOST_AWB_MCP_INSTRUCTION } from './awb-mcp-preference.js';
+
 /** Shared by native sessions and chat, including persistent follow-up turns. */
 export const DIRECT_WORK_POLICY = [
   'AWB work policy:',
@@ -12,6 +14,7 @@ export function stripDirectWorkPolicy(text: string): string {
   let rest = text.trimStart();
   if (!rest.startsWith(DIRECT_WORK_POLICY)) return text;
   rest = rest.slice(DIRECT_WORK_POLICY.length).trimStart();
+  if (rest.startsWith(HOST_AWB_MCP_INSTRUCTION)) rest = rest.slice(HOST_AWB_MCP_INSTRUCTION.length).trimStart();
   if (rest.startsWith('Session Git workflow: ')) rest = rest.replace(/^Session Git workflow: [^\n]*(?:\n|$)/, '').trimStart();
   return rest;
 }

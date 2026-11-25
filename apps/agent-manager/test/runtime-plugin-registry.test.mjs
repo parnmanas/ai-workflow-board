@@ -12,6 +12,7 @@ import { negotiateCapabilities } from '../dist/lib/runtime/application/negotiate
 import { requestCapabilities } from '../dist/lib/runtime/domain/capabilities.js';
 import { createDefaultRuntimePorts } from '../dist/lib/runtime/adapters/infrastructure/default-runtime-ports.js';
 import { resolveClaudeSessionId } from '../dist/lib/cli-adapters/claude.js';
+import { HOST_AWB_MCP_INSTRUCTION } from '../dist/lib/awb-mcp-preference.js';
 
 const base = { protocol: 'jsonl', session: 'oneshot', native_mcp: false, native_approvals: false, steering: false, cancellation: true, usage: 'none', collaboration: [], skill_delivery: ['prompt'] };
 
@@ -49,7 +50,11 @@ test('Claude와 Codex normalized request는 capability 협상 뒤 최종 argv가
   assert.ok(claude.descriptor.args.includes('--effort'));
   assert.ok(claude.descriptor.args.includes('high'));
   assert.ok(claude.descriptor.args.includes('--mcp-config'));
-  const codex = facade.prepareOneshot('codex', input);
+  assert.equal(claude.descriptor.args[claude.descriptor.args.indexOf('--append-system-prompt') + 1], '시스템\n\n' + HOST_AWB_MCP_INSTRUCTION);
+  const codex = facade.prepareOneshot('codex', { ...input, mcpConfigPath: null });
+  let prompt;
+  codex.descriptor.writePrompt({ stdin: { write(value) { prompt = value; }, end() {} } });
+  assert.equal(prompt, '시스템\n\n' + HOST_AWB_MCP_INSTRUCTION + '\n\n본문');
   assert.equal(codex.request.effort, undefined);
   assert.ok(codex.request.omitted.includes('effort'));
   assert.ok(!codex.descriptor.args.includes('--effort'));
@@ -64,6 +69,7 @@ test('persistent·resume·title 요청도 동일 facade contract를 사용한다
     }, 'thread-1');
     assert.equal(execution.request.mode, mode);
     assert.equal(execution.request.sessionId, 'thread-1');
+    assert.ok(execution.descriptor.args.includes('세션 시스템\n\n' + HOST_AWB_MCP_INSTRUCTION));
     assert.ok(execution.descriptor.args.includes('--input-format'));
     assert.ok(execution.descriptor.args.includes('stream-json'));
   }

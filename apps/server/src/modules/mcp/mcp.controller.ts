@@ -400,7 +400,7 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
         sessionId: sessionId || '(none)',
         contentType: req.headers['content-type'],
         accept: req.headers['accept'],
-        bodyPreview: req.method === 'POST' ? mcpRequestPreview(req.body) : '(n/a)',
+        bodyPreview: req.method === 'POST' ? mcpRequestPreview(req.body, mcpAuthInfo.source === 'oauth') : '(n/a)',
       });
 
       // DELETE: terminate session
@@ -499,7 +499,9 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // resolves to 'full', so this can only ever narrow the tool surface,
       // never widen it — see shared/tool-profiles.ts's security note.
       const toolProfileRaw = String(req.headers['x-awb-tool-profile'] || '').toLowerCase().trim();
-      const toolProfile: ToolProfile = mcpAuthInfo.source === 'oauth' ? 'account-read' : toolProfileRaw === 'compact' ? 'compact' : 'full';
+      const toolProfile: ToolProfile = mcpAuthInfo.source === 'oauth'
+        ? (mcpAuthInfo.scope === 'full' ? 'full' : 'account-read')
+        : (toolProfileRaw === 'compact' ? 'compact' : 'full');
 
       // New session (initialization request — no session ID)
       if (req.method === 'POST') {
@@ -510,21 +512,25 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
             // Register transport + auth context atomically in the unified store.
             sessionStore.register(id, transport, mcpServer, {
               agentId: mcpAuthInfo.agentId,
+              userId: mcpAuthInfo.userId,
+              canManageKeys: mcpAuthInfo.canManageKeys,
               agentName: mcpAuthInfo.agentName,
               accountId: mcpAuthInfo.accountId,
               scope: mcpAuthInfo.scope,
               keyId: mcpAuthInfo.keyId,
               source: mcpAuthInfo.source,
               runtimeKey: mcpAuthInfo.runtimeKey,
-              subagentRole: subagentRoleHeader,
-              subagentTicketId: subagentTicketIdHeader,
-              subagentTriggerSource: subagentTriggerSourceHeader,
-              subagentTriggerId: subagentTriggerIdHeader,
-              subagentSessionId: subagentSessionIdHeader,
-              clientType: clientTypeHeader,
-              agentSessionId: agentSessionIdHeader,
-              runtimeRunId: runtimeRunIdHeader,
-              executionStrategy: executionStrategyHeader,
+              ...(mcpAuthInfo.source !== 'oauth' && {
+                subagentRole: subagentRoleHeader,
+                subagentTicketId: subagentTicketIdHeader,
+                subagentTriggerSource: subagentTriggerSourceHeader,
+                subagentTriggerId: subagentTriggerIdHeader,
+                subagentSessionId: subagentSessionIdHeader,
+                clientType: clientTypeHeader,
+                agentSessionId: agentSessionIdHeader,
+                runtimeRunId: runtimeRunIdHeader,
+                executionStrategy: executionStrategyHeader,
+              }),
               toolProfile,
             });
             // No separate agentId → server map or execution-push lookup: the

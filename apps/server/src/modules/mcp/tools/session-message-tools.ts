@@ -5,7 +5,7 @@ import { err, ok } from '../shared/helpers';
 import { getCallerAgent } from '../shared/session-auth';
 import type { ToolContext } from './context';
 
-const SESSION_TOOL_AUTH = 'Requires a DB-backed full-scope Host key (not a runtime key) whose account owner has agent_sessions.use; only Hosts of that account are visible, and sessions another account opened are hidden.';
+const SESSION_TOOL_AUTH = 'Requires a full-scope Host key or an account app with awb.manage and an owner with agent_sessions.use. Only sessions on the selected account’s Hosts are available.';
 
 async function directory(ctx: ToolContext, run: (svc: NonNullable<ToolContext['sessionDirectoryService']>) => Promise<unknown>) {
   if (!ctx.sessionDirectoryService) return err('Finding sessions requires the NestJS-integrated AWB server.');
@@ -65,9 +65,9 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
   );
   server.tool(
     'open_session',
-    'Open a native CLI session in AWB: create with cwd, or resume with session_id. Requires a DB-backed full-scope Host key and an account owner with agent_sessions.use; target Host must belong to the same account. Runtime keys are denied. Uses saved CLI settings; no prompt, approvals or forced takeover. Returns the session address and UI path. Native callers can then use send_session_message; operators use proposals.',
+    `Create a native CLI session with cwd, or resume with session_id. Uses saved CLI settings and returns the session address and UI path. Then use send_session_message. Operators use proposals. ${SESSION_TOOL_AUTH}`,
     {
-      manager_id: z.string().uuid().optional().describe('Target Host UUID; defaults to your MCP Host.'),
+      manager_id: z.string().uuid().optional().describe('Target Host UUID from list_session_hosts. Required for account apps; defaults to the calling Host for native callers.'),
       cli: z.string().trim().min(1).max(40).describe('Installed session CLI, e.g. codex or claude.'),
       session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/).optional().describe('Native session ID to resume; omit to create.'),
       cwd: z.string().trim().min(1).max(1024).optional().describe('Working directory on the Host. Required for a new session.'),
@@ -84,11 +84,11 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
   );
   server.tool(
     'send_session_message',
-    'Message an existing native session, preserving its context. Requires an AWB native sender with a DB-backed full-scope Host key. ' +
+    'Message an existing native session, preserving its context. Available to authorized account apps and AWB native senders. ' +
     'The target is any session on your account\'s connected Hosts (find it with list_sessions), including ones never opened in AWB: ' +
     'if it is not running, AWB opens it first (waits up to 30s; open failures and open_timeout are returned and nothing is sent). ' +
     'Operators use propose_session_prompt instead. Busy recipients receive steering or a queued prompt. Includes your address for replies. ' +
-    'submitted confirms dispatch, not receipt. No human approval is granted. Self-messages and chains beyond 3 messages are blocked.',
+    'After submitted, use get_session_messages to read the reply. No human approval is granted. Self-messages and chains beyond 3 messages are blocked.',
     {
       session_id: z.string().trim().min(1).describe('Full native session ID, not an rt- key or MCP transport ID.'),
       content: z.string().min(1).max(SESSION_MESSAGE_MAX_CHARS).describe('Message text.'),
@@ -102,6 +102,22 @@ export function registerSessionMessageTools(server: McpServer, ctx: ToolContext)
       } catch (e: any) {
         return err(e?.message || 'Session message failed', { code: e?.code, status: e?.status });
       }
+    },
+  );
+  server.tool(
+    'get_session_messages',
+    `Read user messages and assistant replies in a native CLI session, oldest first within the page. The first page is the latest. After send_session_message, read again while the session is busy. Use next_before to fetch older pages. ${SESSION_TOOL_AUTH}`,
+    {
+      session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+      manager_id: z.string().uuid().optional(),
+      cli: z.string().trim().min(1).max(40).optional(),
+      before: z.string().min(1).max(512).optional().describe('Opaque next_before cursor from the previous page.'),
+    },
+    { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    async (args, extra) => {
+      if (!ctx.sessionMessagesService) return err('Session messages require the NestJS-integrated AWB server.');
+      try { return ok(await ctx.sessionMessagesService.history(getCallerAgent(extra), args)); }
+      catch (e: any) { return err(e?.message || 'Reading messages failed', { code: e?.code, status: e?.status }); }
     },
   );
 }

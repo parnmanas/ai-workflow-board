@@ -1,6 +1,7 @@
 import { SESSION_PERMISSION_KEY, SESSION_WORKFLOW_KEY, validateSessionLaunchOptions } from './session-launch-options.js';
 import { SessionWorkspaces, sessionWorkflowInstruction, type SessionWorkspace } from './session-workspace.js';
 import { DIRECT_WORK_POLICY, isDirectWorkPolicyTitle } from './ticket-creation-policy.js';
+import { HOST_AWB_MCP_INSTRUCTION } from './awb-mcp-preference.js';
 // Agent Session (CLI 직접 세션) 러너 — docs/agent-sessions.md.
 //
 // 세션의 단위는 **(이 Runtime Host, CLI, CLI 네이티브 세션 id)** 다. AWB 서버는
@@ -243,6 +244,7 @@ interface LiveSession {
   sessionId: string;
   /** 이 프로세스의 MCP 연결이 `X-AWB-Session-Id` 로 보내는 값 — 불러온 세션은 세션 id, 새 세션은 `pending-<uuid>`. */
   mcpSessionRef: string;
+  hasHostAwbMcp: boolean;
   cwd: string;
   title: string;
   /** Only a newly created session may derive its initial title from a prompt. */
@@ -1075,6 +1077,7 @@ export class AgentSessionRunner {
         cli,
         sessionId: requestedSessionId,
         mcpSessionRef: sessionIdForMcp,
+        hasHostAwbMcp: mcpServers.some(server => server.name === 'awb'),
         cwd,
         title,
         allowPromptTitle: !requestedSessionId,
@@ -1746,8 +1749,11 @@ export class AgentSessionRunner {
       return;
     }
     // Native slash commands must remain unwrapped for adapter command dispatch.
-    const instruction = text.trimStart().startsWith('/') ? ''
-      : [DIRECT_WORK_POLICY, sessionWorkflowInstruction(live.workspace)].filter(Boolean).join('\n\n');
+    const instruction = text.trimStart().startsWith('/') ? '' : [
+      DIRECT_WORK_POLICY,
+      live.hasHostAwbMcp && HOST_AWB_MCP_INSTRUCTION,
+      sessionWorkflowInstruction(live.workspace),
+    ].filter(Boolean).join('\n\n');
     const content = this.#promptContent(live, turnId, text, images, instruction);
     if (!content) return;
     const { blocks, validImages } = content;

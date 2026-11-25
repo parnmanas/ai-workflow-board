@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import type { McpOAuthService } from '../../mcp-oauth/mcp-oauth.service';
+import { type McpOAuthService, oauthScopes } from '../../mcp-oauth/mcp-oauth.service';
 import { oauthBase } from '../../mcp-oauth/mcp-oauth-clients';
 import type { McpAgentContext } from '../internal/session-store';
 import type { Request, Response } from 'express';
@@ -23,6 +23,8 @@ export interface McpAuthInfo {
   keyHint: string;
   agentName?: string;
   agentId?: string;
+  userId?: string;
+  canManageKeys?: boolean;
   keyId?: string;
   scope?: string;
   accountId?: string;
@@ -34,7 +36,8 @@ export interface McpAuthInfo {
 /** Even cached discovery and DELETE must belong to this credential and its current authority. */
 export function sameMcpCredential(session: McpAgentContext | undefined, auth: McpAuthInfo) {
   return !!session && session.source === auth.source && session.keyId === auth.keyId && session.scope === auth.scope
-    && session.accountId === auth.accountId && session.agentId === auth.agentId && session.runtimeKey === auth.runtimeKey;
+    && session.accountId === auth.accountId && session.userId === auth.userId && session.canManageKeys === auth.canManageKeys
+    && session.agentId === auth.agentId && session.runtimeKey === auth.runtimeKey;
 }
 
 interface EnvKeyEntry {
@@ -83,13 +86,15 @@ export async function authenticateMcpRequest(
   const challenge = () => {
     const base = oauth && oauthBase();
     if (!base) return false;
-    res.setHeader('WWW-Authenticate', 'Bearer resource_metadata="' + base + '/.well-known/oauth-protected-resource/mcp", scope="awb.read offline_access"');
+    res.setHeader('WWW-Authenticate', 'Bearer resource_metadata="' + base + '/.well-known/oauth-protected-resource/mcp", scope="' + oauthScopes.join(' ') + '"');
     return true;
   };
   if (oauth && authHeader?.startsWith('Bearer awbo_') && token) {
     try {
       const info = await oauth.verifyAccessToken(token);
-      return { source: 'oauth', scope: 'read', keyHint: 'OAuth', keyId: info.extra.grantId, accountId: info.extra.accountId };
+      return { source: 'oauth', scope: info.scopes.includes('awb.manage') ? 'full' : 'read', keyHint: 'OAuth',
+        keyId: info.extra.grantId, accountId: info.extra.accountId, userId: info.extra.userId, agentName: info.extra.clientName,
+        canManageKeys: info.scopes.includes('awb.keys') };
     } catch (error) {
       if (!(error instanceof InvalidTokenError)) throw error;
       challenge();

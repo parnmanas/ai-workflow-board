@@ -71,6 +71,8 @@ export function registerUserTools(server: McpServer, ctx: ToolContext): void {
     async (_args: any, extra: { sessionId?: string }) => {
       const caller = getCallerAgent(extra);
       if (!caller) return ok({ authenticated: false, message: 'No agent context — running in dev mode or unauthenticated.' });
+      if (caller.source === 'oauth') return ok({ authenticated: true, source: 'oauth', user_id: caller.userId,
+        account_id: caller.accountId, app: caller.agentName, scope: caller.scope });
 
       // P4: Agent 행 또는 Host 행 — host-keyed 세션도 identity 를 본다.
       let agentInfo: Record<string, any> | null = null;

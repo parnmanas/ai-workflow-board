@@ -21,6 +21,7 @@ import { cliDispatch } from './clis/index.js';
 import { selectEffortSlice } from './clis/effort.js';
 import { summarizeCliEvent } from './cli-output-summary.js';
 import { createRuntimeAdapterResolver } from './runtime/runtime-registry.js';
+import { hostAwbRolePrompt } from './awb-mcp-preference.js';
 import { spawnFailureTracker } from './spawn-failure-tracker.js';
 import { checkSessionProgress, type ProgressCheckResult } from './session-progress.js';
 import { findLiveBackgroundTasks } from './process-tree.js';
@@ -813,7 +814,7 @@ export class BaseSessionManager {
     try {
       if (claudeRuntimeProfile) {
         maxOutputResolution = resolveMaxOutputTokensEnv(claudeRuntimeProfile, {
-          rolePrompt,
+          rolePrompt: hostAwbRolePrompt(rolePrompt),
           harnessAppend: harness?.system_prompt_append,
           firstTurnText,
         });

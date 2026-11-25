@@ -42,6 +42,7 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   const metadata = await (await fetch(base + '/.well-known/oauth-protected-resource/mcp')).json();
   assert.equal(metadata.resource, resource);
   assert.deepEqual(metadata.authorization_servers, [issuer]);
+  assert.ok(metadata.scopes_supported.includes('awb.manage'));
   const server = await (await fetch(base + '/.well-known/oauth-authorization-server')).json();
   assert.deepEqual(server.code_challenge_methods_supported, ['S256']);
   process.env.AWB_PUBLIC_URL = issuer + '/awb';
@@ -86,21 +87,22 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
       const res = await fetch(base + '/api/auth/oauth/google/callback?' + params, { headers: { cookie }, redirect: 'manual' });
       return new URL(res.headers.get('location'));
     };
-    return { callback, verifier, cookie };
+    return { callback, verifier, cookie, requested };
   }
   const invalidIdentity = await begin();
   assert.equal((await invalidIdentity.callback('unverified')).searchParams.get('error'), 'access_denied');
 
-  async function decision(flow, value, accountId) {
+  async function decision(flow, value, accountId, keys = false) {
     const consent = await flow.callback('verified');
     assert.equal(consent.origin, issuer);
     const page = base + consent.pathname;
     assert.equal((await fetch(page)).status, 400);
-    const body = await (await fetch(page, { headers: { cookie: flow.cookie } })).text();
+    const body = await (await fetch(page, { headers: { cookie: flow.cookie, 'accept-language': 'en' } })).text();
+    assert.equal(body.includes('Allow account actions'), flow.requested.includes('awb.manage'));
     assert.ok(body.includes(alice.email) && body.includes(owned.id));
     assert.ok(!body.includes(other.id));
     const post = (id, origin) => fetch(page, { method: 'POST', redirect: 'manual',
-      headers: { cookie: flow.cookie, origin }, body: new URLSearchParams({ account_id: id, decision: value }) });
+      headers: { cookie: flow.cookie, origin }, body: new URLSearchParams({ account_id: id, decision: value, ...(keys && { keys: 'allow' }) }) });
     assert.equal((await post(accountId, 'https://example.org')).status, 403);
     if (value === 'allow') assert.equal((await post(other.id, issuer)).status, 403);
     const res = await post(accountId, issuer);
@@ -115,9 +117,9 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   const token = params => fetch(base + new URL(server.token_endpoint).pathname, {
     method: 'POST', body: new URLSearchParams({ client_id: client.client_id, resource, ...params }),
   });
-  async function grant(connector = client, uri = redirectUri, requested = scope) {
+  async function grant(connector = client, uri = redirectUri, requested = scope, choice = 'allow', keys = false) {
     const flow = await begin(connector, uri, requested);
-    const returned = await decision(flow, 'allow', owned.id);
+    const returned = await decision(flow, choice, owned.id, keys);
     assert.equal(returned.origin + returned.pathname, uri);
     const params = { grant_type: 'authorization_code', code: returned.searchParams.get('code'), redirect_uri: uri,
       client_id: connector.client_id, code_verifier: flow.verifier, ...(connector.client_secret && { client_secret: connector.client_secret }) };
@@ -153,6 +155,7 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
   assert.equal((await sessionRequest(claudeAccess.access_token)).status, 404);
   const refresh = (refresh_token) => token({ grant_type: 'refresh_token', refresh_token });
+  assert.equal((await token({ grant_type: 'refresh_token', refresh_token: access.refresh_token, scope: 'awb.read awb.manage offline_access' })).status, 400);
   const rotation = await refresh(access.refresh_token);
   assert.equal(rotation.status, 200);
   const rotated = await rotation.json();
@@ -179,4 +182,73 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   assert.equal((await (await fetch(list, { headers: owner })).json()).connections.length, 1);
   assert.equal((await fetch(list + '/' + connections[0].id, { method: 'DELETE', headers: owner })).status, 200);
   assert.equal((await sessionRequest(claudeAccess.access_token)).status, 401);
+
+  const readChoice = await grant(client, redirectUri, 'awb.read awb.manage', 'read');
+  assert.equal(readChoice.scope, 'awb.read');
+  const manage = await grant(client, redirectUri, 'awb.read awb.manage awb.keys offline_access', 'allow', true);
+  assert.equal(manage.scope, 'awb.read awb.manage offline_access', 'a user without key administration cannot grant it');
+  const appClient = new Client({ name: 'AWB app', version: '1' });
+  const managedTransport = new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: {
+    authorization: 'Bearer ' + manage.access_token, 'X-AWB-Client-Type': 'agent-session', 'X-AWB-Session-Id': 'native-sender',
+  } } });
+  await appClient.connect(managedTransport);
+  t.after(() => appClient.close());
+  const names = (await appClient.listTools()).tools.map(t => t.name);
+  for (const name of ['create_ticket', 'move_ticket', 'add_comment', 'list_sessions', 'open_session', 'send_session_message', 'get_session_messages', 'get_business_cashbook', 'get_action']) {
+    assert.ok(names.includes(name), name);
+  }
+  const call = (name, args = {}) => appClient.callTool({ name, arguments: args });
+  const me = JSON.parse((await call('whoami')).content[0].text);
+  assert.equal(me.user_id, alice.id);
+  assert.equal(me.account_id, owned.id);
+  assert.equal((await call('list_session_hosts')).isError, true, 'ordinary users need agent_sessions.use even with app consent');
+  const ds = app.get(getDataSourceToken());
+  await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['agent_sessions.use']) });
+  assert.ok(!(await call('list_session_hosts')).isError);
+  assert.equal((await call('get_ticket', { ticket_id: privateTicket.id })).isError, true);
+  assert.equal((await call('create_ticket', { account_id: other.id, title: 'wrong account' })).isError, true);
+  const added = await call('create_ticket', { title: 'From connected app' });
+  assert.ok(!added.isError, added.content[0].text);
+  const commented = await call('add_comment', { ticket_id: ticket.id, content: 'App note', author_id: bob.id, author_type: 'agent' });
+  assert.ok(!commented.isError, commented.content[0].text);
+  const saved = await ds.getRepository('Comment').findOneByOrFail({ ticket_id: ticket.id, content: 'App note' });
+  assert.equal(saved.author_type, 'user');
+  assert.equal(saved.author_id, alice.id);
+  const rooms = ds.getRepository('ChatRoom');
+  const mine = await rooms.save(rooms.create({ account_id: owned.id, type: 'group', name: 'Own room' }));
+  const theirs = await rooms.save(rooms.create({ account_id: other.id, type: 'group', name: 'Outside room' }));
+  for (const room of [mine, theirs]) {
+    await ds.getRepository('ChatRoomParticipant').insert({ room_id: room.id, participant_id: alice.id, participant_type: 'user' });
+  }
+  const roomList = (await call('list_chat_rooms')).content[0].text;
+  assert.ok(roomList.includes(mine.id) && !roomList.includes(theirs.id), roomList);
+  const chat = await call('send_chat_room_message', { room_id: mine.id, content: 'Room note' });
+  assert.ok(!chat.isError, chat.content[0].text);
+  assert.ok((await call('get_chat_room_messages', { room_id: mine.id })).content[0].text.includes('Room note'));
+  assert.equal((await call('send_chat_room_message', { room_id: theirs.id, content: 'wrong account' })).isError, true);
+  await ds.getRepository('User').update(alice.id, { permissions: '[]' });
+  assert.equal((await call('list_session_hosts')).isError, true, 'permission removal takes effect on an open connection');
+  const actions = ds.getRepository('Action');
+  const action = await actions.save(actions.create({ account_id: owned.id, name: 'My action' }));
+  const foreignAction = await actions.save(actions.create({ account_id: other.id, name: 'Other action' }));
+  assert.equal((await call('get_action', { id: action.id })).isError, true);
+  await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['admin.actions']) });
+  assert.ok(!(await call('get_action', { id: action.id })).isError);
+  assert.equal((await call('get_action', { id: foreignAction.id })).isError, true);
+  const narrowed = await token({ grant_type: 'refresh_token', refresh_token: manage.refresh_token, scope: 'awb.read offline_access' });
+  assert.equal(narrowed.status, 200);
+  const reduced = await narrowed.json();
+  assert.equal(reduced.scope, 'awb.read offline_access');
+  const reused = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
+    authorization: 'Bearer ' + reduced.access_token, 'mcp-session-id': managedTransport.sessionId }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) });
+  assert.equal(reused.status, 404, 'a narrowed grant cannot reuse its full tool session');
+  await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['admin.api_keys']) });
+  assert.equal((await grant(client, redirectUri, 'awb.manage awb.keys')).scope, 'awb.manage', 'key issuance requires separate opt-in');
+  const keyGrant = await grant(client, redirectUri, 'awb.manage awb.keys', 'allow', true);
+  assert.equal(keyGrant.scope, 'awb.manage awb.keys');
+  const keyClient = new Client({ name: 'key admin', version: '1' });
+  await keyClient.connect(new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: { authorization: 'Bearer ' + keyGrant.access_token } } }));
+  t.after(() => keyClient.close());
+  const issued = await keyClient.callTool({ name: 'create_api_key', arguments: { name: 'account-test', scope: 'read' } });
+  assert.ok(!issued.isError && JSON.parse(issued.content[0].text).raw_key);
 });

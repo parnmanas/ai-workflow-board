@@ -7,6 +7,8 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import type { Request, Response } from 'express';
 import { In, Repository } from 'typeorm';
 import { Account } from '../../entities/Account';
+import { User } from '../../entities/User';
+import { hasPermission, PERMISSIONS } from '../../common/types/permissions';
 import { McpOAuthGrant } from '../../entities/McpOAuthGrant';
 import { AccountAccessService } from '../../services/account-access.service';
 import { keyedDigest } from '../../services/encryption.service';
@@ -16,14 +18,22 @@ import { mcpClients, oauthBase } from './mcp-oauth-clients';
 const minute = 60000;
 const accessMs = 60 * minute;
 const familyMs = 30 * 24 * accessMs;
-export const oauthScopes = ['awb.read', 'offline_access'];
+const accountScopes = ['awb.read', 'awb.manage', 'awb.keys'];
+export const oauthScopes = [...accountScopes, 'offline_access'];
+function accountScope(scopes: string[]): string {
+  const requested = accountScopes.filter(scope => scopes.includes(scope));
+  if (!requested.length || (requested.includes('awb.keys') && !requested.includes('awb.manage')) || scopes.some(scope => !oauthScopes.includes(scope))) {
+    throw new InvalidScopeError('Request awb.read or awb.manage. Request awb.keys together with awb.manage.');
+  }
+  return requested.join(' ');
+}
 const digest = (v: string) => createHash('sha256').update(v).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
 const invalid = () => new InvalidGrantError('This authorization has expired or is no longer valid.');
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 
 interface Flow {
-  clientId: string; name: string; params: AuthorizationParams; resource: string; offline: boolean;
+  clientId: string; name: string; params: AuthorizationParams; resource: string; scope: string; offline: boolean;
   binding: string; expires: number; userId?: string; email?: string;
 }
 interface Code { flow: Flow; userId: string; accountId: string; expires: number }
@@ -48,13 +58,11 @@ export class McpOAuthService implements OAuthServerProvider {
     const resource = base + '/mcp';
     if (params.resource && params.resource.href !== resource) throw new InvalidTargetError('Use the AWB MCP endpoint as the resource.');
     const scopes = params.scopes?.length ? params.scopes : oauthScopes;
-    if (!scopes.includes('awb.read') || scopes.some(s => !oauthScopes.includes(s))) {
-      throw new InvalidScopeError('Request awb.read and optionally offline_access.');
-    }
+    const scope = accountScope(scopes);
     this.prune();
     if (this.flows.size + this.codes.size >= 2048) throw new TemporarilyUnavailableError('Try connecting again later.');
     const id = secret(), binding = secret();
-    this.flows.set(id, { clientId: client.client_id, name: client.client_name!, params, resource, offline: scopes.includes('offline_access'),
+    this.flows.set(id, { clientId: client.client_id, name: client.client_name!, params, resource, scope, offline: scopes.includes('offline_access'),
       binding, expires: Date.now() + 10 * minute });
     res.cookie('awb_mcp_' + id, binding, { httpOnly: true, secure: base.startsWith('https:'), sameSite: 'lax',
       path: new URL(base + '/api/').pathname, maxAge: 10 * minute });
@@ -79,7 +87,9 @@ export class McpOAuthService implements OAuthServerProvider {
     const flow = this.browserFlow(id, req);
     if (!flow.userId) throw invalid();
     const ids = await this.access.accessibleIds({ id: flow.userId, role: '' });
-    return { flow, accounts: await this.accounts.find({ where: { id: In(ids) }, select: ['id', 'name'], order: { name: 'ASC' } }) };
+    const user = await this.accounts.manager.getRepository(User).findOneBy({ id: flow.userId, status: 'active' });
+    const canManageKeys = !!user && hasPermission(user.role, JSON.parse(user.permissions || '[]'), PERMISSIONS.MANAGE_API_KEYS);
+    return { flow, canManageKeys, accounts: await this.accounts.find({ where: { id: In(ids) }, select: ['id', 'name'], order: { name: 'ASC' } }) };
   }
 
   finish(id: string, req: Request, accountId?: string) {
@@ -113,7 +123,7 @@ export class McpOAuthService implements OAuthServerProvider {
   }
   private tokenSet(row: McpOAuthGrant, accessToken: string) {
     return { token_type: 'Bearer', access_token: accessToken, expires_in: Math.max(0, Math.floor((row.access_expires_at.getTime() - Date.now()) / 1000)),
-      scope: row.refresh_version ? oauthScopes.join(' ') : 'awb.read', ...(row.refresh_version ? { refresh_token: this.refreshToken(row) } : {}) };
+      scope: row.scope + (row.refresh_version ? ' offline_access' : ''), ...(row.refresh_version ? { refresh_token: this.refreshToken(row) } : {}) };
   }
   async exchangeAuthorizationCode(client: OAuthClientInformationFull, code: string, _verifier?: string, redirectUri?: string, resource?: URL) {
     const entry = this.code(client, code);
@@ -123,7 +133,7 @@ export class McpOAuthService implements OAuthServerProvider {
     const token = 'awbo_' + secret();
     const now = Date.now();
     const row = this.grants.create({ id: randomUUID(), user_id: entry.userId, account_id: entry.accountId,
-      client_id: client.client_id, client_name: entry.flow.name, resource: entry.flow.resource, access_hash: digest(token),
+      client_id: client.client_id, client_name: entry.flow.name, resource: entry.flow.resource, scope: entry.flow.scope, access_hash: digest(token),
       access_expires_at: new Date(now + accessMs), expires_at: new Date(now + (entry.flow.offline ? familyMs : accessMs)),
       refresh_version: entry.flow.offline ? 1 : 0 });
     await this.grants.insert(row);
@@ -145,15 +155,16 @@ export class McpOAuthService implements OAuthServerProvider {
     return row;
   }
   async exchangeRefreshToken(client: OAuthClientInformationFull, token: string, scopes?: string[], resource?: URL) {
-    if (scopes && (!scopes.includes('awb.read') || scopes.some(s => !oauthScopes.includes(s)))) {
-      throw new InvalidScopeError('Request awb.read and optionally offline_access.');
-    }
+    const requested = scopes ? accountScope(scopes) : undefined;
     if (resource && resource.href !== oauthBase() + '/mcp') throw new InvalidTargetError('Invalid resource.');
     const row = await this.refreshGrant(client, token);
     if (!row || !await this.owner(row.user_id, row.account_id)) throw invalid();
+    if (requested && requested.split(' ').some(scope => !row.scope.split(' ').includes(scope))) {
+      throw new InvalidScopeError('Reconnect and approve additional access in AWB.');
+    }
     const accessToken = 'awbo_' + secret();
     const next = { access_hash: digest(accessToken), access_expires_at: new Date(Math.min(Date.now() + accessMs, row.expires_at.getTime())),
-      refresh_version: scopes && !scopes.includes('offline_access') ? 0 : row.refresh_version + 1 };
+      scope: requested ?? row.scope, refresh_version: scopes && !scopes.includes('offline_access') ? 0 : row.refresh_version + 1 };
     const changed = await this.grants.update({ id: row.id, refresh_version: row.refresh_version }, next);
     if (changed.affected !== 1) {
       // Two requests may both read the current token before either rotates it.
@@ -168,8 +179,8 @@ export class McpOAuthService implements OAuthServerProvider {
     const row = /^awbo_[\w-]{43}$/.test(token) ? await this.grants.findOneBy({ access_hash: digest(token) }) : null;
     if (!row || row.resource !== oauthBase() + '/mcp' || row.access_expires_at.getTime() <= Date.now()
         || !await this.owner(row.user_id, row.account_id)) throw new InvalidTokenError('Expired or revoked AWB connection.');
-    return { token, clientId: row.client_id, scopes: ['awb.read'], resource: new URL(row.resource), expiresAt: row.access_expires_at.getTime() / 1000,
-      extra: { accountId: row.account_id, grantId: row.id } };
+    return { token, clientId: row.client_id, scopes: row.scope.split(' '), resource: new URL(row.resource), expiresAt: row.access_expires_at.getTime() / 1000,
+      extra: { accountId: row.account_id, userId: row.user_id, grantId: row.id, clientName: row.client_name } };
   }
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest) {
     if (request.token.startsWith('awbr_')) {
@@ -179,7 +190,7 @@ export class McpOAuthService implements OAuthServerProvider {
   }
   list(user_id: string, account_id: string) {
     if (!user_id || !account_id) return [];
-    return this.grants.createQueryBuilder('g').select(['g.id', 'g.client_name', 'g.expires_at']).where('g.user_id = :user_id AND g.account_id = :account_id AND g.expires_at > :now', { user_id, account_id, now: new Date() }).orderBy('g.created_at', 'DESC').getMany();
+    return this.grants.createQueryBuilder('g').select(['g.id', 'g.client_name', 'g.scope', 'g.expires_at']).where('g.user_id = :user_id AND g.account_id = :account_id AND g.expires_at > :now', { user_id, account_id, now: new Date() }).orderBy('g.created_at', 'DESC').getMany();
   }
   async disconnect(id: string, user_id: string, account_id: string) {
     if (user_id && account_id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) {
