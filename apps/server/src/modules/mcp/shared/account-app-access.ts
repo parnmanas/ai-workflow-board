@@ -2,7 +2,23 @@ import { DataSource, In } from 'typeorm';
 import { Account } from '../../../entities/Account';
 import { User } from '../../../entities/User';
 import { hasPermission, PERMISSIONS as P, type Permission } from '../../../common/types/permissions';
+import { oauthBase } from '../../mcp-oauth/mcp-oauth-clients';
+import { err } from './helpers';
 import type { McpAgentContext } from './session-auth';
+
+const projectAndTicketReads = new Set(['list_projects', 'get_project', 'list_tickets', 'get_ticket']);
+
+export function accountToolScopes(domain: string, name: string): string[] {
+  if (projectAndTicketReads.has(name)) return ['awb.read'];
+  if (domain === 'api-key' && !['list_api_keys', 'get_api_key'].includes(name)) return ['awb.manage', 'awb.keys'];
+  return ['awb.manage'];
+}
+
+export function accountScopeChallenge(scopes: string[]) {
+  const description = scopes.includes('awb.keys') ? 'Approve API key management in AWB.' : 'Select Allow account actions in AWB.';
+  const challenge = `Bearer resource_metadata="${oauthBase()}/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="${description}", scope="${scopes.join(' ')}"`;
+  return { ...err(description), _meta: { 'mcp/www_authenticate': [challenge] } };
+}
 
 /** A grant delegates its owner's current permissions for exactly one account. */
 export async function accountAppOwner(ds: DataSource, caller: McpAgentContext) {
@@ -56,10 +72,6 @@ export async function checkAccountAppTool(
   const permissions = JSON.parse(user.permissions || '[]');
   if (required === undefined || (required && !hasPermission(user.role, permissions, required))) {
     return 'Unauthorized: this account connection lacks permission for this operation' + (required ? ` (${required}).` : '.');
-  }
-  // Independent keys survive OAuth disconnect and need their own explicit consent.
-  if (domain === 'api-key' && !caller.canManageKeys && !['list_api_keys', 'get_api_key'].includes(name)) {
-    return 'Reconnect and allow API key management (awb.keys) to change independent API keys.';
   }
   // Status beacons and approvals are meaningful only from the assigned runtime.
   if (domain === 'agent-status' || name === 'set_typing' || name === 'complete_action_run') return 'Use the assigned native agent session for this operation.';

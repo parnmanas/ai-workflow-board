@@ -25,8 +25,8 @@ export class McpOAuthController {
       const permission = manage
         ? (ko ? '이 앱은 선택한 계정에서 내 AWB 권한으로 데이터를 읽고 변경하거나 삭제하고 작업을 실행할 수 있습니다. 세션 사용 권한이 있으면 호스트의 대화 기록을 읽고 메시지를 보내 에이전트를 실행할 수 있습니다.'
           : 'This app can read, change and delete data and run work in the selected account using your AWB permissions. With session access it can read conversations on your Hosts and send prompts that run your agents.')
-        : ko ? '선택한 계정의 프로젝트와 티켓을 조회할 수 있습니다. 티켓 상세에는 댓글이 포함됩니다.'
-        : 'Allow this app to read projects and tickets in the selected account, including ticket comments.';
+        : ko ? '이 앱은 프로젝트와 티켓 조회만 요청했습니다. 티켓 상세에는 댓글이 포함됩니다. 호스트 세션을 사용하려면 앱의 도구 목록을 새로 고친 뒤 세션 도구를 선택해 작업 권한을 요청하세요.'
+        : 'This app requested project and ticket reads, including ticket comments. To use Host sessions, refresh the tool list in the app and invoke a session tool to request access.';
       const allow = manage ? (ko ? '작업 권한 허용' : 'Allow account actions') : (ko ? '조회 허용' : 'Allow read access');
       const readOnly = manage && flow.scope.split(' ').includes('awb.read')
         ? `<button name="decision" value="read">${ko ? '프로젝트·티켓 조회만 허용' : 'Allow project and ticket reads only'}</button> ` : '';

@@ -15,7 +15,7 @@
   "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.": "コネクターを追加して Connect を選び、Google でログインして AWB でアカウント操作を許可します。",
   "Claude connector guide": "Claude コネクタガイド",
   "Try the connection": "接続を確認",
-  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.": "AWB を選び「実行中のセッションを一覧にして、選んだセッションに進捗を聞き、回答を読んで」と依頼します。読み取り専用のアプリは再接続して操作を許可してください。",
+  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” If you see only four tools, refresh the tool list. When AWB prompts you, select Allow account actions.": "AWB を選び「実行中のセッションを一覧にして、選んだセッションに進捗を聞き、回答を読んで」と依頼します。ツールが4つだけ表示される場合は、アプリでツール一覧を更新してください。AWB の同意画面が開いたら、アカウント操作を許可してください。",
   "Read-only connection": "読み取り専用接続",
   "Account actions": "アカウント操作",
   "Connected apps": "接続中のアプリ",

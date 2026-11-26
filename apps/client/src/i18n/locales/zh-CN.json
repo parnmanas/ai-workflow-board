@@ -15,7 +15,7 @@
   "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.": "添加连接器，选择 Connect，通过 Google 登录，并在 AWB 中允许账户操作。",
   "Claude connector guide": "Claude 连接器指南",
   "Try the connection": "验证连接",
-  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.": "选择 AWB 并询问“列出正在运行的会话，向我选择的会话询问进度并读取回复”。只读应用需重新连接才能授权账户操作。",
+  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” If you see only four tools, refresh the tool list. When AWB prompts you, select Allow account actions.": "选择 AWB 并询问“列出正在运行的会话，向我选择的会话询问进度并读取回复”。如果只显示四个工具，请在应用中刷新工具列表。当 AWB 显示授权页面时，选择允许账户操作。",
   "Read-only connection": "只读连接",
   "Account actions": "账户操作",
   "Connected apps": "已连接的应用",

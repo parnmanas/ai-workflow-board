@@ -254,7 +254,7 @@ For a client accepting Claude-style `mcpServers` JSON:
 
 Use your deployed HTTPS URL remotely. Configuration format and file location depend on the client. A direct MCP connection provides tools; it does not by itself make that client a Runtime Host receiving the execution queue.
 
-Discover available tools through MCP `tools/list`. The `awb.manage` grant exposes the full MCP catalog subject to account permissions and tool identity requirements. Use `list_sessions`, `send_session_message` and `get_session_messages` to converse with a Host session. Existing `awb.read` grants retain their four project and ticket reads until you reconnect and approve account actions. [Tool registration](apps/server/src/modules/mcp/tools/index.ts)
+Account apps discover the full MCP catalog through `tools/list`. Each tool declares its OAuth scopes. An `awb.read` grant can execute four project and ticket reads. Invoking a session tool requests consent for `awb.manage`, and AWB checks the owner's permissions before execution. Use `list_sessions`, `send_session_message` and `get_session_messages` to converse with a Host session. [Tool registration](apps/server/src/modules/mcp/tools/index.ts)
 
 For development, `npm run mcp` starts standalone stdio and `npm run mcp:http` starts separate HTTP on **7702** by default. Prefer integrated `/mcp` when the web server is running. With SQLite, do not run separate server processes against the same file; give standalone processes their own absolute `SQLJS_DB_PATH` and `SQLJS_ONTOLOGY_DB_PATH`, or use PostgreSQL.
 

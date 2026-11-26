@@ -145,8 +145,20 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   await mcp.connect(transport);
   t.after(() => mcp.close());
   const { tools } = await mcp.listTools();
-  assert.deepEqual(tools.map(item => item.name).sort(), ['get_project', 'get_ticket', 'list_projects', 'list_tickets']);
-  assert.ok(tools.every(item => item.annotations?.readOnlyHint === true));
+  assert.ok(tools.every(tool => tool._meta?.securitySchemes?.length));
+  const reads = tools.filter(tool => tool._meta.securitySchemes.some(scheme => scheme.scopes.includes('awb.read')));
+  assert.deepEqual(reads.map(tool => tool.name).sort(), ['get_project', 'get_ticket', 'list_projects', 'list_tickets']);
+  assert.ok(reads.every(tool => tool.annotations?.readOnlyHint === true));
+  const sessionTool = tools.find(tool => tool.name === 'send_session_message');
+  assert.deepEqual(sessionTool._meta.securitySchemes, [{ type: 'oauth2', scopes: ['awb.manage'] }]);
+  const deniedSend = await mcp.callTool({ name: 'send_session_message', arguments: { session_id: 'example', content: 'Hello' } });
+  assert.equal(deniedSend.isError, true);
+  const upgrade = deniedSend._meta['mcp/www_authenticate'][0];
+  assert.ok(upgrade.includes(`resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp"`));
+  assert.ok(upgrade.includes('error="insufficient_scope"') && upgrade.includes('scope="awb.manage"') && upgrade.includes('error_description='));
+  const deniedCreate = await mcp.callTool({ name: 'create_ticket', arguments: { title: 'Blocked before consent' } });
+  assert.equal(deniedCreate.isError, true);
+  assert.equal(await app.get(getDataSourceToken()).getRepository('Ticket').countBy({ title: 'Blocked before consent' }), 0);
   assert.ok((await mcp.callTool({ name: 'list_projects', arguments: {} })).content[0].text.includes(project.name));
   assert.ok((await mcp.callTool({ name: 'get_ticket', arguments: { ticket_id: ticket.id } })).content[0].text.includes(ticket.title));
   assert.equal((await mcp.callTool({ name: 'get_ticket', arguments: { ticket_id: privateTicket.id } })).isError, true);
@@ -162,7 +174,7 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   assert.notEqual(rotated.refresh_token, access.refresh_token);
   assert.equal((await sessionRequest(bearer)).status, 401);
   bearer = rotated.access_token;
-  assert.equal((await mcp.listTools()).tools.length, 4);
+  assert.deepEqual((await mcp.listTools()).tools, tools);
   assert.equal((await refresh(access.refresh_token)).status, 400);
   assert.equal((await sessionRequest(bearer)).status, 401);
   const simultaneous = await grant();
@@ -194,6 +206,7 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   await appClient.connect(managedTransport);
   t.after(() => appClient.close());
   const fullTools = (await appClient.listTools()).tools;
+  assert.deepEqual(fullTools, tools, 'a scan using a read grant discovers the same actions as a scan after consent');
   const names = fullTools.map(t => t.name);
   for (const name of ['create_ticket', 'move_ticket', 'add_comment', 'list_sessions', 'open_session', 'send_session_message', 'get_session_messages', 'get_business_cashbook', 'get_action']) {
     assert.ok(names.includes(name), name);
@@ -244,6 +257,11 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   const visibleTickets = (await call('list_tickets')).content[0].text;
   assert.ok(visibleTickets.includes(ticket.id));
   assert.ok(!visibleTickets.includes(privateTicket.id));
+  await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['admin.api_keys']) });
+  assert.deepEqual(tools.find(tool => tool.name === 'create_api_key')._meta.securitySchemes[0].scopes, ['awb.manage', 'awb.keys']);
+  const deniedKey = await call('create_api_key', { name: 'not-issued' });
+  assert.equal(deniedKey.isError, true);
+  assert.match(deniedKey._meta['mcp/www_authenticate'][0], /scope="awb.manage awb.keys"/);
   const narrowed = await token({ grant_type: 'refresh_token', refresh_token: manage.refresh_token, scope: 'awb.read offline_access' });
   assert.equal(narrowed.status, 200);
   const reduced = await narrowed.json();
@@ -251,7 +269,6 @@ test('Google connector discovery, account consent, scoped MCP tools, refresh and
   const reused = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
     authorization: 'Bearer ' + reduced.access_token, 'mcp-session-id': managedTransport.sessionId }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) });
   assert.equal(reused.status, 404, 'a narrowed grant cannot reuse its full tool session');
-  await ds.getRepository('User').update(alice.id, { permissions: JSON.stringify(['admin.api_keys']) });
   assert.equal((await grant(client, redirectUri, 'awb.manage awb.keys')).scope, 'awb.manage', 'key issuance requires separate opt-in');
   const keyGrant = await grant(client, redirectUri, 'awb.manage awb.keys', 'allow', true);
   assert.equal(keyGrant.scope, 'awb.manage awb.keys');

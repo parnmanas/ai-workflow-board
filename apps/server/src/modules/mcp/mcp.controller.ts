@@ -499,8 +499,10 @@ export class McpController implements OnModuleInit, OnModuleDestroy {
       // resolves to 'full', so this can only ever narrow the tool surface,
       // never widen it — see shared/tool-profiles.ts's security note.
       const toolProfileRaw = String(req.headers['x-awb-tool-profile'] || '').toLowerCase().trim();
+      // Apps snapshot tool definitions. Advertise their required OAuth scopes even
+      // on a read-only grant so the client can request consent for another tool.
       const toolProfile: ToolProfile = mcpAuthInfo.source === 'oauth'
-        ? (mcpAuthInfo.scope === 'full' ? 'full' : 'account-read')
+        ? 'account-app'
         : (toolProfileRaw === 'compact' ? 'compact' : 'full');
 
       // New session (initialization request — no session ID)

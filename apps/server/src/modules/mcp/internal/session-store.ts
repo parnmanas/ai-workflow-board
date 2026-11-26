@@ -24,6 +24,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import type { ToolProfile } from '../shared/tool-profiles';
 
 export interface McpAgentContext {
   agentId?: string;
@@ -67,7 +68,7 @@ export interface McpAgentContext {
   // Undefined/'full' = unchanged behavior (every pre-existing client).
   // Stamped once at session init and never changes for the session's
   // lifetime — see shared/tool-profiles.ts for what 'compact' does.
-  toolProfile?: 'full' | 'compact' | 'account-read';
+  toolProfile?: ToolProfile;
 }
 
 interface SessionEntry {

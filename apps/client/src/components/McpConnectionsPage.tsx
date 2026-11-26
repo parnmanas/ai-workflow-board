@@ -72,7 +72,7 @@ function AccountConnections({ accountId }: { accountId: string }) {
     </div>
     <section>
       <h2>{t('Try the connection')}</h2>
-      <p>{t('Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.')}</p>
+      <p>{t('Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” If you see only four tools, refresh the tool list. When AWB prompts you, select Allow account actions.')}</p>
     </section>
     <section>
       <h2>{t('Connected apps')}</h2>

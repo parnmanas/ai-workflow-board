@@ -80,13 +80,13 @@
  *
  */
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { DataSource } from 'typeorm';
 import { err } from './helpers';
 import { getCallerAgent, type McpAgentContext } from './session-auth';
 import { requireFullScopeCaller } from './authz';
 import { checkToolOwnership } from './tool-ownership';
-import { checkAccountAppTool } from './account-app-access';
+import { accountScopeChallenge, accountToolScopes, checkAccountAppTool } from './account-app-access';
 
 export type AuthzTier = 'full' | 'caller';
 
@@ -509,7 +509,7 @@ type ToolMethod = McpServer['tool'];
  * per MCP session (see internal/create-mcp-server.ts), so there is never a
  * shared instance to double-wrap or leak state across sessions.
  */
-export function installToolAuthzGate(server: McpServer, dataSource: DataSource, domain = ''): void {
+export function installToolAuthzGate(server: McpServer, dataSource: DataSource, domain = '', appCatalog = false): void {
   const originalTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
 
   (server as unknown as { tool: ToolMethod }).tool = ((...args: unknown[]) => {
@@ -522,15 +522,22 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource, 
       return originalTool(...args);
     }
     const acceptsAccountId = args.some(arg => arg !== null && typeof arg === 'object' && 'account_id' in arg);
+    const scopes = accountToolScopes(domain, name);
+    const projectOrTicketRead = scopes[0] === 'awb.read';
 
     const gatedHandler = async (...handlerArgs: unknown[]) => {
       const extra = (handlerArgs[handlerArgs.length - 1] || {}) as { sessionId?: string };
       const caller = getCallerAgent(extra);
       const input = handlerArgs.length > 1 ? handlerArgs[0] as Record<string, any> : {};
+      if (appCatalog && caller?.source !== 'oauth') return err('An authenticated AWB app connection is required.');
+      if (caller?.source === 'oauth' && caller.scope !== 'full' && !projectOrTicketRead) {
+        return accountScopeChallenge(scopes);
+      }
       const accountApp = caller?.source === 'oauth' && caller.scope === 'full';
       if (accountApp) {
         const denied = await checkAccountAppTool(dataSource, caller, domain, name, input || {}, acceptsAccountId);
         if (denied) return err(denied);
+        if (scopes.includes('awb.keys') && !caller.canManageKeys) return accountScopeChallenge(scopes);
       }
       // Session and business handlers also authenticate delegated owners. Other
       // full-tier handlers retain their native Host identity requirements.
@@ -543,6 +550,15 @@ export function installToolAuthzGate(server: McpServer, dataSource: DataSource, 
     };
 
     const nextArgs = args.slice(0, lastIndex).concat([gatedHandler]);
-    return originalTool(...nextArgs);
+    const tool = originalTool(...nextArgs) as RegisteredTool;
+    if (appCatalog) {
+      const securitySchemes = [{ type: 'oauth2', scopes }];
+      if (projectOrTicketRead) {
+        securitySchemes.push({ type: 'oauth2', scopes: ['awb.manage'] });
+        tool.annotations = { ...tool.annotations, readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+      }
+      tool._meta = { ...tool._meta, securitySchemes };
+    }
+    return tool;
   }) as ToolMethod;
 }

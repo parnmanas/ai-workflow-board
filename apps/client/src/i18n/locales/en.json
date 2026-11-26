@@ -15,7 +15,7 @@
   "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.": "Add the connector, select Connect, and sign in with Google. Select Allow account actions in AWB.",
   "Claude connector guide": "Claude connector guide",
   "Try the connection": "Try the connection",
-  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.": "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” Reconnect a read-only app to approve account actions.",
+  "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” If you see only four tools, refresh the tool list. When AWB prompts you, select Allow account actions.": "Select AWB and ask “List my running sessions, ask the selected session for progress and read its reply.” If you see only four tools, refresh the tool list. When AWB prompts you, select Allow account actions.",
   "Read-only connection": "Read-only connection",
   "Account actions": "Account actions",
   "Connected apps": "Connected apps",
