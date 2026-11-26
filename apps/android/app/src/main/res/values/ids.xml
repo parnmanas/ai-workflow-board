@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <item name="custom_web" type="id" />
-    <item name="page_browser_reopen" type="id" />
 </resources>

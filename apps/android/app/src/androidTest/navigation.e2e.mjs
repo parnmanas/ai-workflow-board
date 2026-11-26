@@ -213,6 +213,13 @@ async function addPage(url, name, useBrowser = false) {
   await byId('primary_button', true);
 }
 
+const closeBrowserTab = () => click('resource-id', 'com.android.chrome:id/close_button');
+
+async function expectSelection(title) {
+  await until(async () => (await nodes()).some(node =>
+    node['resource-id'] === `${app}:id/navigation_title` && node.text === title), `selected ${title}`);
+}
+
 let first, second;
 try {
   first = await fixture('Server-A');
@@ -250,17 +257,15 @@ try {
   assert.match(await adb('shell', 'dumpsys', 'activity', 'activities'),
     /(?:mResumedActivity:|topResumedActivity=).*com\.android\.chrome.*CustomTabActivity/);
   await screenshot('phone-browser-signed-in');
-  await click('resource-id', 'com.android.chrome:id/close_button');
-  await until(async () => (await nodes()).some(node => node['resource-id'] === `${app}:id/page_browser_reopen`), 'return to AWB');
-  await pause(500);
-  assert.equal(signedIn().length, 1, 'returning to AWB must not reopen the tab');
-  await byId('navigation_more');
-  await byText('등록한 URL로 이동');
+  await closeBrowserTab();
+  await expectSelection('AWB');
+  assert.ok((await nodes()).some(node => node['resource-id'] === `${app}:id/server_list`), 'no selection returns to the switcher');
+  assert.equal(signedIn().length, 1);
+  await byText('Browser-login', true);
   await until(() => signedIn().length === 2, 'saved page reuses browser site session');
-  await click('resource-id', 'com.android.chrome:id/close_button');
-  await until(async () => (await nodes()).some(node => node['resource-id'] === `${app}:id/page_browser_reopen`), 'return after reopen');
-  assert.equal(signedIn().length, 2, 'home action must launch exactly one tab');
-  await byId('navigation_more');
+  await closeBrowserTab();
+  await expectSelection('AWB');
+  await click('content-desc', '웹 페이지 관리: Browser-login', true);
   await byText('웹 페이지 수정');
   assert.equal((await nodes()).find(node => node['resource-id'] === `${app}:id/page_use_browser`)?.checked, 'true');
   await byId('page_use_browser', true);
@@ -268,7 +273,14 @@ try {
   const embeddedLogin = await pageAt(`http://localhost:${first.port}/browser/authorize#/overview`);
   assert.equal(await embeddedLogin.evaluate('document.body.textContent'), 'Sign in required', 'Chrome cookies stay in Chrome');
   assert.equal(await embeddedLogin.evaluate('typeof window.AwbAndroid'), 'undefined');
-  console.log('PASS Chrome cookie reuse, cross-origin OAuth state/callback, close/reopen, saved browser preference and WebView isolation');
+  await byId('navigation_more');
+  await byText('웹 페이지 수정');
+  await byId('page_use_browser', true);
+  await byId('primary_button', true);
+  await until(() => signedIn().length === 3, 'changed embedded page opens in Chrome');
+  await closeBrowserTab();
+  await expectSelection('AWB');
+  console.log('PASS browser shortcut with no server, saved mode changes and isolated Chrome sign-in');
 
   // A dashboard can be used before any AWB server has been configured.
   const dashboardUrl = `${first.url}/dash/?org=2&var=a+b#/overview`;
@@ -292,6 +304,13 @@ try {
   assert.equal(await a.evaluate('localStorage.getItem("test-user")'), 'Server-A');
   await a.evaluate('document.querySelector("#note").value="retained draft"');
   await byId('navigation_button');
+  await byText('Browser-login', true);
+  await closeBrowserTab();
+  await expectSelection('Server-A');
+  assert.equal(await a.evaluate('document.visibilityState'), 'visible');
+  assert.equal(await a.evaluate('location.pathname + location.search + location.hash'), '/sessions/test?view=one#latest');
+  assert.equal(await a.evaluate('document.querySelector("#note").value'), 'retained draft');
+  await byId('navigation_button');
   await byText('Dashboard', true);
   dashboard = await pageAt(dashboardUrl);
   assert.equal(await a.evaluate('document.visibilityState'), 'hidden', 'AWB voice must yield while a dashboard is visible');
@@ -309,14 +328,24 @@ try {
   await fill('server_input', `${second.url}/reports/#/week`);
   await fill('name_input', 'Weekly');
   await byId('primary_button', true);
-  await pageAt(`${second.url}/reports/#/week`);
+  const weekly = await pageAt(`${second.url}/reports/#/week`);
+  await weekly.evaluate('document.querySelector("#note").value="weekly draft"');
+  await adb('shell', 'wm', 'size', '768x1024');
+  await click('content-desc', 'Browser-login');
+  await closeBrowserTab();
+  await expectSelection('Weekly');
+  assert.equal(await weekly.evaluate('document.visibilityState'), 'visible');
+  assert.equal(await weekly.evaluate('document.querySelector("#note").value'), 'weekly draft');
+  assert.ok((await nodes()).some(node => node['content-desc'] === 'Weekly · 현재' && node.selected === 'true'));
+  const beforeRestart = signedIn().length;
   await adb('shell', 'am', 'force-stop', app);
   await adb('shell', 'am', 'start', '-n', `${app}/.MainActivity`);
   await pause(1000);
   await connectDebug();
   await pageAt(`${second.url}/reports/#/week`);
-  assert.ok((await nodes()).some(node => node.text === 'Weekly'));
-  console.log('PASS edited name/URL and active page survive process restart');
+  await expectSelection('Weekly');
+  assert.equal(signedIn().length, beforeRestart, 'restarting AWB must not open the browser shortcut');
+  console.log('PASS Chrome shortcuts preserve the AWB and embedded page selections, drafts and last destination');
 
   // Phone, tablet and landscape: tap real controls, not only checking overflow.
   for (const [name, size, wide] of [['phone', '320x568', false], ['tablet', '768x1024', true], ['landscape', '667x375', true]]) {
@@ -350,6 +379,22 @@ try {
   assert.equal((await native(b, 'session.get')).result.token, 'session-Server-B');
   assert.ok(!requests.some(request => request.auth && request.auth !== `Bearer session-${request.server}`));
   console.log('PASS offline recovery, deletion/cancel and server auth survives page removal; no cross-server authorization');
+
+  // Version 2.2.0+15 could persist a Chrome bookmark as the active destination.
+  await adb('shell', 'am', 'force-stop', app);
+  const legacy = { id: 'legacy-browser', name: 'Legacy', url: first.url + '/legacy-shortcut', useBrowser: true };
+  const seed = exec(adbPath, ['-s', serial, 'shell', '-T', 'run-as', app, 'tee', 'shared_prefs/awb_web_pages.xml']);
+  seed.child.stdin.end(`<map><string name="pages">${JSON.stringify([legacy])}</string><string name="selected">${legacy.id}</string></map>`);
+  await seed;
+  await adb('shell', 'am', 'start', '-n', `${app}/.MainActivity`);
+  await expectSelection('Server-B');
+  assert.ok(!requests.some(request => request.path === '/legacy-shortcut'));
+  await byId('navigation_button');
+  await byText('Legacy', true);
+  await until(() => requests.some(request => request.path === '/legacy-shortcut'), 'legacy bookmark still opens on tap');
+  await closeBrowserTab();
+  await expectSelection('Server-B');
+  console.log('PASS upgrade restores the active server and keeps its old Chrome bookmark available');
 } finally {
   await adb('shell', 'am', 'clear-debug-app').catch(() => {});
   await adb('shell', 'rm', '-f', '/data/local/tmp/chrome-command-line').catch(() => {});

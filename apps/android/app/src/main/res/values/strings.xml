@@ -26,8 +26,6 @@
     <string name="page_message">이름과 URL을 저장하면 앱 안에서 바로 열 수 있습니다.</string>
     <string name="page_use_browser">Chrome 로그인 사용</string>
     <string name="page_browser_hint">Chrome의 로그인 상태로 엽니다. Chrome이 없으면 다른 브라우저를 사용합니다. 끄면 앱 내부에서 열며 별도 로그인이 필요할 수 있습니다.</string>
-    <string name="page_browser_description">브라우저의 로그인 상태를 사용해 이 페이지를 엽니다. 브라우저 탭을 닫으면 AWB로 돌아옵니다.</string>
-    <string name="page_browser_reopen">페이지 다시 열기</string>
     <string name="page_browser_missing">사용할 브라우저가 없습니다. Chrome을 설치하거나 웹 페이지 수정에서 Chrome 로그인 사용을 꺼 주세요.</string>
     <string name="page_url_hint">https://dashboard.example.com/view</string>
     <string name="page_name_hint">이름 (선택) — 예: 운영 대시보드</string>

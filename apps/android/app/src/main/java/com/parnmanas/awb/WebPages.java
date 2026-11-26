@@ -23,7 +23,14 @@ public final class WebPages {
   }
 
   public static WebPage selected(Context context) {
-    return get(context, prefs(context).getString("selected", ""));
+    SharedPreferences p = prefs(context);
+    String id = p.getString("selected", "");
+    if (id.isEmpty()) return null;
+    WebPage page = get(context, id);
+    if (page != null && !page.useBrowser) return page;
+    // Earlier versions saved browser shortcuts as the last in-app destination.
+    p.edit().remove("selected").apply();
+    return null;
   }
 
   public static void select(Context context, String id) {

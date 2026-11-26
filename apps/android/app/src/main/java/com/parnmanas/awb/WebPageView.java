@@ -6,7 +6,6 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.view.Gravity;
-import android.view.View;
 import android.webkit.PermissionRequest;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
@@ -20,7 +19,6 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.function.Consumer;
 
@@ -30,9 +28,6 @@ final class WebPageView extends FrameLayout {
   private final ProgressBar progress;
   private final LinearLayout error;
   private final TextView reason;
-  private final ScrollView browserPage;
-  private final TextView browserTitle;
-  private final Consumer<Uri> external;
   private WebPage page;
   private boolean clearHistory;
   private String location = "";
@@ -41,7 +36,6 @@ final class WebPageView extends FrameLayout {
   @SuppressLint("SetJavaScriptEnabled")
   WebPageView(Context context, Consumer<Uri> external, Consumer<String> onLocation) {
     super(context);
-    this.external = external;
     web = new WebView(context);
     web.setId(R.id.custom_web);
     WebSettings settings = web.getSettings();
@@ -76,30 +70,6 @@ final class WebPageView extends FrameLayout {
     error.addView(browser);
     error.setVisibility(GONE);
     addView(error, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-    browserPage = new ScrollView(context);
-    browserPage.setFillViewport(true);
-    LinearLayout browserContent = new LinearLayout(context);
-    browserContent.setOrientation(LinearLayout.VERTICAL);
-    browserContent.setGravity(Gravity.CENTER);
-    browserContent.setPadding(dp(24), dp(24), dp(24), dp(24));
-    browserTitle = new TextView(context);
-    browserTitle.setTextColor(context.getColor(R.color.text_primary));
-    browserTitle.setGravity(Gravity.CENTER);
-    browserContent.addView(browserTitle);
-    TextView description = new TextView(context);
-    description.setText(R.string.page_browser_description);
-    description.setTextColor(context.getColor(R.color.text_secondary));
-    description.setGravity(Gravity.CENTER);
-    description.setPadding(0, dp(16), 0, dp(16));
-    browserContent.addView(description);
-    Button reopen = new Button(context);
-    reopen.setId(R.id.page_browser_reopen);
-    reopen.setText(R.string.page_browser_reopen);
-    reopen.setOnClickListener(v -> home());
-    browserContent.addView(reopen);
-    browserPage.addView(browserContent, new ScrollView.LayoutParams(-1, -2));
-    browserPage.setVisibility(GONE);
-    addView(browserPage, new LayoutParams(-1, -1));
     web.setWebChromeClient(new WebChromeClient() {
       @Override public void onPermissionRequest(PermissionRequest request) { request.deny(); }
     });
@@ -110,7 +80,6 @@ final class WebPageView extends FrameLayout {
       }
 
       @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
-        if (usesBrowser()) return;
         location = url;
         onLocation.accept(url);
         // Chromium can report the HTTP error before announcing that navigation has started.
@@ -119,13 +88,11 @@ final class WebPageView extends FrameLayout {
       }
 
       @Override public void doUpdateVisitedHistory(WebView view, String url, boolean reload) {
-        if (usesBrowser()) return;
         location = url;
         onLocation.accept(url);
       }
 
       @Override public void onPageFinished(WebView view, String url) {
-        if (usesBrowser()) return;
         if (!url.equals(view.getUrl())) return;
         progress.setVisibility(GONE);
         if (clearHistory) {
@@ -154,24 +121,12 @@ final class WebPageView extends FrameLayout {
     });
   }
 
-  void show(WebPage target) {
-    boolean changed = page == null || !page.id.equals(target.id) || !page.url.equals(target.url)
-        || page.useBrowser != target.useBrowser;
+  void show(WebPage target, boolean goHome) {
+    boolean changed = page == null || !page.id.equals(target.id) || !page.url.equals(target.url);
     page = target;
-    browserPage.setVisibility(target.useBrowser ? VISIBLE : GONE);
-    web.setVisibility(target.useBrowser ? GONE : VISIBLE);
-    if (target.useBrowser) {
+    if (changed || goHome) {
       web.stopLoading();
-      web.onPause();
-      location = target.url;
-      clearFailure();
-      progress.setVisibility(GONE);
-      browserTitle.setText(target.label() + "\n\n" + target.url);
-      return;
-    }
-    if (changed) {
-      web.stopLoading();
-      clearHistory = true;
+      if (changed) clearHistory = true;
       location = target.url;
       clearFailure();
       web.loadUrl(target.url);
@@ -179,26 +134,17 @@ final class WebPageView extends FrameLayout {
   }
 
   String location() { return location; }
-  private boolean usesBrowser() { return page != null && page.useBrowser; }
   void reload() {
-    if (usesBrowser()) { home(); return; }
     clearFailure();
     if (!location.isEmpty()) web.loadUrl(location);
   }
-  void home() {
-    if (page == null) return;
-    // Start at the saved site, never export a WebView's in-flight OAuth URL/state to Chrome.
-    if (usesBrowser()) external.accept(Uri.parse(page.url));
-    else { clearFailure(); web.loadUrl(page.url); }
-  }
   boolean goBack() {
-    if (usesBrowser()) return false;
     if (clearHistory || !web.canGoBack()) return false;
     clearFailure();
     web.goBack();
     return true;
   }
-  void resume() { if (!usesBrowser()) web.onResume(); }
+  void resume() { web.onResume(); }
   void pause() { web.onPause(); }
   void destroy() { web.destroy(); }
 
@@ -208,7 +154,6 @@ final class WebPageView extends FrameLayout {
   }
 
   private void failed(String url, String message) {
-    if (usesBrowser()) return;
     failedUrl = url;
     progress.setVisibility(GONE);
     reason.setText(getContext().getString(R.string.page_offline) + "\n\n" + message);

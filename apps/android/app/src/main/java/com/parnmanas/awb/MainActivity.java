@@ -196,8 +196,7 @@ public class MainActivity extends Activity {
     if (!handleIntent(getIntent())) {
       WebPage selected = WebPages.selected(this);
       Server active = Servers.active(this);
-      // Restoring the activity underneath a browser tab must not launch a duplicate tab.
-      if (selected != null) showWebPage(selected.id, savedInstanceState == null);
+      if (selected != null) showEmbeddedPage(selected, false);
       else if (active != null) loadApp(Servers.lastPath(this, active.id));
       else showServers();
     }
@@ -699,7 +698,7 @@ public class MainActivity extends Activity {
       row.findViewById(R.id.server_badge).setVisibility(current ? View.VISIBLE : View.GONE);
       row.findViewById(R.id.server_more).setContentDescription(getString(R.string.page_manage) + ": " + page.label());
       row.findViewById(R.id.server_more).setOnClickListener(v -> showPageActions(page.id));
-      row.setOnClickListener(v -> showWebPage(page.id));
+      row.setOnClickListener(v -> openWebPage(page));
       row.setOnLongClickListener(v -> { showPageActions(page.id); return true; });
       serverList.addView(row);
     }
@@ -761,7 +760,7 @@ public class MainActivity extends Activity {
     addRailItem("+", getString(R.string.add_server), false, this::showAddServer, null);
     addSection(navigationItems, "WEB");
     for (WebPage item : WebPages.list(this)) {
-      addRailItem(item.label(), item.id.equals(selectedPageId), () -> showWebPage(item.id), () -> showPageActions(item.id));
+      addRailItem(item.label(), item.id.equals(selectedPageId), () -> openWebPage(item), () -> showPageActions(item.id));
     }
     addRailItem("+", getString(R.string.add_web_page), false, () -> showPageEditor(null), null);
   }
@@ -796,15 +795,19 @@ public class MainActivity extends Activity {
     navigationItems.addView(item, params);
   }
 
-  private void showWebPage(String id) {
-    showWebPage(id, true);
+  private void openWebPage(WebPage page) {
+    if (page.useBrowser) openPageInBrowser(page);
+    else showEmbeddedPage(page, false);
   }
 
-  private void showWebPage(String id, boolean launchBrowser) {
-    WebPage page = WebPages.get(this, id);
-    if (page == null) { showServers(); return; }
-    selectedPageId = id;
-    WebPages.select(this, id);
+  private void openPageInBrowser(WebPage page) {
+    if (panelMode == Panel.SERVERS) closePanel();
+    WebPageBrowser.open(this, Uri.parse(page.url));
+  }
+
+  private void showEmbeddedPage(WebPage page, boolean goHome) {
+    selectedPageId = page.id;
+    WebPages.select(this, page.id);
     revealOnLoad = false;
     if (customPage == null) {
       customPage = new WebPageView(this, uri -> WebPageBrowser.open(this, uri), location -> {
@@ -812,12 +815,11 @@ public class MainActivity extends Activity {
       });
       customContainer.addView(customPage, new FrameLayout.LayoutParams(-1, -1));
     }
-    customPage.show(page);
+    customPage.show(page, goHome);
     hidePanel();
     web.setVisibility(View.INVISIBLE);
     customContainer.setVisibility(View.VISIBLE);
     renderNavigation();
-    if (page.useBrowser && launchBrowser) customPage.home();
   }
 
   private void leaveWebPage() {
@@ -827,6 +829,13 @@ public class MainActivity extends Activity {
     if (customPage != null) customPage.pause();
     syncVisibleSurface();
     renderNavigation();
+  }
+
+  private void discardSelectedPage() {
+    leaveWebPage();
+    customContainer.removeAllViews();
+    customPage.destroy();
+    customPage = null;
   }
 
   private void showPageEditor(String id) {
@@ -857,7 +866,13 @@ public class MainActivity extends Activity {
     try {
       WebPage saved = WebPages.save(this, editingPageId, serverInput.getText().toString(), nameInput.getText().toString(),
           pageUseBrowser.isChecked());
-      showWebPage(saved.id);
+      if (saved.useBrowser) {
+        if (saved.id.equals(selectedPageId)) discardSelectedPage();
+        closePanel();
+        WebPageBrowser.open(this, Uri.parse(saved.url));
+      } else {
+        showEmbeddedPage(saved, false);
+      }
     } catch (IllegalArgumentException error) {
       panelMessage.setText(error.getMessage());
     }
@@ -868,12 +883,14 @@ public class MainActivity extends Activity {
     if (page == null) return;
     List<String> labels = new ArrayList<>();
     List<Runnable> actions = new ArrayList<>();
-    labels.add(getString(R.string.page_home));
-    actions.add(() -> { showWebPage(id, false); customPage.home(); });
+    if (!page.useBrowser) {
+      labels.add(getString(R.string.page_home));
+      actions.add(() -> showEmbeddedPage(page, true));
+    }
     labels.add(getString(R.string.edit_page_title));
     actions.add(() -> showPageEditor(id));
     labels.add(getString(R.string.open_browser));
-    actions.add(() -> WebPageBrowser.open(this, Uri.parse(page.url)));
+    actions.add(() -> openPageInBrowser(page));
     labels.add("목록에서 삭제");
     actions.add(() -> new AlertDialog.Builder(this)
         .setTitle(page.label() + " 삭제")
@@ -881,12 +898,7 @@ public class MainActivity extends Activity {
         .setNegativeButton(R.string.cancel, null)
         .setPositiveButton("삭제", (dialog, which) -> {
           WebPages.remove(this, id);
-          if (id.equals(selectedPageId)) {
-            leaveWebPage();
-            customContainer.removeAllViews();
-            customPage.destroy();
-            customPage = null;
-          }
+          if (id.equals(selectedPageId)) discardSelectedPage();
           showServers();
         }).show());
     new AlertDialog.Builder(this).setTitle(page.label())
