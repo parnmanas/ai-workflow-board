@@ -28,6 +28,7 @@ import {
   walkJsonl,
 } from '../../agent-session-history.js';
 import { normalizeSessionUsage, usageEventPayload, type SessionUsage } from '../../session-usage.js';
+import { LOCAL_IMAGE_MAX_BYTES, sniffImageMime } from '../../session-local-image.js';
 import type { CliSessionRecordSettings, CliSessionStoreContext, CliSessionStoreDriver, CliSessionSummary } from '../cli-module.js';
 import { watchCodexAsyncQuestions } from './async-questions.js';
 
@@ -88,6 +89,47 @@ export function codexToolKind(name: string): string {
   return 'other';
 }
 
+function isInputImage(block: unknown): block is { type: 'input_image'; image_url?: string } {
+  return isRecord(block) && block.type === 'input_image';
+}
+
+function codexUserPrompt(recordType: unknown, payload: Record<string, any>) {
+  let content: unknown;
+  if (recordType === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+    content = payload.content;
+  } else if (recordType === 'event_msg' && payload.type === 'user_message') {
+    const urls = Array.isArray(payload.images) ? payload.images : [];
+    content = [payload.message, ...urls.map(image_url => ({ type: 'input_image', image_url }))];
+  } else {
+    return null;
+  }
+  const blocks = Array.isArray(content) ? content : [content];
+  const images = blocks.filter(isInputImage);
+  // A pasted local image can precede its caption. Strip only Codex's tags around an actual image.
+  const visible = images.length ? blocks.filter((block, i) => {
+    if (!isRecord(block) || block.type !== 'input_text' || typeof block.text !== 'string') return true;
+    if (isInputImage(blocks[i + 1]) && (block.text === '<image>' || /^<image name=.+>$/s.test(block.text))) return false;
+    return !(block.text === '</image>' && isInputImage(blocks[i - 1]));
+  }) : blocks;
+  const text = stripDirectWorkPolicy(textOfBlocks(visible));
+  if (!images.length && isSyntheticPrompt(text)) return null;
+  return { text, images, title: text.trim() || `${images.length} image(s)` };
+}
+
+/** Messages and tool results use data URLs. Native image-generation results use bare base64. */
+function codexImageData(value: unknown): { base64: string; mime: string } | null {
+  if (typeof value !== 'string') return null;
+  const header = /^data:(image\/[\w.+-]+);base64,/i.exec(value);
+  const base64 = header ? value.slice(header[0].length) : value;
+  if (!base64 || base64.length > 4 * Math.ceil(LOCAL_IMAGE_MAX_BYTES / 3)) return null;
+  const mime = sniffImageMime(Buffer.from(base64.slice(0, 24), 'base64'));
+  if (!mime || (header && header[1].toLowerCase().replace(/^image\/jpg$/, 'image/jpeg') !== mime)) return null;
+  const remainder = base64.length % 4;
+  if (remainder === 1 || (base64.endsWith('=') && remainder !== 0)) return null;
+  if (Buffer.byteLength(base64, 'base64') > LOCAL_IMAGE_MAX_BYTES || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) return null;
+  return { base64, mime };
+}
+
 interface CodexMeta {
   sessionId: string;
   cwd: string;
@@ -119,12 +161,8 @@ async function codexMeta(path: string, size: number): Promise<CodexMeta | null> 
         git_branch: isRecord(payload.git) ? recordString(payload.git.branch) : undefined,
         client: recordString(payload.originator),
       };
-    } else if (!firstPrompt && rec.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
-      const text = payload.role === 'user' ? stripDirectWorkPolicy(textOfBlocks(payload.content)) : textOfBlocks(payload.content);
-      if (text && !isSyntheticPrompt(text)) firstPrompt = text;
-    } else if (!firstPrompt && rec.type === 'event_msg' && payload.type === 'user_message' && typeof payload.message === 'string') {
-      const text = stripDirectWorkPolicy(payload.message);
-      if (text && !isSyntheticPrompt(text)) firstPrompt = text;
+    } else if (!firstPrompt) {
+      firstPrompt = codexUserPrompt(rec.type, payload)?.title ?? '';
     }
   }
   if (!sessionId) {
@@ -259,6 +297,46 @@ export const codexSessionStore: CliSessionStoreDriver = {
     const push = (type: string, payload: Record<string, unknown>, ts: string | undefined) => {
       events.push({ id: '', seq: 0, turn_id: turnId, type, payload: boundHistoryPayload(payload), created_at: ts || createdAt || new Date().toISOString() });
     };
+    const seenToolImages = new Set<string>();
+    const pushImage = async (value: unknown, from: 'user' | 'agent', ts: string | undefined, toolCallId?: string) => {
+      if (!ctx.storeImage) return false;
+      const image = codexImageData(value);
+      if (!image) return false;
+      const stored = await ctx.storeImage(sessionId, image.base64).catch(() => null);
+      if (!stored) return false;
+      if (toolCallId) {
+        // A generated image can occur in the tool result and the legacy generation-complete event.
+        const key = `${toolCallId}:${stored.ref}`;
+        if (seenToolImages.has(key)) return true;
+        seenToolImages.add(key);
+      }
+      push('image', {
+        image_ref: stored.ref, mime_type: image.mime, size: stored.size, from,
+        ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+      }, ts);
+      return true;
+    };
+    type Prompt = NonNullable<ReturnType<typeof codexUserPrompt>>;
+    let pendingPrompt: { prompt: Prompt; source: string; ts?: string } | null = null;
+    const flushPrompt = async (echo?: Prompt) => {
+      if (!pendingPrompt) return;
+      const { prompt, ts } = pendingPrompt;
+      pendingPrompt = null;
+      turnId = `turn-${++turnCounter}`;
+      seenToolImages.clear();
+      const text = prompt.text.trim() ? prompt.text : echo?.text ?? '';
+      if (!firstPrompt) firstPrompt = text || prompt.title;
+      if (text) push('user_prompt', { text }, ts);
+      const images = prompt.images.length ? prompt.images : echo?.images ?? [];
+      for (const [index, image] of images.entries()) {
+        const restored = await pushImage(image.image_url, 'user', ts);
+        // A canonical file_id can have an inline counterpart in the UI echo.
+        if (!restored && echo && echo.images.length === prompt.images.length) {
+          const fallback = echo.images[index].image_url;
+          if (fallback !== image.image_url) await pushImage(fallback, 'user', ts);
+        }
+      }
+    };
     const latestLimits = new Map<string, SessionUsageLimits>();
     let pendingUsage: SessionUsage | null = null;
     let pendingUsageAt: string | undefined;
@@ -281,20 +359,41 @@ export const codexSessionStore: CliSessionStoreDriver = {
         createdAt = typeof payload.timestamp === 'string' ? payload.timestamp : createdAt;
         continue;
       }
+      const prompt = rec.type === 'response_item' || (Array.isArray(payload.images) && payload.images.length)
+        ? codexUserPrompt(rec.type, payload) : null;
+      if (prompt) {
+        // Older rollouts also contain a UI echo. Pair it with the model input in either order.
+        if (pendingPrompt && pendingPrompt.source !== rec.type) {
+          const echo = rec.type === 'event_msg' ? prompt : pendingPrompt.prompt;
+          if (rec.type === 'response_item') pendingPrompt = { prompt, source: rec.type, ts };
+          await flushPrompt(echo);
+        } else {
+          await flushPrompt();
+          pendingPrompt = { prompt, source: rec.type, ts };
+        }
+        continue;
+      }
+      if (rec.type === 'response_item' || ['task_started', 'task_complete', 'turn_aborted', 'image_generation_end'].includes(payload.type)) {
+        await flushPrompt();
+      }
       if (rec.type === 'response_item') {
         switch (payload.type) {
           case 'message': {
-            const text = payload.role === 'user' ? stripDirectWorkPolicy(textOfBlocks(payload.content)) : textOfBlocks(payload.content);
-            if (!text) break;
-            if (payload.role === 'user') {
-              if (isSyntheticPrompt(text)) break;
-              turnCounter += 1;
-              turnId = `turn-${turnCounter}`;
-              if (!firstPrompt) firstPrompt = text;
-              push('user_prompt', { text }, ts);
-            } else if (payload.role === 'assistant') {
-              push('text', { text }, ts);
+            if (payload.role !== 'assistant') break;
+            const blocks = Array.isArray(payload.content) ? payload.content : [payload.content];
+            let textBlocks: unknown[] = [];
+            const flushText = () => {
+              const text = textOfBlocks(textBlocks);
+              if (text) push('text', { text }, ts);
+              textBlocks = [];
+            };
+            for (const block of blocks) {
+              if (isInputImage(block)) {
+                flushText();
+                await pushImage(block.image_url, 'agent', ts);
+              } else textBlocks.push(block);
             }
+            flushText();
             break;
           }
           case 'reasoning': {
@@ -334,14 +433,21 @@ export const codexSessionStore: CliSessionStoreDriver = {
           }
           case 'function_call_output':
           case 'custom_tool_call_output': {
-            const output = typeof payload.output === 'string' ? truncate(payload.output, TOOL_TEXT_MAX) : payload.output;
+            const toolCallId = typeof payload.call_id === 'string' ? payload.call_id : '';
+            const output = payload.output;
             push('tool_update', {
-              tool_call_id: typeof payload.call_id === 'string' ? payload.call_id : '',
+              tool_call_id: toolCallId,
               status: 'completed',
-              output,
+              output: Array.isArray(output) ? output.filter(block => !isInputImage(block)) : output,
             }, ts);
+            if (Array.isArray(output)) {
+              for (const image of output.filter(isInputImage)) await pushImage(image.image_url, 'agent', ts, toolCallId);
+            }
             break;
           }
+          case 'image_generation_call':
+            await pushImage(payload.result, 'agent', ts, payload.id);
+            break;
           default:
             break;
         }
@@ -352,7 +458,9 @@ export const codexSessionStore: CliSessionStoreDriver = {
         // 턴 종료 때 한 번만 낸다(호출마다 내면 전사가 숫자로 뒤덮인다).
         const usage = codexUsageFromRecord(rec);
         if (usage) { pendingUsage = usage; pendingUsageAt = ts; }
-        if (payload.type === 'task_complete') {
+        if (payload.type === 'image_generation_end') {
+          await pushImage(payload.result, 'agent', ts, payload.call_id);
+        } else if (payload.type === 'task_complete') {
           flushUsage();
           push('turn', { phase: 'finished', stop_reason: 'end_turn' }, ts);
         } else if (payload.type === 'turn_aborted') {
@@ -361,6 +469,7 @@ export const codexSessionStore: CliSessionStoreDriver = {
         }
       }
     }
+    await flushPrompt();
     flushUsage();
     // Keep the latest quota outside the conversation window, even after history trimming.
     for (const limits of latestLimits.values()) {

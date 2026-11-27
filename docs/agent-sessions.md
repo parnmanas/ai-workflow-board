@@ -645,8 +645,9 @@ tool 결과 이미지(PNG 를 Read 한 경우)도 같은 모양으로 변환된�
   PNG 를 Read 한 경우가 이것이다. 예전에는 `rawOutput` 만 읽어 이미지가 사라지고 옆의 모델용 주석
   (`[Image: original 3437x674, displayed at 2000x392 …]`)만 보였다. 이미지는 그 tool 카드 **바로 뒤**에
   그리고(`tool_call_id` 를 싣는다), `rawOutput` 의 base64 는 걷어내 출력이 상한에 걸리지 않게 한다.
-- **기록** — 세션을 다시 열면 전사는 CLI 홈의 기록 파일에서 다시 만들어진다. claude 파서가 tool_result·
-  사용자 메시지의 이미지 블록을 store 컨텍스트의 `storeImage` 통로(런너가 건다)로 보관하고 참조만 낸다.
+- **기록** — 세션을 다시 열면 매니저가 CLI 홈에 남은 이미지 바이트를 읽어 같은 세션의 이미지 참조를 복원한다.
+  Claude는 사용자 메시지와 `tool_result`의 이미지 블록을 읽는다. Codex는 메시지와 도구 결과의
+  `input_image`, 이미지 생성 결과를 읽고, 같은 그림이 도구 결과와 생성 완료 기록 양쪽에 있으면 한 번만 표시한다.
 
 참조는 **내용 주소**(base64 의 sha256 앞 32자)다 — 라이브로 받은 것과 기록에서 다시 읽은 것이 같은
 참조가 되어 두 번 저장하지 않고, 같은 tool 결과가 업데이트로 다시 와도 한 번만 그린다.
@@ -818,9 +819,9 @@ opencode 가 `promptCapabilities.image` 를 광고하는(1.18.34 실측) 네이�
    검증은 서비스에서 유지하며, 다른 API의 본문 상한은 그대로다. 회귀: `test/agent-sessions.test.mjs`.
 3. 매니저(`#runPrompt`)가 `[{text}, {type:'image', data, mimeType}…]` 로 `session/prompt` 를
    부른다. 깨진 1장은 턴을 죽이지 않고 `prompt_image_skipped` 로 알린다.
-4. 보낸 그림은 에코로 전사에 남는다 — 받은 이미지와 같은 `image` 이벤트라 다시열기·이미지 RPC 가
-   그대로 동작한다. 다시열기는 opencode `file` 파트(data URL·`file://`·상대경로, 매직 바이트
-   확인)에서 같은 그림을 복원한다.
+4. Codex 세션을 다시 열면 첨부한 그림은 원래 사용자 턴에 표시된다. 그림만 보낸 경우도 포함한다.
+   매니저는 Codex 기록의 내장 이미지와 구버전 `user_message.images`를 읽고 중복 기록을 합친다.
+   OpenCode는 `file` 파트(data URL·`file://`·상대경로)에서 그림을 복원한다.
 
 ## 토큰 사용량 (`usage` 이벤트)
 

@@ -291,6 +291,108 @@ test('a long codex session returns only the newest events, numbered by absolute 
 // `image` 이벤트로 낸다 — 바이트를 payload 에 실으면 상한에 걸리고 창 안에 blob 이 남는다.
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
 
+async function seedCodexImages(home, records) {
+  const path = join(home.codexHome, 'sessions', '2026', '09', '17', `rollout-2026-09-17T10-00-00-${CODEX_ID}.jsonl`);
+  await writeFile(path, jsonl([
+    { type: 'session_meta', payload: { id: CODEX_ID, cwd: '/tmp/work/codex' } },
+    ...records.map((record, index) => ({ timestamp: new Date(1_000 * index).toISOString(), ...record })),
+  ]));
+}
+
+test('codex: reopening restores attached, tool-returned and generated images from the native rollout', async (t) => {
+  const { AgentSessionRunner } = await import('../dist/lib/agent-session-runner.js');
+  const home = await seedHome(t);
+  const url = `data:image/png;base64,${PNG_1x1}`;
+  const image = { type: 'input_image', image_url: url, detail: 'original' };
+  const text = (text) => ({ type: 'input_text', text });
+  const response = (payload) => ({ type: 'response_item', payload });
+  const user = (content) => response({ type: 'message', role: 'user', content });
+  await seedCodexImages(home, [
+    user([text('<image name=[Image #1] path="/tmp/sample.png">'), image, text('</image>'), text('Check the screenshot')]),
+    { type: 'event_msg', payload: { type: 'user_message', message: 'Check the screenshot', images: [url] } },
+    response({ type: 'function_call', name: 'view_image', call_id: 'view', arguments: '{}' }),
+    response({ type: 'function_call_output', call_id: 'view', output: [image, text('Screenshot read')] }),
+    user([image]),
+    response({ type: 'custom_tool_call', name: 'exec', call_id: 'custom', input: 'show image' }),
+    response({ type: 'custom_tool_call_output', call_id: 'custom', output: [image] }),
+    response({ type: 'image_generation_call', id: 'generate', status: 'completed', result: PNG_1x1 }),
+    response({ type: 'message', role: 'assistant', content: [
+      { type: 'output_text', text: 'Here it is' }, image, { type: 'output_text', text: 'Done' },
+    ] }),
+  ]);
+  const store = new AgentSessionStore(home);
+  const runner = new AgentSessionRunner({ url: 'http://127.0.0.1:0', apiKey: 'k' }, {
+    getManagerId: () => 'm', store, sessionHomesDir: join(home.root, 'session-homes'), idleMinutes: 0,
+  });
+  t.after(() => runner.stopAll());
+  const history = await store.readHistory('codex', CODEX_ID);
+  assert.deepEqual(history.events.map(e => e.type), [
+    'user_prompt', 'image', 'tool_call', 'tool_update', 'image', 'image', 'tool_call', 'tool_update', 'image', 'image',
+    'text', 'image', 'text',
+  ]);
+  assert.equal(history.events[0].payload.text, 'Check the screenshot');
+  assert.equal((await store.listSessions('codex'))[0].title, 'Check the screenshot');
+  assert.deepEqual(history.events[3].payload.output, [text('Screenshot read')]);
+  assert.ok(!JSON.stringify(history.events).includes(PNG_1x1));
+  const images = history.events.filter(e => e.type === 'image');
+  assert.deepEqual(images.map(e => [e.turn_id, e.payload.from, e.payload.tool_call_id]), [
+    ['turn-1', 'user', undefined], ['turn-1', 'agent', 'view'], ['turn-2', 'user', undefined],
+    ['turn-2', 'agent', 'custom'], ['turn-2', 'agent', 'generate'], ['turn-2', 'agent', undefined],
+  ]);
+  const ref = images[0].payload.image_ref;
+  assert.match(ref, /^[a-f0-9]{32}$/);
+  assert.ok(images.every(e => e.payload.image_ref === ref && e.payload.mime_type === 'image/png'));
+  assert.equal((await runner.readStoredImage('codex', CODEX_ID, ref))?.base64, PNG_1x1);
+  assert.equal(await runner.readStoredImage('codex', 'another-session', ref), null);
+  assert.deepEqual((await store.readHistory('codex', CODEX_ID)).events, history.events);
+});
+
+test('codex: legacy image echoes reconstruct a prompt once, including at the end of a rollout', async (t) => {
+  const home = await seedHome(t);
+  const url = `data:image/png;base64,${PNG_1x1}`;
+  const echo = { type: 'event_msg', payload: { type: 'user_message', message: '', images: [url] } };
+  const model = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_image', file_id: 'opaque' }] } };
+  const finished = { type: 'event_msg', payload: { type: 'task_complete' } };
+  await seedCodexImages(home, [
+    echo, model, finished, model, echo, finished,
+    { type: 'response_item', payload: { type: 'image_generation_call', id: 'g1', result: PNG_1x1 } },
+    { type: 'event_msg', payload: { type: 'image_generation_end', call_id: 'g1', result: PNG_1x1 } },
+    echo,
+  ]);
+  const store = new AgentSessionStore(home);
+  store.setImageSink(async () => ({ ref: 'png', size: 76 }));
+  assert.equal((await store.listSessions('codex'))[0].title, '1 image(s)');
+  const { events } = await store.readHistory('codex', CODEX_ID);
+  assert.deepEqual(events.filter(e => e.type === 'image').map(e => [e.turn_id, e.payload.from]), [
+    ['turn-1', 'user'], ['turn-2', 'user'], ['turn-2', 'agent'], ['turn-3', 'user'],
+  ]);
+  const noSink = await new AgentSessionStore(home).readHistory('codex', CODEX_ID);
+  assert.deepEqual(noSink.events.map(e => e.type), ['turn', 'turn']);
+  assert.ok(!JSON.stringify(noSink.events).includes(PNG_1x1));
+});
+
+test('codex: rejects unusable image blocks without leaking them into tool output or losing later events', async (t) => {
+  const home = await seedHome(t);
+  const images = [
+    'https://example.invalid/image.png', 'data:image/png;base64,bm90IGFuIGltYWdl',
+    `data:image/svg+xml;base64,${PNG_1x1}`, `data:image/jpeg;base64,${PNG_1x1}`,
+    `data:image/png;base64,${PNG_1x1}!`, `data:image/png;base64,${'A'.repeat(4 * Math.ceil(8 * 1024 * 1024 / 3) + 4)}`,
+  ];
+  await seedCodexImages(home, [
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: 'Look' } },
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'bad', output: images.map(image_url => ({ type: 'input_image', image_url })) } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Done' } },
+  ]);
+  const store = new AgentSessionStore(home);
+  let stored = 0;
+  store.setImageSink(async () => { stored++; return { ref: 'unused', size: 1 }; });
+  const { events } = await store.readHistory('codex', CODEX_ID);
+  assert.equal(stored, 0);
+  assert.deepEqual(events.map(e => e.type), ['user_prompt', 'tool_update', 'text']);
+  assert.deepEqual(events[1].payload.output, []);
+  assert.equal(events[2].payload.text, 'Done');
+});
+
 async function seedImageSession(t, home) {
   const id = '11111111-2222-4333-8444-666666666666';
   const dir = join(home.claudeHome, 'projects', '-tmp-work-img');
